@@ -1,7 +1,6 @@
-from typing import List
 
 # A recursive fibonacci function
-def fib(n: str) -> List[int]:
+def fib(n: str) -> list[int]:
     if n == 0:
         return 0
     elif n == 1:
@@ -9,7 +8,7 @@ def fib(n: str) -> List[int]:
     else:
         return fib(n-1) + fib(n-2)
 
-def t_add(x, y) -> "List[int]":
+def t_add(x: str, y: str) -> int:
     r = x + y
     return r
 

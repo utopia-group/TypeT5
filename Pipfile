@@ -10,6 +10,7 @@ spot = {editable = true, path = "."}
 
 [dev-packages]
 ipykernel = "*"
+pytest = "*"
 
 [requires]
 python_version = "3.9"
