@@ -30,6 +30,8 @@ def annot_path(*segs: str) -> AnnotPath:
 def collect_annotations(
     code: cst.CSTNode,
 ) -> Tuple[list[AnnotPath], dict[AnnotPath, cst.Annotation]]:
+    """Collect all annotation paths and the corresponding type annotations (if any).
+    The order of the paths is the same as the order of the annotations in the code."""
     collector = AnnotCollector()
     code.visit(collector)
     return collector.annot_paths, collector.annotations
@@ -79,7 +81,7 @@ class AnnotCollector(cst.CSTVisitor):
         if annot is not None:
             self.annotations[path] = annot
 
-    def visit_FunctionDef(self, node: cst.FunctionDef):
+    def leave_FunctionDef(self, node: cst.FunctionDef):
         self.stack.append(SpecialNames.Return)
         self._record_annot(node.returns)
         self.stack.pop()

@@ -16,7 +16,7 @@ parsed = cst.parse_module(read_file("data/code/bad_code_1.py"))
 
 def test_annotation_collection():
     annot_paths, _ = collect_annotations(parsed)
-    annot_places: list[AnnotPath] = [
+    correct_annot_paths: list[AnnotPath] = [
         annot_path("fib", "n"),
         annot_path("fib", SpecialNames.Return),
         annot_path("t_add", "x"),
@@ -24,8 +24,9 @@ def test_annotation_collection():
         annot_path("t_add", SpecialNames.Return),
         annot_path("x"),
     ]
-    for p in annot_places:
+    for p in correct_annot_paths:
         assert p in annot_paths
+    assert annot_paths == correct_annot_paths
 
 
 code_1_patch = {
