@@ -10,11 +10,11 @@ def fib(n):
         return fib(n-1) + fib(n-2)
 
 def foo(bar):
-    return bar
+    return fib(bar)
 
 
 def int_add(a, b):
-    return a + b
+    return a + b + "c"
 
 def int_tripple_add(a, b, c):
     return a + b + c

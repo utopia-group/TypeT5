@@ -49,11 +49,13 @@ class TypeInfEnv:
 
     def step(self, action: TypeInfAction, check_any=False) -> None:
         assert action.path in self.state.to_annot, f"Invalid action: path {action.path} already annotated."
-        mod = apply_annotations(self.state.module, {action.path: cst.Annotation(action.type)})
+        type = action.type
+        mod = apply_annotations(self.state.module, {action.path: cst.Annotation(type)})
         write_file(self.src_file, mod.code)
         ne = self.checker.recheck_files(self.src_file).num_errors
         if ne > self.state.num_errors:
-            mod = apply_annotations(self.state.module, {action.path: cst.Annotation(cst.Name("Any"))})
+            type = cst.Name("Any")
+            mod = apply_annotations(self.state.module, {action.path: cst.Annotation(type)})
             write_file(self.src_file, mod.code)
             if check_any:
                 check_r = self.checker.recheck_files(self.src_file)
@@ -61,6 +63,6 @@ class TypeInfEnv:
 action: {action}\n\
 mypy output: {check_r.output_str}\n---------code---------\n {mod.code}"
         self.state.to_annot.remove(action.path)
+        self.state.annotated[action.path] = type
         self.state.module = mod
-        self.state.annotated[action.path] = action.type
     

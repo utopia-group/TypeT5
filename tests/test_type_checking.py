@@ -1,6 +1,7 @@
 from pathlib import Path
 from spot.utils import cst, read_file, write_file, SpecialNames
 import os
+import shutil
 from spot.type_checking import (
     AnnotPath,
     annot_path,
@@ -8,6 +9,8 @@ from spot.type_checking import (
     apply_annotations,
     mypy_checker,
 )
+from spot.type_inference import *
+
 
 os.chdir(Path(__file__).parent.parent)
 
@@ -62,3 +65,28 @@ def test_mypy_checker_2():
             apply_annotations(parsed, code_1_patch).code,
         )
         assert checker.recheck_files("bad_code_1.py").num_errors == 0
+
+
+def test_type_env():
+    # remove `data/temp` if it exists
+    inference_dir = "data/code_output/inference"
+    if os.path.exists(inference_dir):
+        shutil.rmtree(inference_dir)
+    if not os.path.exists(inference_dir):
+        os.mkdir(inference_dir)
+    write_file(f"{inference_dir}/env_code_1.py", read_file("data/code/env_code_1.py"))
+
+    with mypy_checker(".venv/bin/dmypy", inference_dir) as checker:
+        env = TypeInfEnv(checker, f"{inference_dir}/env_code_1.py")
+        env.reset()
+        while len(env.state.to_annot) > 0:
+            env.step(TypeInfAction(env.state.to_annot[0], cst.Name("int")))
+
+        print(env.state)
+        assert env.state.num_errors == 0
+        assert len(env.state.annotated) == 11
+        for k, v in env.state.annotated.items():
+            if k == annot_path("int_add", "b"):
+                assert v.deep_equals(cst.Name("Any")), f"{k}:{v}"
+            else:
+                assert v.deep_equals(cst.Name("int")), f"{k}:{v}"
