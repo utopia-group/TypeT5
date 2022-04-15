@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from distutils.log import error
+from logging import warn
 from posixpath import dirname, realpath
 import re
 from typing import Iterable
@@ -7,22 +8,34 @@ from .utils import *
 import subprocess
 
 
-@dataclass(frozen=True)
+# This is supposed to be immutable, but setting `frozen=True` would cause notebook auto-reload
+# to fail
+@dataclass(order=True, unsafe_hash=True)
 class AnnotPath:
     """The unique path of a type annoation."""
 
     value: Tuple[str, ...]
 
+    def __repr__(self):
+        return f"AnnotPath('{'.'.join(self.value)}')"
+
+    def __str__(self):
+        return f"'{'.'.join(self.value)}'"
+
+
 def annot_path(*segs: str) -> AnnotPath:
     return AnnotPath(tuple(segs))
 
-def collect_annotations(code: cst.CSTNode) -> Dict[AnnotPath, Optional[cst.Annotation]]:
+
+def collect_annotations(
+    code: cst.CSTNode,
+) -> Tuple[list[AnnotPath], dict[AnnotPath, cst.Annotation]]:
     collector = AnnotCollector()
     code.visit(collector)
-    return collector.annotations
+    return collector.annot_paths, collector.annotations
 
 
-def apply_annotations(code: cst.CSTNode, annots: Dict[AnnotPath, cst.Annotation]):
+def apply_annotations(code: cst.CSTNode, annots: dict[AnnotPath, cst.Annotation]):
     applier = AnnotApplier(annots)
     return code.visit(applier)
 
@@ -32,7 +45,8 @@ class AnnotCollector(cst.CSTVisitor):
         # stack for storing the canonical name of the current function
         self.stack: List[str] = []
         # store the type annotations
-        self.annotations: Dict[AnnotPath, Optional[cst.Annotation]] = {}
+        self.annot_paths: List[AnnotPath] = []
+        self.annotations: Dict[AnnotPath, cst.Annotation] = {}
 
     def on_visit(self, node):
         if (
@@ -59,16 +73,22 @@ class AnnotCollector(cst.CSTVisitor):
     def _current_path(self):
         return AnnotPath(tuple(self.stack))
 
+    def _record_annot(self, annot: Union[cst.Annotation, None]):
+        path = self._current_path()
+        self.annot_paths.append(path)
+        if annot is not None:
+            self.annotations[path] = annot
+
     def visit_FunctionDef(self, node: cst.FunctionDef):
         self.stack.append(SpecialNames.Return)
-        self.annotations[self._current_path()] = node.returns
+        self._record_annot(node.returns)
         self.stack.pop()
 
     def visit_Param(self, node: cst.Param):
-        self.annotations[self._current_path()] = node.annotation
+        self._record_annot(node.annotation)
 
-    def visit_AnnAssign(self, ndoe: cst.AnnAssign):
-        self.annotations[self._current_path()] = ndoe.annotation
+    def visit_AnnAssign(self, node: cst.AnnAssign):
+        self._record_annot(node.annotation)
 
 
 class AnnotApplier(cst.CSTTransformer):
@@ -121,41 +141,67 @@ class AnnotApplier(cst.CSTTransformer):
         return updated if patch is None else updated.with_changes(annotation=patch)
 
 
+@dataclass
+class MypyResult:
+    num_errors: int  # total number of errors in all files
+    num_error_dict: Dict[str, int]  # records the number of errors in each file
+    output_str: str
+
+
 class MypyChecker:
     """Run Mypy daemon to (repeatedly) type check given files"""
 
     def __init__(self, dmypy_path, code_dir) -> None:
         self.code_dir = realpath(code_dir)
         self.dmypy_path = realpath(dmypy_path)
-        self.mypy_version = subprocess.run(
-            ["python", self.dmypy_path, "-V"],
-            capture_output=True,
-            text=True,
+        # subprocess.run(
+        #     ["python", self.dmypy_path, "run", "--", "."],
+        #     capture_output=True,
+        #     text=True,
+        #     cwd=self.code_dir,
+        # )
+        subprocess.run(
+            [
+                "python",
+                self.dmypy_path,
+                "start",
+                "--",
+                "--follow-imports=skip",
+            ],
             cwd=self.code_dir,
-        ).stdout
+        )
+        subprocess.run(
+            ["python", self.dmypy_path, "check", self.code_dir],
+            cwd=self.code_dir,
+            capture_output=True,
+        )
 
-    def stop_daemon(self):
+    def close(self):
         subprocess.run(
             ["python", self.dmypy_path, "stop"],
             cwd=self.code_dir,
         )
 
-    def __del__(self):
-        self.stop_daemon()
+    def check_code_dir(self) -> MypyResult:
+        return self._run_mypy(["python", self.dmypy_path, "check", self.code_dir])
 
-    def check_file(self, fpath):
-        print("chekcing!")
-        cmd = ["python", self.dmypy_path, "run", "--", fpath]
+
+    def recheck_files(self, *updated_files: str) -> MypyResult:
+        return self._run_mypy(["python", self.dmypy_path, "recheck", "--update", *updated_files])
+        
+
+    def _run_mypy(self, cmd: list[str]) -> MypyResult:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             cwd=self.code_dir,
         )
-        # retcode = result.returncode
         lines = result.stdout.splitlines()
-        assert len(lines) > 0, f"mypy failed. Error: {result.stderr}"
-        num_error_dict = {}
+        assert (
+            len(lines) > 0
+        ), f"mypy failed. Command: `{' '.join(cmd)}`\nError: {result.stderr}"
+        num_error_dict: dict[str, int] = {}
         for l in lines:
             m = re.match(r"(.*\.py):\d+: error: .+", l)
             if m is not None:
@@ -175,7 +221,15 @@ class MypyChecker:
 
 
 @dataclass
-class MypyResult:
-    num_errors: int  # total number of errors in all files
-    num_error_dict: Dict[str, int]  # records the number of errors in each file
-    output_str: str
+class mypy_checker:
+    """Supports the `with` syntax for MypyChecker."""
+
+    dmypy_path: str
+    code_dir: str
+
+    def __enter__(self):
+        self.checker = MypyChecker(self.dmypy_path, self.code_dir)
+        return self.checker
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.checker.close()
