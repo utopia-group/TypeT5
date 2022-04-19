@@ -169,6 +169,11 @@ class MypyChecker:
                 "start",
                 "--",
                 "--follow-imports=skip",
+                "--namespace-packages",
+                "--allow-untyped-globals",
+                "--explicit-package-bases",
+                "--ignore-missing-imports",  # a hacky workaround
+                "--allow-redefinition",
             ],
             cwd=self.code_dir,
         )

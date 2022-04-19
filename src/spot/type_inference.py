@@ -59,9 +59,12 @@ class TypeInfEnv:
             write_file(self.src_file, mod.code)
             if check_any:
                 check_r = self.checker.recheck_files(self.src_file)
-                assert check_r.num_errors == self.state.num_errors, f"Adding Any should not trigger more type errors.\n\
-action: {action}\n\
-mypy output: {check_r.output_str}\n---------code---------\n {mod.code}"
+                assert check_r.num_errors == self.state.num_errors, (
+                    "Adding Any should not trigger more type errors.\n"
+                    f"action: {action}\n"
+                    f"mypy output: {check_r.output_str}\n"
+                    f"---------code---------\n {mod.code}\n"
+                )
         self.state.to_annot.remove(action.path)
         self.state.annotated[action.path] = type
         self.state.module = mod
