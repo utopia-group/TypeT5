@@ -1,3 +1,4 @@
+from typing import Any
 
 # A recursive fibonacci function
 def fib(n: str) -> list[int]:
@@ -13,3 +14,4 @@ def t_add(x: str, y: str) -> int:
     return r
 
 x: int = fib(3)
+bad_y: str = 1

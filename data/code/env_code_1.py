@@ -1,6 +1,5 @@
-from typing import Any
+# Env example 1: no existing annotations
 
-# A recursive fibonacci function
 def fib(n):
     if n == 0:
         return 0

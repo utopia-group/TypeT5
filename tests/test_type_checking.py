@@ -8,6 +8,7 @@ from spot.type_checking import (
     collect_annotations,
     apply_annotations,
     mypy_checker,
+    AnyAnnot,
 )
 from spot.type_inference import *
 
@@ -26,6 +27,7 @@ def test_annotation_collection():
         annot_path("t_add", "y"),
         annot_path("t_add", SpecialNames.Return),
         annot_path("x"),
+        annot_path("bad_y"),
     ]
     for p in correct_annot_paths:
         assert p in annot_paths
@@ -36,6 +38,7 @@ code_1_patch = {
     annot_path("fib", "n"): cst.Annotation(cst.Name("int")),
     annot_path("fib", SpecialNames.Return): cst.Annotation(cst.Name("int")),
     annot_path("t_add", SpecialNames.Return): cst.Annotation(cst.Name("str")),
+    annot_path("bad_y"): AnyAnnot,
 }
 
 
@@ -45,26 +48,28 @@ def test_annotation_applying():
     _, new_annots = collect_annotations(new_parsed)
 
     for k, v in code_1_patch.items():
-        assert old_annots[k].annotation != new_annots[k].annotation
-        assert new_annots[k].annotation == v.annotation
+        assert old_annots[k].annotation.value != new_annots[k].annotation.value
+        assert new_annots[k].annotation.value == v.annotation.value
 
 
 def test_mypy_checker_1():
-    with mypy_checker(".venv/bin/dmypy", "data/code") as checker:
+    with mypy_checker("data/code") as checker:
         check_r = checker.check_code_dir()
         assert "bad_code_1.py" in check_r.num_error_dict
         assert "bad_code_2.py" in check_r.num_error_dict
 
 
 def test_mypy_checker_2():
-    with mypy_checker(".venv/bin/dmypy", "data/code_output") as checker:
+    with mypy_checker("data/code_output") as checker:
         write_file("data/code_output/bad_code_1.py", parsed.code)
         assert checker.recheck_files("bad_code_1.py").num_errors > 0
+        new_code = apply_annotations(parsed, code_1_patch).code
         write_file(
             "data/code_output/bad_code_1.py",
-            apply_annotations(parsed, code_1_patch).code,
+            new_code,
         )
-        assert checker.recheck_files("bad_code_1.py").num_errors == 0
+        c_r = checker.recheck_files("bad_code_1.py")
+        assert c_r.num_errors == 0, f"mypy_output: {c_r.output_str}\ncode: {new_code}"
 
 
 def test_type_env():
@@ -75,18 +80,28 @@ def test_type_env():
     if not os.path.exists(inference_dir):
         os.mkdir(inference_dir)
     write_file(f"{inference_dir}/env_code_1.py", read_file("data/code/env_code_1.py"))
+    write_file(f"{inference_dir}/env_code_2.py", read_file("data/code/env_code_2.py"))
 
-    with mypy_checker(".venv/bin/dmypy", inference_dir) as checker:
-        env = TypeInfEnv(checker, f"{inference_dir}/env_code_1.py")
-        env.reset()
-        while len(env.state.to_annot) > 0:
-            env.step(TypeInfAction(env.state.to_annot[0], cst.Name("int")))
+    with mypy_checker(inference_dir) as checker:
+        with type_inf_env(checker, f"{inference_dir}/env_code_1.py", SelectAnnotations.select_all_paths) as env:
+            while len(env.state.to_annot) > 0:
+                env.step(TypeInfAction(env.state.to_annot[0], cst.Name("int")))
 
-        print(env.state)
-        assert env.state.num_errors == 0
-        assert len(env.state.annotated) == 11
-        for k, v in env.state.annotated.items():
-            if k == annot_path("int_add", "b"):
-                assert v.deep_equals(cst.Name("Any")), f"{k}:{v}"
-            else:
-                assert v.deep_equals(cst.Name("int")), f"{k}:{v}"
+            assert env.state.num_errors == 0
+            assert len(env.state.annotated) == 11
+            for k, v in env.state.annotated.items():
+                if k == annot_path("int_add", "b"):
+                    assert v.deep_equals(cst.Name("Any")), f"{k}:{v}"
+                else:
+                    assert v.deep_equals(cst.Name("int")), f"{k}:{v}"
+
+        _, annots = collect_annotations(cst.parse_module(read_file(f"{inference_dir}/env_code_2.py")))
+        with type_inf_env(checker, f"{inference_dir}/env_code_2.py", SelectAnnotations.select_annotated) as env:
+            assert len(env.state.annotated) == 0
+            assert len(env.state.to_annot) == len(annots) == 8 # this should equal to the number of manual annotations
+            while len(env.state.to_annot) > 0:
+                path = env.state.to_annot[0]
+                env.step(TypeInfAction(path, annots[path].annotation))
+            
+            assert env.state.num_errors == 0
+            assert len(env.state.annotated) == 8
