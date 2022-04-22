@@ -9,6 +9,8 @@ mypy = "*"
 spot = {editable = true, path = "."}
 tqdm = "*"
 types-all = "*"
+dateparser = "*"
+pyrsistent = "*"
 
 [dev-packages]
 ipykernel = "*"

@@ -7,6 +7,8 @@ from posixpath import dirname, realpath
 import re
 from typing import *
 from decorator import contextmanager
+from pyrsistent import plist
+from pyrsistent.typing import PList
 
 from libcst import SimpleWhitespace
 from .utils import *
@@ -19,17 +21,23 @@ import subprocess
 class AnnotPath:
     """The unique path of a type annoation."""
 
-    value: Tuple[str, ...]
+    value: PList[str]
 
     def __repr__(self):
-        return f"AnnotPath('{'.'.join(self.value)}')"
+        return f"AnnotPath({self.__str__()})"
 
     def __str__(self):
-        return f"'{'.'.join(self.value)}'"
+        return f"'{'.'.join(self.value.reverse())}'"
+
+    def append(self, seg: str) -> "AnnotPath":
+        return AnnotPath(self.value.cons(seg))
+
+    def pop(self) -> "AnnotPath":
+        return AnnotPath(self.value.rest)
 
 
 def annot_path(*segs: str) -> AnnotPath:
-    return AnnotPath(tuple(segs))
+    return AnnotPath(plist(segs, reverse=True))
 
 
 def collect_annotations(
@@ -59,8 +67,7 @@ def add_imports(
 
 class AnnotCollector(cst.CSTVisitor):
     def __init__(self):
-        # stack for storing the canonical name of the current function
-        self.stack: List[str] = []
+        self.path: AnnotPath = annot_path()
         # store the type annotations
         self.annot_paths: List[AnnotPath] = []
         self.annotations: Dict[AnnotPath, cst.Annotation] = {}
@@ -68,23 +75,18 @@ class AnnotCollector(cst.CSTVisitor):
     def on_visit(self, node):
         match node:
             case cst.ClassDef() | cst.FunctionDef():
-                self.stack.append(node.name.value)
+                self.path = self.path.append(node.name.value)
         return super().on_visit(node)
 
     def on_leave(self, node):
         r = super().on_leave(node)
         match node:
             case cst.ClassDef() | cst.FunctionDef():
-                self.stack.pop()
+                self.path = self.path.pop()
         return r
 
-    def _current_path(self):
-        return AnnotPath(tuple(self.stack))
-
     def _record_annot(self, name: str, annot: cst.Annotation | None):
-        self.stack.append(name)
-        path = self._current_path()
-        self.stack.pop()
+        path = self.path.append(name)
         self.annot_paths.append(path)
         if annot is not None:
             self.annotations[path] = annot
@@ -107,21 +109,20 @@ class AnnotCollector(cst.CSTVisitor):
 class AnnotApplier(cst.CSTTransformer):
     def __init__(self, annots: Dict[AnnotPath, cst.Annotation]):
         self.annots = annots
-        # stack for storing the canonical name of the current function
-        self.stack: List[str] = []
-        # store the target prefixes
-        self.prefixes: Set[Tuple[str, ...]] = set()
-        for path in annots.keys():
-            self.prefixes.update(path.value[0:i] for i in range(len(path.value) + 1))
+        self.path: AnnotPath = annot_path()
 
-    def _current_path(self):
-        return AnnotPath(tuple(self.stack))
+        # store the target prefixes
+        self.prefixes: Set[AnnotPath] = {annot_path()}
+        for path in annots.keys():
+            while bool(path.value):
+                self.prefixes.add(path)
+                path = path.pop()
 
     def on_visit(self, node):
         match node:
             case cst.ClassDef() | cst.FunctionDef():
-                self.stack.append(node.name.value)
-        if tuple(self.stack) not in self.prefixes:
+                self.path = self.path.append(node.name.value)
+        if self.path not in self.prefixes:
             return False
         return super().on_visit(node)
 
@@ -129,14 +130,11 @@ class AnnotApplier(cst.CSTTransformer):
         r = super().on_leave(node, updated)
         match node:
             case cst.ClassDef() | cst.FunctionDef():
-                self.stack.pop()
+                self.path = self.path.pop()
         return r
 
     def _get_annot(self, name: str) -> AnnotPath:
-        self.stack.append(name)
-        path = self._current_path()
-        self.stack.pop()
-        return path
+        return self.path.append(name)
 
     def leave_FunctionDef(
         self, node: cst.FunctionDef, updated: cst.FunctionDef
