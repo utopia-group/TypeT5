@@ -11,6 +11,8 @@ tqdm = "*"
 types-all = "*"
 dateparser = "*"
 pyrsistent = "*"
+plotly = "*"
+pandas = "*"
 
 [dev-packages]
 ipykernel = "*"

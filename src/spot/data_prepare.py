@@ -1,12 +1,13 @@
 import subprocess
 from types import NoneType
 from dataclasses import dataclass
-from spot.type_checking import collect_annotations
+from spot.type_env import AnnotPath, PythonType, collect_annotations, parse_type_expr
 from spot.utils import *
 from typing import *
 from datetime import datetime
 import dateparser
 import warnings
+import logging
 
 warnings.filterwarnings(
     "ignore",
@@ -65,15 +66,20 @@ class GitRepo:
         self.lines_of_code = n_lines
         return n_lines
 
-    def count_annotations(self, repos_dir) -> None:
+    def collect_annotations(self, repos_dir, silent=True):
         n_paths, n_annots = 0, 0
+        file_to_annots = dict[Path, dict[AnnotPath, PythonType | None]]()
         for src in self.repo_dir(repos_dir).glob("**/*.py"):
+            src: Path
+            rpath = src.relative_to(self.repo_dir(repos_dir))
             m = cst.parse_module(read_file(src))
             paths, annots = collect_annotations(m)
             n_paths += len(paths)
             n_annots += len(annots)
+            file_to_annots[rpath] = {k: parse_type_expr(m, v.annotation, silent) for k, v in annots.items()}
         self.n_type_annots = n_annots
         self.n_type_places = n_paths
+        return file_to_annots
 
     @staticmethod
     def from_json(json):

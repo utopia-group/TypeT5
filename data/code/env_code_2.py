@@ -16,9 +16,14 @@ def foo(bar: int):
 
 class Bar:
     z: str = "hello"
+    w: str
     def __init__(self, x: int):
         self.x: int = x
         self.y: Optional[int] = None
+        self.reset(self.z)
 
+    def reset(self, w0):
+      self.w = w0
+        
     def foo(self, z: str) -> int:
         return self.x + len(z)

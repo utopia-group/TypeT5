@@ -2,15 +2,17 @@ from pathlib import Path
 from spot.utils import cst, read_file, write_file, SpecialNames
 import os
 import shutil
-from spot.type_checking import (
+from spot.type_env import (
     AnnotPath,
     annot_path,
     collect_annotations,
     apply_annotations,
     mypy_checker,
     AnyAnnot,
+    type_inf_env,
+    TypeInfAction,
+    SelectAnnotations,
 )
-from spot.type_inference import *
 
 
 os.chdir(Path(__file__).parent.parent)
