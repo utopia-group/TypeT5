@@ -11,7 +11,6 @@ def fib(n):
 def foo(bar):
     return fib(bar)
 
-
 def int_add(a, b):
     return a + b + "c"
 

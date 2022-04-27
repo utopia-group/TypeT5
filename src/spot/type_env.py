@@ -12,7 +12,7 @@ from numpy import isin
 from pyrsistent import plist
 from pyrsistent.typing import PList
 import time
-import tqdm
+from tqdm import tqdm
 import ast
 
 from libcst import SimpleWhitespace
@@ -424,12 +424,16 @@ def type_inf_env(
     env.restore_file()
 
 
-def _test_inference_performance(src_root, src_files):
-    dmypy_path = proj_root() / ".venv/bin/dmypy"
-    with mypy_checker(dmypy_path, src_root) as checker:
+def test_inference_performance(src_root, src_files=None, silent=True):
+    if src_files is None:
+        src_files = list(src_root.glob("**/*.py"))
+
+    iter_f = lambda x: x if silent else tqdm
+
+    with mypy_checker(src_root) as checker:
         n_checks = 0
         t_s = time.time()
-        for f in tqdm.tqdm(src_files):
+        for f in iter_f(src_files):
             with type_inf_env(checker, f) as env:
                 if len(env.to_annot()) == 0:
                     continue  # skip files with no annotations
@@ -437,10 +441,8 @@ def _test_inference_performance(src_root, src_files):
                 while len(env.state.to_annot) > 0:
                     n_checks += 1
                     env.step(TypeInfAction(env.state.to_annot[0], cst.Name("int")))
-
         t_e = time.time()
-        print(f"{n_checks} checks in {t_e - t_s} seconds.")
-        print(f"{n_checks / (t_e - t_s)} checks/second.")
+        return {"n_checks": n_checks, "time": t_e-t_s}
 
 
 @dataclass(unsafe_hash=True)
