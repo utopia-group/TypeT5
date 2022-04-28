@@ -14,6 +14,8 @@ pyrsistent = "*"
 plotly = "*"
 pandas = "*"
 ipywidgets = "*"
+datasets = "*"
+transformers = "*"
 
 [dev-packages]
 ipykernel = "*"
