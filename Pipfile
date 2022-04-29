@@ -16,6 +16,7 @@ pandas = "*"
 ipywidgets = "*"
 datasets = "*"
 transformers = "*"
+wandb = "*"
 
 [dev-packages]
 ipykernel = "*"

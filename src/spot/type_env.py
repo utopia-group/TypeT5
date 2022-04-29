@@ -58,7 +58,10 @@ def apply_annotations(
     code: cst.Module,
     annots: dict[AnnotPath, cst.Annotation],
 ):
-    return code.visit(AnnotApplier(annots))
+    try:
+        return code.visit(AnnotApplier(annots))
+    except Exception as e:
+        raise RuntimeError(f"Failed to apply annotations for the following code:\n {code.code}") from e
 
 
 def add_imports(
@@ -80,12 +83,14 @@ class AnnotCollector(cst.CSTVisitor):
         match node:
             case cst.ClassDef() | cst.FunctionDef():
                 self.path = self.path.append(node.name.value)
+            case cst.Lambda():
+                self.path = self.path.append(SpecialNames.Lambda)
         return super().on_visit(node)
 
     def on_leave(self, node):
         r = super().on_leave(node)
         match node:
-            case cst.ClassDef() | cst.FunctionDef():
+            case cst.ClassDef() | cst.FunctionDef() | cst.Lambda():
                 self.path = self.path.pop()
         return r
 
@@ -126,6 +131,8 @@ class AnnotApplier(cst.CSTTransformer):
         match node:
             case cst.ClassDef() | cst.FunctionDef():
                 self.path = self.path.append(node.name.value)
+            case cst.Lambda():
+                self.path = self.path.append(SpecialNames.Lambda)
         if self.path not in self.prefixes:
             return False
         return super().on_visit(node)
@@ -133,7 +140,7 @@ class AnnotApplier(cst.CSTTransformer):
     def on_leave(self, node, updated):
         r = super().on_leave(node, updated)
         match node:
-            case cst.ClassDef() | cst.FunctionDef():
+            case cst.ClassDef() | cst.FunctionDef() | cst.Lambda():
                 self.path = self.path.pop()
         return r
 

@@ -1,6 +1,8 @@
 *.egg-info
 code_output
 temp
+wandb
+checkpoints
 
 build/
 __pycache__
