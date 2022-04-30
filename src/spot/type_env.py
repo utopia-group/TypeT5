@@ -61,7 +61,9 @@ def apply_annotations(
     try:
         return code.visit(AnnotApplier(annots))
     except Exception as e:
-        raise RuntimeError(f"Failed to apply annotations for the following code:\n {code.code}") from e
+        raise RuntimeError(
+            f"Failed to apply annotations for the following code:\n {code.code}"
+        ) from e
 
 
 def add_imports(
@@ -256,9 +258,25 @@ class MypyChecker:
         return self._run_mypy(["python", self.dmypy_path, "check", self.code_dir])
 
     def recheck_files(self, *updated_files: str) -> MypyResult:
-        return self._run_mypy(
-            ["python", self.dmypy_path, "recheck", "--update", *updated_files]
+        out = self._run_mypy(
+            ["python", self.dmypy_path, "recheck",
+            "--perf-stats-file", "mypy_perf.json",
+             "--update", *updated_files]
         )
+        subprocess.run(
+            ['cat', 'mypy_perf.json'],
+            cwd=self.code_dir,
+        )
+        subprocess.run(
+            ['python', self.dmypy_path, 'status', '--fswatcher-dump-file', "mypy_fswatcher.json"],
+            cwd=self.code_dir,
+        )
+        subprocess.run(
+            ['cat', 'mypy_fswatcher.json'],
+            cwd=self.code_dir,
+        )
+
+        return out
 
     def _run_mypy(self, cmd: list[str]) -> MypyResult:
         result = subprocess.run(
@@ -292,10 +310,12 @@ class MypyChecker:
 
 @contextmanager
 def mypy_checker(code_dir: Path, dmypy_path: Path = None):
-    if dmypy_path is None:
-        dmypy_path = proj_root() / ".venv/bin/dmypy"
-    yield (checker := MypyChecker(dmypy_path, code_dir))
-    checker.close()
+    try:
+        if dmypy_path is None:
+            dmypy_path = proj_root() / ".venv/bin/dmypy"
+        yield (checker := MypyChecker(dmypy_path, code_dir))
+    finally:
+        checker.close()
 
 
 AnyType = cst.Name("Any")
@@ -328,7 +348,7 @@ class SelectAnnotations:
     @staticmethod
     def select_annotated(paths, annotated) -> list[AnnotPath]:
         "Select all places with an existing type annotation"
-        return list(annotated.keys())
+        return [p for p in paths if p in annotated]
 
     @staticmethod
     def select_all_paths(paths, annotated) -> list[AnnotPath]:
@@ -343,6 +363,10 @@ class TypeInfAction:
     path: AnnotPath
     type: TypeExpr
 
+    def __repr__(self):
+        type_ex = cst.Module([]).code_for_node(self.type)
+        return f"TypeInfAction({str(self.path)} : {type_ex})"
+
 
 class TypeInfEnv:
     """An environment for sequentially annotating a python source file."""
@@ -352,10 +376,14 @@ class TypeInfEnv:
         checker: MypyChecker,
         src_file,
         select_annotations: Callable,
+        check_any=False,
+        print_mypy_output=False,
     ):
         self.checker = checker
         self.src_file = realpath(src_file)
         self.original_src = read_file(src_file)
+        self.check_any = check_any
+        self.print_mypy_output = print_mypy_output
         if ImportsAdder.SpecialComment in self.original_src:
             raise RuntimeError(
                 f"The file {src_file} has already been modified by SPOT since it contains the special comment."
@@ -367,7 +395,7 @@ class TypeInfEnv:
         """Restore the python source file to its original state."""
         write_file(self.src_file, self.original_src)
 
-    def to_annot(self):
+    def init_to_annot(self):
         module = cst.parse_module(self.original_src)
         paths, annots = collect_annotations(module)
         to_annot: list[AnnotPath] = self.select_annotations(paths, annots)
@@ -392,7 +420,7 @@ class TypeInfEnv:
         num_errors = self.checker.recheck_files(self.src_file).num_errors
         self.state = TypeInfState(module, to_annot, annotated, num_errors)
 
-    def step(self, action: TypeInfAction, check_any=False) -> None:
+    def step(self, action: TypeInfAction) -> bool:
         state = self.state
         assert state is not None, "Did you forget to call reset()?"
         assert (
@@ -400,23 +428,32 @@ class TypeInfEnv:
         ), f"Invalid action: path {action.path} not in `to_annot`."
         type = action.type
         mod = apply_annotations(state.module, {action.path: cst.Annotation(type)})
+        # time.sleep(1.0)
         write_file(self.src_file, mod.code)
-        ne = self.checker.recheck_files(self.src_file).num_errors
-        if ne > state.num_errors:
+        out = self.checker.recheck_files(self.src_file)
+        if self.print_mypy_output:
+            print("action: ", action)
+            print("mypy output:", out.output_str)
+
+        rejected = out.num_errors > state.num_errors
+        if rejected:
             type = cst.Name("Any")
-            mod = apply_annotations(state.module, {action.path: cst.Annotation(type)})
+            mod = apply_annotations(mod, {action.path: cst.Annotation(type)})
+            # time.sleep(1.0)
             write_file(self.src_file, mod.code)
-            if check_any:
-                check_r = self.checker.recheck_files(self.src_file)
-                assert check_r.num_errors == state.num_errors, (
+            if self.check_any:
+                out = self.checker.recheck_files(self.src_file)
+                assert out.num_errors == state.num_errors, (
                     "Adding Any should not trigger more type errors.\n"
+                    f"original errors: {state.num_errors}, new errors: {out.num_errors}\n"
                     f"action: {action}\n"
-                    f"mypy output: {check_r.output_str}\n"
-                    f"---------code---------\n {mod.code}\n"
+                    f"mypy output: {out.output_str}\n"
+                    f"---------Code---------\n {mod.code}\n"
                 )
         state.to_annot.remove(action.path)
         state.annotated[action.path] = type
         state.module = mod
+        return rejected
 
 
 @contextmanager
@@ -424,11 +461,22 @@ def type_inf_env(
     checker: MypyChecker,
     src_file,
     select_annotations: Callable = SelectAnnotations.select_annotated,
+    check_any=False,
+    print_mypy_output=False,
 ):
-    env = TypeInfEnv(checker, src_file, select_annotations)
-    env.reset()
-    yield env
-    env.restore_file()
+    env = TypeInfEnv(
+        checker,
+        src_file,
+        select_annotations,
+        check_any=check_any,
+        print_mypy_output=print_mypy_output,
+    )
+    try:
+
+        env.reset()
+        yield env
+    finally:
+        env.restore_file()
 
 
 def test_inference_performance(src_root, src_files=None, silent=True):
@@ -442,14 +490,14 @@ def test_inference_performance(src_root, src_files=None, silent=True):
         t_s = time.time()
         for f in iter_f(src_files):
             with type_inf_env(checker, f) as env:
-                if len(env.to_annot()) == 0:
+                if len(env.init_to_annot()) == 0:
                     continue  # skip files with no annotations
                 n_checks += 1
                 while len(env.state.to_annot) > 0:
                     n_checks += 1
                     env.step(TypeInfAction(env.state.to_annot[0], cst.Name("int")))
         t_e = time.time()
-        return {"n_checks": n_checks, "time": t_e-t_s}
+        return {"n_checks": n_checks, "time": t_e - t_s}
 
 
 @dataclass(unsafe_hash=True)

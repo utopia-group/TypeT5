@@ -128,7 +128,7 @@ def mask_type_annots(code: str):
     types: list[PythonType] = []
     replaces = dict()
     label_id = 0
-    mask_annot = cst.Annotation(cst.Name(f"SPOT_TYPE_MASK"))
+    mask_annot = cst.Annotation(cst.Name("SPOT_TYPE_MASK"))
     for p in paths:
         if p in truths:
             ty = parse_type_expr(m, truths[p].annotation, silent=True)
