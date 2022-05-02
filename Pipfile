@@ -4,7 +4,6 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-libcst = "*"
 mypy = "*"
 spot = {editable = true, path = "."}
 tqdm = "*"
@@ -17,6 +16,7 @@ ipywidgets = "*"
 datasets = "*"
 transformers = "*"
 wandb = "*"
+libcst = "*"
 
 [dev-packages]
 ipykernel = "*"

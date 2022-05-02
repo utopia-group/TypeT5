@@ -1,6 +1,5 @@
 import shutil
 import subprocess
-from types import NoneType
 from dataclasses import dataclass
 from transformers import RobertaTokenizer
 from spot.type_env import (
@@ -9,6 +8,7 @@ from spot.type_env import (
     apply_annotations,
     collect_annotations,
     parse_type_expr,
+    parse_type_from_ast,
 )
 from spot.utils import *
 from typing import *
@@ -268,3 +268,52 @@ def load_or_process_datasets(
         tk_datasets[name] = d
         d.save_to_disk(str(datasets_dir / name))
     return tk_datasets, repos_split
+
+
+def output_ids_as_seqs(output_ids: list[int], tokenizer: RobertaTokenizer):
+    """Divide the model output as a sequence of tokens, filtering out padding tokens."""
+    seq_id = 0
+    buff = list[int]()
+    seqs = list[list[int]]()
+    mark = tokenizer.additional_special_tokens_ids[99 - seq_id]
+
+    for tk in output_ids:
+        if tk <= 0:
+            continue  # pad or masked token
+        if tk != mark:
+            buff.append(tk)
+        else:
+            seqs.append(buff)
+            buff = []
+            seq_id += 1
+            mark = tokenizer.additional_special_tokens_ids[99 - seq_id]
+    seqs.append(buff)
+    return seqs[1:]
+
+
+def output_ids_as_types(output_ids: list[int], tokenizer: RobertaTokenizer):
+    """Try to parse model outputs as a list of Python types."""
+    seqs = output_ids_as_seqs(output_ids, tokenizer)
+    types = list[PythonType]()
+    for seq in seqs:
+        try:
+            ex_str = tokenizer.decode(seq, skip_special_tokens=True)
+        except Exception as e:
+            raise RuntimeError(f"Failed to decode sequence: {seq}") from e
+        try:
+            tree = ast.parse(ex_str, mode="eval").body
+            ty = parse_type_from_ast(tree)
+        except:
+            ty = PythonType.Any()
+        types.append(ty)
+    return types
+
+
+class ModuleRemapUnpickler(pickle.Unpickler):
+
+    def __init__(self, file, module_map, **kw_args) -> None:
+        self.module_map: Callable[[str], str] = module_map
+        super().__init__(file, **kw_args)
+
+    def find_class(self, module: str, name: str) -> Any:
+        return super().find_class(self.module_map(module), name)

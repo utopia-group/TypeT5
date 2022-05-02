@@ -259,20 +259,32 @@ class MypyChecker:
 
     def recheck_files(self, *updated_files: str) -> MypyResult:
         out = self._run_mypy(
-            ["python", self.dmypy_path, "recheck",
-            "--perf-stats-file", "mypy_perf.json",
-             "--update", *updated_files]
+            [
+                "python",
+                self.dmypy_path,
+                "recheck",
+                "--perf-stats-file",
+                "mypy_perf.json",
+                "--update",
+                *updated_files,
+            ]
         )
         subprocess.run(
-            ['cat', 'mypy_perf.json'],
+            ["cat", "mypy_perf.json"],
             cwd=self.code_dir,
         )
         subprocess.run(
-            ['python', self.dmypy_path, 'status', '--fswatcher-dump-file', "mypy_fswatcher.json"],
+            [
+                "python",
+                self.dmypy_path,
+                "status",
+                "--fswatcher-dump-file",
+                "mypy_fswatcher.json",
+            ],
             cwd=self.code_dir,
         )
         subprocess.run(
-            ['cat', 'mypy_fswatcher.json'],
+            ["cat", "mypy_fswatcher.json"],
             cwd=self.code_dir,
         )
 
@@ -318,8 +330,7 @@ def mypy_checker(code_dir: Path, dmypy_path: Path = None):
         checker.close()
 
 
-AnyType = cst.Name("Any")
-AnyAnnot = cst.Annotation(AnyType)
+AnyAnnot = cst.Annotation(cst.Name("Any"))
 
 
 TypeExpr = cst.BaseExpression
@@ -520,6 +531,17 @@ class PythonType:
         yield self.head
         for arg in self.args:
             yield from arg.all_heads()
+
+    def head_name(self):
+        """Return the last part of the type head."""
+        if self.head == ():
+            return ''
+        else:
+            return self.head[-1]
+
+    @staticmethod
+    def Any():
+        return PythonType(("Any",))
 
 
 def parse_type_expr(
