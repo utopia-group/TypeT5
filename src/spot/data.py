@@ -40,7 +40,7 @@ class GitRepo:
     def authorname(self):
         return self.author + "__" + self.name
 
-    def repo_dir(self, repos_dir):
+    def repo_dir(self, repos_dir: Path) -> Path:
         return repos_dir / "downloaded" / self.authorname()
 
     def download(self, repos_dir: Path, timeout=None) -> bool:
@@ -120,10 +120,20 @@ class GitRepo:
         )
 
 
-def mask_type_annots(code: str):
+def mask_type_annots(file_code: Union[str, tuple[Path, str]]) -> Optional[dict]:
     """Preprocess the Python code to carve out all the type annotations. The original
     code is split into sequences at the type annotations."""
-    m = cst.parse_module(code)
+    if isinstance(file_code, tuple):
+        src_path, code = file_code
+    else:
+        assert isinstance(file_code, str)
+        src_path = Path("[no source file]")
+        code = file_code
+    try: 
+        m = cst.parse_module(code)
+    except cst.ParserSyntaxError as e:
+        logging.warning(f"Failed to parse src file: `{src_path}`")
+        return None
     paths, truths = collect_annotations(m)
     types: list[PythonType] = []
     replaces = dict()
@@ -152,12 +162,33 @@ def tokenize_masked(masked: dict, tokenizer: RobertaTokenizer, device):
 
 
 def chunk_masked_code(
-    srcs: Sequence[dict], chunk_size: int, tokenizer: RobertaTokenizer
+    srcs: Sequence[dict], chunk_size: int, tokenizer: RobertaTokenizer, ctx_margin=None,
 ):
     """
     Concatenate all the code segments into a single long sequence, then break it down
-    into even-sized chunks. Each src code is assumed to have already been processed by
-    `mask_type_annots`."""
+    into even-sized chunks. Each source code is assumed to have already been processed by
+    `mask_type_annots`.
+
+    Args:
+        ctx_margin: the number of tokens on each end of the chunk that are not masked. Only
+        the `chunk_size - 2 * ctx_margin` middle tokens in the chunk are masked.
+    """
+    def expand_types_as_tks(mixed_tks: list):
+        result = list[int]()
+        for e in mixed_tks:
+            if isinstance(e, int):
+                result.append(e)
+            else:
+                assert isinstance(e, PythonType)
+                type_tks = tokenizer.encode(str(e), add_special_tokens=False)
+                result.extend(type_tks)
+        return result
+                
+
+    if ctx_margin is None:
+        ctx_margin = chunk_size // 4
+    stride = chunk_size - 2 * ctx_margin
+
     all_tks: list[Any] = []
     for src in tqdm(srcs, desc="Concatinating all srcs"):
         segs: list[str] = src["code_segs"]
@@ -170,35 +201,42 @@ def chunk_masked_code(
         all_tks.extend(tokenizer.encode(segs[-1], add_special_tokens=False))
         all_tks.append(tokenizer.eos_token_id)
 
-    # group all_tks into chunks
+    # slide over `all_tks` with step size `stride` to turn them into masked chunks
     chunks: dict[str, list] = {"input_ids": [], "labels": [], "types": []}
-    for i in tqdm(range(0, len(all_tks), chunk_size), desc="Chunking"):
+    for i in tqdm(range(0, len(all_tks), stride), desc="Chunking"):
         tks = all_tks[i : i + chunk_size]
         if len(tks) != chunk_size:
-            continue  # discard
+            continue  # too short, discard
         extra_id = 0
-        chunk = []
+        middle = []
         types = []
-        for tk in tks:
+        
+        for tk in tks[ctx_margin : ctx_margin + stride]:
             if isinstance(tk, int):
-                chunk.append(tk)
+                middle.append(tk)
             else:
                 assert isinstance(
                     tk, PythonType
                 ), f"unexpected token type {type(tk)}: {tk}"
                 assert extra_id <= 99, "> 99 annotations in a single sequence"
-                chunk.append(tokenizer.additional_special_tokens_ids[99 - extra_id])
+                middle.append(tokenizer.additional_special_tokens_ids[99 - extra_id])
                 types.append(str(tk))
                 extra_id += 1
-        # chunk = tokenizer.convert_ids_to_tokens(chunk) # for debugging
-        assert len(chunk) == chunk_size
+        
+        if len(types) == 0:
+            continue  # no types to predict in this chunk, discard
+        left_ctx = expand_types_as_tks(tks[:ctx_margin])[-ctx_margin:]
+        right_ctx = expand_types_as_tks(tks[-ctx_margin:])[:ctx_margin]
+        input_ids = left_ctx + middle + right_ctx
+        assert len(input_ids) == chunk_size
+        
         label_ids = [tokenizer.bos_token_id]
         for i, ty in enumerate(types):
             label_ids.append(tokenizer.additional_special_tokens_ids[99 - i])
             label_ids.extend(tokenizer.encode(str(ty), add_special_tokens=False))
         label_ids.append(tokenizer.eos_token_id)
 
-        chunks["input_ids"].append(chunk)
+        chunks["input_ids"].append(input_ids)
         chunks["labels"].append(label_ids)
         chunks["types"].append(types)
     return chunks
@@ -209,14 +247,15 @@ def repos_to_dataset(
     repos_dir,
     tokenizer: RobertaTokenizer,
     max_workers: int,
+    ctx_margin: Optional[int],
 ):
     tokenizer.deprecation_warnings[
         "sequence-length-is-longer-than-the-specified-maximum"
     ] = True
     srcs = [
-        code
+        (f, code)
         for r in tqdm(repos, desc="read_files")
-        for (_, code) in r.src_files(repos_dir)
+        for (f, code) in r.src_files(repos_dir)
     ]
     chunk_size = min(50, len(srcs) // max_workers)
     masked_srcs = process_map(
@@ -226,8 +265,11 @@ def repos_to_dataset(
         desc="tokenize sources",
         chunksize=chunk_size,
     )
+    # filter out srcs that failed to parse
+    masked_srcs = [x for x in masked_srcs if x is not None]
+    logging.info(f"{len(masked_srcs)} / {len(srcs)} srcs succesfully parsed.")
     context_len = tokenizer.model_max_length
-    return Dataset.from_dict(chunk_masked_code(masked_srcs, context_len, tokenizer))
+    return Dataset.from_dict(chunk_masked_code(masked_srcs, context_len, tokenizer, ctx_margin))
 
 
 def load_or_process_datasets(
@@ -239,6 +281,7 @@ def load_or_process_datasets(
     repos_test: Sequence[GitRepo],
     max_workers: int = 12,
     regenerate: bool = False,
+    ctx_margin: Optional[int] = None,
 ):
     tk_datasets: dict[str, Dataset]
     repos_split: dict[str, Sequence[GitRepo]]
@@ -264,7 +307,7 @@ def load_or_process_datasets(
     tk_datasets = dict()
     for name, repos in repos_split.items():
         print(f"Processing dataset: {name}")
-        d = repos_to_dataset(repos, repos_dir, tokenizer, max_workers)
+        d = repos_to_dataset(repos, repos_dir, tokenizer, max_workers, ctx_margin=ctx_margin)
         tk_datasets[name] = d
         d.save_to_disk(str(datasets_dir / name))
     return tk_datasets, repos_split

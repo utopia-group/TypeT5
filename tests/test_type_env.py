@@ -9,11 +9,12 @@ from spot.type_env import (
     apply_annotations,
     mypy_checker,
     AnyAnnot,
+    parse_type_str,
     type_inf_env,
     TypeInfAction,
     SelectAnnotations,
+    normalize_type,
 )
-
 
 os.chdir(Path(__file__).parent.parent)
 
@@ -100,10 +101,34 @@ def test_type_env():
         _, annots = collect_annotations(cst.parse_module(read_file(f"{inference_dir}/env_code_2.py")))
         with type_inf_env(checker, f"{inference_dir}/env_code_2.py", SelectAnnotations.select_annotated) as env:
             assert len(env.state.annotated) == 0
-            assert len(env.state.to_annot) == len(annots) == 8 # this should equal to the number of manual annotations
+            assert len(env.state.to_annot) == len(annots) == 9 # this should equal to the number of manual annotations
             while len(env.state.to_annot) > 0:
                 path = env.state.to_annot[0]
                 env.step(TypeInfAction(path, annots[path].annotation))
             
             assert env.state.num_errors == 0
-            assert len(env.state.annotated) == 8
+            assert len(env.state.annotated) == 9
+
+def test_type_normalization():
+    equiv_pairs: list[tuple[str, str]] = [
+        ('list[int]', 'List[int]'),
+        ('dict[str, list]', 'Dict[str, List]'),
+        ('typing.Union[str, List]', 'typing.Union[list, str]'),
+        ('typing.Union[str, typing.Union[str, int]]', 'str | int'),
+    ]
+
+    for a, b in equiv_pairs:
+        ta = parse_type_str(a)
+        tb = parse_type_str(b)
+        assert normalize_type(ta) == normalize_type(tb)
+
+    nonequiv_pairs: list[tuple[str, str]] = [
+        ('Union[str, int]', 'Union[str, list]'),
+        ('typing.List[str]', 't.List[str]'),
+        ('tuple[str, int]', 'tuple[int, str]'),
+    ]
+
+    for a, b in nonequiv_pairs:
+        ta = parse_type_str(a)
+        tb = parse_type_str(b)
+        assert normalize_type(ta) != normalize_type(tb)

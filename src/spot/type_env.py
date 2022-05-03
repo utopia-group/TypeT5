@@ -511,7 +511,7 @@ def test_inference_performance(src_root, src_files=None, silent=True):
         return {"n_checks": n_checks, "time": t_e - t_s}
 
 
-@dataclass(unsafe_hash=True)
+@dataclass(unsafe_hash=True, order=True)
 class PythonType:
     head: tuple[str, ...]
     args: tuple["PythonType", ...] = ()
@@ -532,16 +532,60 @@ class PythonType:
         for arg in self.args:
             yield from arg.all_heads()
 
-    def head_name(self):
+    def head_name(self) -> str:
         """Return the last part of the type head."""
         if self.head == ():
-            return ''
+            return SpecialNames.Empty
         else:
             return self.head[-1]
 
+    def is_union(self) -> bool:
+        """Check whether the type is a union type."""
+        return self.head_name() == "Union"
+
     @staticmethod
-    def Any():
+    def Any() -> "PythonType":
         return PythonType(("Any",))
+
+
+_type_name_map = {
+    "list": "List",
+    "tuple": "Tuple",
+    "dict": "Dict",
+    "set": "Set",
+}
+
+
+def normalize_type_name(name: str) -> str:
+    return _type_name_map.get(name, name)
+
+
+def normalize_type_head(head: tuple[str, ...]) -> tuple[str, ...]:
+    n = len(head)
+    if n == 0:
+        return head
+    return (*head[0 : n - 1], normalize_type_name(head[n - 1]))
+
+
+def normalize_type(typ: PythonType) -> PythonType: 
+    n_args = map(normalize_type, typ.args)
+    if typ.is_union():
+        arg_set = set[PythonType]()
+        for arg in n_args:
+            if arg.is_union():
+                arg_set.update(arg.args)
+            else:
+                arg_set.add(arg)
+        return PythonType(("Union",), tuple(arg_set))
+    return PythonType(
+        normalize_type_head(typ.head),
+        tuple(n_args),
+    )
+
+
+def parse_type_str(typ_str: str):
+    tree = ast.parse(typ_str, mode="eval").body
+    return parse_type_from_ast(tree)
 
 
 def parse_type_expr(
@@ -550,8 +594,7 @@ def parse_type_expr(
     code = m.code_for_node(annot)
     code = re.sub(r"#.*\n", "", code).replace("\n", "")
     try:
-        tree = ast.parse(code, mode="eval").body
-        return parse_type_from_ast(tree)
+        return parse_type_str(code)
     except Exception as e:
         if silent:
             return None

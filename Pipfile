@@ -16,7 +16,9 @@ ipywidgets = "*"
 datasets = "*"
 transformers = "*"
 wandb = "*"
-libcst = "*"
+libcst = "0.4.1"
+sklearn = "*"
+matplotlib = "*"
 
 [dev-packages]
 ipykernel = "*"
