@@ -1,23 +1,36 @@
+import ast
+import enum
+import re
+import subprocess
+import time
 from argparse import ArgumentError
-from os import PathLike
-from unittest import case
 from dataclasses import dataclass, field
 from distutils.log import error
 from logging import warn
+from os import PathLike
 from posixpath import dirname, realpath
-import re
 from typing import *
+from unittest import case
+
 from decorator import contextmanager
+from libcst import SimpleWhitespace
 from numpy import isin
 from pyrsistent import plist
 from pyrsistent.typing import PList
-import time
 from tqdm import tqdm
-import ast
 
-from libcst import SimpleWhitespace
 from .utils import *
-import subprocess
+
+
+class AnnotCat(enum.Enum):
+    """The category of an annotation."""
+
+    FuncArg = enum.auto()
+    FuncReturn = enum.auto()
+    ClassAtribute = enum.auto()
+    GlobalVar = enum.auto()
+    LocalVar = enum.auto()
+
 
 # This is supposed to be immutable, but setting `frozen=True` would cause notebook auto-reload
 # to fail
@@ -46,7 +59,7 @@ def annot_path(*segs: str) -> AnnotPath:
 
 def collect_annotations(
     code: cst.CSTNode,
-) -> Tuple[list[AnnotPath], dict[AnnotPath, cst.Annotation]]:
+) -> Tuple[dict[AnnotPath, AnnotCat], dict[AnnotPath, cst.Annotation]]:
     """Collect all annotation paths and the corresponding type annotations (if any).
     The order of the paths is the same as the order of the annotations in the code."""
     collector = AnnotCollector()
@@ -77,15 +90,21 @@ class AnnotCollector(cst.CSTVisitor):
     def __init__(self):
         self.path: AnnotPath = annot_path()
         # store the type annotations
-        self.annot_paths: List[AnnotPath] = []
-        self.annotations: Dict[AnnotPath, cst.Annotation] = {}
+        self.annot_paths: dict[AnnotPath, AnnotCat] = {}
+        self.annotations: dict[AnnotPath, cst.Annotation] = {}
+        self.cat_stack = [AnnotCat.GlobalVar]
 
     def on_visit(self, node):
         match node:
-            case cst.ClassDef() | cst.FunctionDef():
+            case cst.FunctionDef():
                 self.path = self.path.append(node.name.value)
+                self.cat_stack.append(AnnotCat.LocalVar)
+            case cst.ClassDef():
+                self.path = self.path.append(node.name.value)
+                self.cat_stack.append(AnnotCat.ClassAtribute)
             case cst.Lambda():
                 self.path = self.path.append(SpecialNames.Lambda)
+                self.cat_stack.append(AnnotCat.LocalVar)
         return super().on_visit(node)
 
     def on_leave(self, node):
@@ -93,27 +112,29 @@ class AnnotCollector(cst.CSTVisitor):
         match node:
             case cst.ClassDef() | cst.FunctionDef() | cst.Lambda():
                 self.path = self.path.pop()
+                self.cat_stack.pop()
         return r
 
-    def _record_annot(self, name: str, annot: cst.Annotation | None):
+    def _record_annot(self, name: str, cat: AnnotCat, annot: cst.Annotation | None):
         path = self.path.append(name)
-        self.annot_paths.append(path)
+        if path not in self.annot_paths:
+            self.annot_paths[path] = cat
         if annot is not None:
             self.annotations[path] = annot
 
     def leave_FunctionDef(self, node: cst.FunctionDef):
-        self._record_annot(SpecialNames.Return, node.returns)
+        self._record_annot(SpecialNames.Return, AnnotCat.FuncReturn, node.returns)
 
     def visit_Param(self, node: cst.Param):
         if (name := node.name.value) != "self":
-            self._record_annot(name, node.annotation)
+            self._record_annot(name, AnnotCat.FuncArg, node.annotation)
 
     def visit_AnnAssign(self, node: cst.AnnAssign):
         match node.target:
             case cst.Name(value=name):
-                self._record_annot(name, node.annotation)
+                self._record_annot(name, self.cat_stack[-1], node.annotation)
             case cst.Attribute(value=cst.Name(value=l), attr=cst.Name(value=r)):
-                self._record_annot(l + "." + r, node.annotation)
+                self._record_annot(l + "." + r, AnnotCat.ClassAtribute, node.annotation)
 
 
 class AnnotApplier(cst.CSTTransformer):
@@ -192,7 +213,6 @@ class StmtsAdder(cst.CSTTransformer):
         return updated.with_changes(body=body_type(self.stmts) + updated.body)
 
 
-
 @dataclass
 class MypyResult:
     num_errors: int  # total number of errors in all files
@@ -203,9 +223,10 @@ class MypyResult:
 class MypyChecker:
     """Run Mypy daemon to (repeatedly) type check given files"""
 
-    def __init__(self, dmypy_path, code_dir) -> None:
+    def __init__(self, dmypy_path, code_dir, wait_before_check=1.0) -> None:
         self.code_dir = realpath(code_dir)
         self.dmypy_path = realpath(dmypy_path)
+        self.wait_before_check = wait_before_check
         # subprocess.run(
         #     ["python", self.dmypy_path, "run", "--", "."],
         #     capture_output=True,
@@ -218,6 +239,7 @@ class MypyChecker:
                 self.dmypy_path,
                 "start",
                 "--",
+                "--check-untyped-defs",
                 "--follow-imports=skip",
                 "--namespace-packages",
                 "--allow-untyped-globals",
@@ -244,7 +266,9 @@ class MypyChecker:
 
     def recheck_files(self, *updated_files: str) -> MypyResult:
         # TODO: remove this workaround once (https://github.com/python/mypy/issues/12697) is fixed.
-        time.sleep(1.0)  # wait to make sure the type checker sees the file changes
+        time.sleep(
+            self.wait_before_check
+        )  # wait to make sure the type checker sees the file changes
 
         out = self._run_mypy(
             [
@@ -311,11 +335,15 @@ class MypyChecker:
 
 
 @contextmanager
-def mypy_checker(code_dir: Path, dmypy_path: Path = None):
+def mypy_checker(code_dir: Path, dmypy_path: Path = None, wait_before_check=1.0):
     try:
         if dmypy_path is None:
             dmypy_path = proj_root() / ".venv/bin/dmypy"
-        yield (checker := MypyChecker(dmypy_path, code_dir))
+        yield (
+            checker := MypyChecker(
+                dmypy_path, code_dir, wait_before_check=wait_before_check
+            )
+        )
     finally:
         checker.close()
 
@@ -332,7 +360,7 @@ class TypeInfState:
     """The current (partically annotated) CST"""
 
     module: cst.Module
-    to_annot: list[AnnotPath]
+    to_annot: dict[AnnotPath, AnnotCat]
     annotated: dict[AnnotPath, TypeExpr]
     num_errors: int
 
@@ -348,12 +376,12 @@ to_annotate: {self.to_annot}
 
 class SelectAnnotations:
     @staticmethod
-    def select_annotated(paths, annotated) -> list[AnnotPath]:
+    def select_annotated(paths: dict, annotated: dict) -> dict[AnnotPath, AnnotCat]:
         "Select all places with an existing type annotation"
-        return [p for p in paths if p in annotated]
+        return {k: paths[k] for k in annotated}
 
     @staticmethod
-    def select_all_paths(paths, annotated) -> list[AnnotPath]:
+    def select_all_paths(paths: dict, annotated: dict) -> dict[AnnotPath, AnnotCat]:
         "Select all places with an existing type annotation"
         return paths
 
@@ -401,11 +429,11 @@ class TypeInfEnv:
         """Restore the python source file to its original state."""
         write_file(self.src_file, self.original_src)
 
-    def init_to_annot(self):
+    def init_to_annot(self) -> dict[AnnotPath, AnnotCat]:
         module = cst.parse_module(self.original_src)
         paths, annots = collect_annotations(module)
-        to_annot: list[AnnotPath] = self.select_annotations(paths, annots)
-        assert isinstance(to_annot, list)
+        to_annot = self.select_annotations(paths, annots)
+        assert isinstance(to_annot, dict)
         return to_annot
 
     def reset(self) -> None:
@@ -413,7 +441,7 @@ class TypeInfEnv:
         self.restore_file()
         module = cst.parse_module(self.original_src)
         paths, annots = collect_annotations(module)
-        to_annot: list[AnnotPath] = self.select_annotations(paths, annots)
+        to_annot: dict[AnnotPath, AnnotCat] = self.select_annotations(paths, annots)
         to_remove = {p for p in annots.keys() if p in to_annot}
         module = apply_annotations(module, {p: MissingAnnot for p in to_remove})
         module = add_stmts(module, self.preamble)  # add all the necessary imports
@@ -454,7 +482,7 @@ class TypeInfEnv:
                     f"mypy output: {out.output_str}\n"
                     f"---------Code---------\n {mod.code}\n"
                 )
-        state.to_annot.remove(action.path)
+        state.to_annot.pop(action.path)
         state.annotated[action.path] = type
         state.module = mod
         return rejected

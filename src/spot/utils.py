@@ -1,23 +1,15 @@
-from collections import Counter
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from typing import (
-    Any,
-    Callable,
-    Sequence,
-    Optional,
-    TypeVar,
-    Union,
-    Generator,
-)
-from typing import cast
-import libcst as cst
 import ast
 import os
+from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any, Callable, Generator, Optional, Sequence, TypeVar, Union, cast
+
+import libcst as cst
+import numpy as np
+from sklearn.metrics import confusion_matrix
 from tqdm.auto import tqdm
 from tqdm.contrib.concurrent import process_map
-from sklearn.metrics import confusion_matrix
-import numpy as np
 
 
 class SpecialNames:

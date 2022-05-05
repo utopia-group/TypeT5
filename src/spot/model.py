@@ -1,12 +1,16 @@
-from transformers.pipelines import Pipeline
-from spot.data import tokenize_masked, mask_type_annots, output_ids_as_types
-import numpy as np
-from spot.utils import *
 from collections import Counter
+
+import numpy as np
+from transformers.pipelines import Pipeline
+
+from spot.data import mask_type_annots, output_ids_as_types, tokenize_masked
 from spot.type_env import normalize_type
+from spot.utils import *
 
 
-def compute_metrics(predictions: np.ndarray, label_ids: np.ndarray, tokenizer, conf_top_k=10):
+def compute_metrics(
+    predictions: np.ndarray, label_ids: np.ndarray, tokenizer, conf_top_k=10
+):
     # apply the tokenizer decoder to each rows
     assert len(predictions.shape) == 2
     assert (n_rows := predictions.shape[0]) == label_ids.shape[0]

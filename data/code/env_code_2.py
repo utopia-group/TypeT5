@@ -27,3 +27,5 @@ class Bar:
         
     def foo(self, z: str) -> int:
         return self.x + len(z)
+
+bar: Bar = Bar(3)

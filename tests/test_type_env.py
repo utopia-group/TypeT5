@@ -1,40 +1,49 @@
-from pathlib import Path
-from spot.utils import cst, read_file, write_file, SpecialNames
 import os
 import shutil
+from pathlib import Path
+
 from spot.type_env import (
+    AnnotCat,
     AnnotPath,
-    annot_path,
-    collect_annotations,
-    apply_annotations,
-    mypy_checker,
     AnyAnnot,
+    SelectAnnotations,
+    TypeInfAction,
+    annot_path,
+    apply_annotations,
+    collect_annotations,
+    mypy_checker,
+    normalize_type,
     parse_type_str,
     type_inf_env,
-    TypeInfAction,
-    SelectAnnotations,
-    normalize_type,
 )
+from spot.utils import SpecialNames, cst, read_file, write_file
 
 os.chdir(Path(__file__).parent.parent)
 
-parsed = cst.parse_module(read_file("data/code/bad_code_1.py"))
-
 
 def test_annotation_collection():
+    parsed = cst.parse_module(read_file("data/code/env_code_2.py"))
     annot_paths, _ = collect_annotations(parsed)
-    correct_annot_paths: list[AnnotPath] = [
-        annot_path("fib", "n"),
-        annot_path("fib", SpecialNames.Return),
-        annot_path("t_add", "x"),
-        annot_path("t_add", "y"),
-        annot_path("t_add", SpecialNames.Return),
-        annot_path("x"),
-        annot_path("bad_y"),
-    ]
+    correct_annot_paths: dict[AnnotPath, AnnotCat] = {
+        annot_path("fib", "n"): AnnotCat.FuncArg,
+        annot_path("fib", SpecialNames.Return): AnnotCat.FuncReturn,
+        annot_path("foo", "bar"): AnnotCat.FuncArg,
+        annot_path("foo", SpecialNames.Return): AnnotCat.FuncReturn,
+        annot_path("Bar", "z"): AnnotCat.ClassAtribute,
+        annot_path("Bar", "w"): AnnotCat.ClassAtribute,
+        annot_path("Bar", "__init__", "x"): AnnotCat.FuncArg,
+        annot_path("Bar", "__init__", "self.x"): AnnotCat.ClassAtribute,
+        annot_path("Bar", "__init__", "self.y"): AnnotCat.ClassAtribute,
+        annot_path("Bar", "foo", "z"): AnnotCat.FuncArg,
+        annot_path("Bar", "foo", SpecialNames.Return): AnnotCat.FuncReturn,
+        annot_path("bar"): AnnotCat.GlobalVar,
+    }
     for p in correct_annot_paths:
         assert p in annot_paths
-    assert annot_paths == correct_annot_paths
+        assert annot_paths[p] == correct_annot_paths[p]
+
+
+parsed = cst.parse_module(read_file("data/code/bad_code_1.py"))
 
 
 code_1_patch = {
@@ -85,36 +94,50 @@ def test_type_env():
     write_file(f"{inference_dir}/env_code_1.py", read_file("data/code/env_code_1.py"))
     write_file(f"{inference_dir}/env_code_2.py", read_file("data/code/env_code_2.py"))
 
-    with mypy_checker(inference_dir) as checker:
-        with type_inf_env(checker, f"{inference_dir}/env_code_1.py", SelectAnnotations.select_all_paths) as env:
+    with mypy_checker(inference_dir, wait_before_check=0.0) as checker:
+        with type_inf_env(
+            checker,
+            f"{inference_dir}/env_code_1.py",
+            SelectAnnotations.select_all_paths,
+        ) as env:
             while len(env.state.to_annot) > 0:
-                env.step(TypeInfAction(env.state.to_annot[0], cst.Name("int")))
+                p = next(iter(env.state.to_annot))
+                env.step(TypeInfAction(p, cst.Name("int")))
 
             assert env.state.num_errors == 0
             assert len(env.state.annotated) == 11
             for k, v in env.state.annotated.items():
                 if k == annot_path("int_add", "b"):
-                    assert v.deep_equals(cst.Name("Any")), f"{k}:{v}"
+                    assert not v.deep_equals(cst.Name("int")), f"{k}:{v}"
                 else:
                     assert v.deep_equals(cst.Name("int")), f"{k}:{v}"
 
-        _, annots = collect_annotations(cst.parse_module(read_file(f"{inference_dir}/env_code_2.py")))
-        with type_inf_env(checker, f"{inference_dir}/env_code_2.py", SelectAnnotations.select_annotated) as env:
+        _, annots = collect_annotations(
+            cst.parse_module(read_file(f"{inference_dir}/env_code_2.py"))
+        )
+        with type_inf_env(
+            checker,
+            f"{inference_dir}/env_code_2.py",
+            SelectAnnotations.select_annotated,
+        ) as env:
             assert len(env.state.annotated) == 0
-            assert len(env.state.to_annot) == len(annots) == 9 # this should equal to the number of manual annotations
+            assert (
+                len(env.state.to_annot) == len(annots) == 10
+            )  # this should equal to the number of manual annotations
             while len(env.state.to_annot) > 0:
-                path = env.state.to_annot[0]
+                path = next(iter(env.state.to_annot))
                 env.step(TypeInfAction(path, annots[path].annotation))
-            
+
             assert env.state.num_errors == 0
-            assert len(env.state.annotated) == 9
+            assert len(env.state.annotated) == 10
+
 
 def test_type_normalization():
     equiv_pairs: list[tuple[str, str]] = [
-        ('list[int]', 'List[int]'),
-        ('dict[str, list]', 'Dict[str, List]'),
-        ('typing.Union[str, List]', 'typing.Union[list, str]'),
-        ('typing.Union[str, typing.Union[str, int]]', 'str | int'),
+        ("list[int]", "List[int]"),
+        ("dict[str, list]", "Dict[str, List]"),
+        ("typing.Union[str, List]", "typing.Union[list, str]"),
+        ("typing.Union[str, typing.Union[str, int]]", "str | int"),
     ]
 
     for a, b in equiv_pairs:
@@ -123,9 +146,9 @@ def test_type_normalization():
         assert normalize_type(ta) == normalize_type(tb)
 
     nonequiv_pairs: list[tuple[str, str]] = [
-        ('Union[str, int]', 'Union[str, list]'),
-        ('typing.List[str]', 't.List[str]'),
-        ('tuple[str, int]', 'tuple[int, str]'),
+        ("Union[str, int]", "Union[str, list]"),
+        ("typing.List[str]", "t.List[str]"),
+        ("tuple[str, int]", "tuple[int, str]"),
     ]
 
     for a, b in nonequiv_pairs:

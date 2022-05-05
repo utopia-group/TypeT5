@@ -1,8 +1,18 @@
+import logging
+import pickle
 import shutil
 import subprocess
+import warnings
 from dataclasses import dataclass
+from datetime import datetime
+from typing import *
+
+import dateparser
+from datasets import Dataset
 from transformers import RobertaTokenizer
+
 from spot.type_env import (
+    AnnotCat,
     AnnotPath,
     PythonType,
     apply_annotations,
@@ -11,13 +21,6 @@ from spot.type_env import (
     parse_type_from_ast,
 )
 from spot.utils import *
-from typing import *
-from datetime import datetime
-import dateparser
-import warnings
-import logging
-from datasets import Dataset
-import pickle
 
 warnings.filterwarnings(
     "ignore",
@@ -65,7 +68,9 @@ class GitRepo:
         s = subprocess.run(
             ["git", "log", "-1", "--format=%cd"], cwd=d, capture_output=True, text=True
         ).stdout
-        self.last_update = dateparser.parse(s.split("+")[0]).replace(tzinfo=None)
+        lu = dateparser.parse(s.split("+")[0])
+        assert lu is not None
+        self.last_update = lu.replace(tzinfo=None)
         return self.last_update
 
     def src_files(self, repos_dir):
@@ -80,18 +85,22 @@ class GitRepo:
         self.lines_of_code = n_lines
         return n_lines
 
-    def collect_annotations(self, repos_dir, silent=True):
+    def collect_annotations(
+        self, repos_dir, silent=True
+    ) -> dict[Path, dict[AnnotPath, tuple[Optional[PythonType], AnnotCat]]]:
         n_paths, n_annots = 0, 0
-        file_to_annots = dict[Path, dict[AnnotPath, PythonType | None]]()
+        file_to_annots = dict[
+            Path, dict[AnnotPath, tuple[Optional[PythonType], AnnotCat]]
+        ]()
         for src in self.repo_dir(repos_dir).glob("**/*.py"):
-            src: Path
             rpath = src.relative_to(self.repo_dir(repos_dir))
             m = cst.parse_module(read_file(src))
             paths, annots = collect_annotations(m)
             n_paths += len(paths)
             n_annots += len(annots)
             file_to_annots[rpath] = {
-                k: parse_type_expr(m, v.annotation, silent) for k, v in annots.items()
+                k: (parse_type_expr(m, v.annotation, silent), paths[k])
+                for k, v in annots.items()
             }
         self.n_type_annots = n_annots
         self.n_type_places = n_paths
@@ -129,7 +138,7 @@ def mask_type_annots(file_code: Union[str, tuple[Path, str]]) -> Optional[dict]:
         assert isinstance(file_code, str)
         src_path = Path("[no source file]")
         code = file_code
-    try: 
+    try:
         m = cst.parse_module(code)
     except cst.ParserSyntaxError as e:
         logging.warning(f"Failed to parse src file: `{src_path}`")
@@ -162,7 +171,10 @@ def tokenize_masked(masked: dict, tokenizer: RobertaTokenizer, device):
 
 
 def chunk_masked_code(
-    srcs: Sequence[dict], chunk_size: int, tokenizer: RobertaTokenizer, ctx_margin=None,
+    srcs: Sequence[dict],
+    chunk_size: int,
+    tokenizer: RobertaTokenizer,
+    ctx_margin=None,
 ):
     """
     Concatenate all the code segments into a single long sequence, then break it down
@@ -173,6 +185,7 @@ def chunk_masked_code(
         ctx_margin: the number of tokens on each end of the chunk that are not masked. Only
         the `chunk_size - 2 * ctx_margin` middle tokens in the chunk are masked.
     """
+
     def expand_types_as_tks(mixed_tks: list):
         result = list[int]()
         for e in mixed_tks:
@@ -183,7 +196,6 @@ def chunk_masked_code(
                 type_tks = tokenizer.encode(str(e), add_special_tokens=False)
                 result.extend(type_tks)
         return result
-                
 
     if ctx_margin is None:
         ctx_margin = chunk_size // 4
@@ -210,7 +222,7 @@ def chunk_masked_code(
         extra_id = 0
         middle = []
         types = []
-        
+
         for tk in tks[ctx_margin : ctx_margin + stride]:
             if isinstance(tk, int):
                 middle.append(tk)
@@ -222,14 +234,14 @@ def chunk_masked_code(
                 middle.append(tokenizer.additional_special_tokens_ids[99 - extra_id])
                 types.append(str(tk))
                 extra_id += 1
-        
+
         if len(types) == 0:
             continue  # no types to predict in this chunk, discard
         left_ctx = expand_types_as_tks(tks[:ctx_margin])[-ctx_margin:]
         right_ctx = expand_types_as_tks(tks[-ctx_margin:])[:ctx_margin]
         input_ids = left_ctx + middle + right_ctx
         assert len(input_ids) == chunk_size
-        
+
         label_ids = [tokenizer.bos_token_id]
         for i, ty in enumerate(types):
             label_ids.append(tokenizer.additional_special_tokens_ids[99 - i])
@@ -269,7 +281,9 @@ def repos_to_dataset(
     masked_srcs = [x for x in masked_srcs if x is not None]
     logging.info(f"{len(masked_srcs)} / {len(srcs)} srcs succesfully parsed.")
     context_len = tokenizer.model_max_length
-    return Dataset.from_dict(chunk_masked_code(masked_srcs, context_len, tokenizer, ctx_margin))
+    return Dataset.from_dict(
+        chunk_masked_code(masked_srcs, context_len, tokenizer, ctx_margin)
+    )
 
 
 def load_or_process_datasets(
@@ -307,7 +321,9 @@ def load_or_process_datasets(
     tk_datasets = dict()
     for name, repos in repos_split.items():
         print(f"Processing dataset: {name}")
-        d = repos_to_dataset(repos, repos_dir, tokenizer, max_workers, ctx_margin=ctx_margin)
+        d = repos_to_dataset(
+            repos, repos_dir, tokenizer, max_workers, ctx_margin=ctx_margin
+        )
         tk_datasets[name] = d
         d.save_to_disk(str(datasets_dir / name))
     return tk_datasets, repos_split
@@ -353,7 +369,6 @@ def output_ids_as_types(output_ids: list[int], tokenizer: RobertaTokenizer):
 
 
 class ModuleRemapUnpickler(pickle.Unpickler):
-
     def __init__(self, file, module_map, **kw_args) -> None:
         self.module_map: Callable[[str], str] = module_map
         super().__init__(file, **kw_args)
