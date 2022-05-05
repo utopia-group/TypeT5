@@ -66,12 +66,11 @@ def apply_annotations(
         ) from e
 
 
-def add_imports(
+def add_stmts(
     code: cst.Module,
-    imports: list[Tuple[str, str]],
+    stmts: Sequence[cst.BaseStatement],
 ):
-    code = code.visit(ImportsAdder(imports))
-    return code
+    return code.visit(StmtsAdder(stmts))
 
 
 class AnnotCollector(cst.CSTVisitor):
@@ -183,29 +182,15 @@ class AnnotApplier(cst.CSTTransformer):
             return updated
 
 
-class ImportsAdder(cst.CSTTransformer):
-    SpecialComment: str = "# [added by SPOT]"
-
-    def __init__(self, imports: list[Tuple[str, str]]):
-        self.imports = imports
+class StmtsAdder(cst.CSTTransformer):
+    def __init__(self, stmts: Sequence[cst.BaseStatement]):
+        self.stmts = stmts
 
     def leave_Module(self, node: cst.Module, updated: cst.Module) -> cst.Module:
+
         body_type: Any = type(updated.body)
-        import_stmts = body_type(
-            cst.SimpleStatementLine(
-                [
-                    cst.ImportFrom(
-                        module=cst.Name(m), names=[cst.ImportAlias(name=cst.Name(v))]
-                    )
-                ],
-                trailing_whitespace=cst.TrailingWhitespace(
-                    SimpleWhitespace("  "),
-                    comment=cst.Comment(ImportsAdder.SpecialComment),
-                ),
-            )
-            for (m, v) in self.imports
-        )
-        return updated.with_changes(body=import_stmts + updated.body)
+        return updated.with_changes(body=body_type(self.stmts) + updated.body)
+
 
 
 @dataclass
@@ -258,35 +243,40 @@ class MypyChecker:
         return self._run_mypy(["python", self.dmypy_path, "check", self.code_dir])
 
     def recheck_files(self, *updated_files: str) -> MypyResult:
+        # TODO: remove this workaround once (https://github.com/python/mypy/issues/12697) is fixed.
+        time.sleep(1.0)  # wait to make sure the type checker sees the file changes
+
         out = self._run_mypy(
             [
                 "python",
                 self.dmypy_path,
                 "recheck",
-                "--perf-stats-file",
-                "mypy_perf.json",
+                # "--perf-stats-file",
+                # "mypy_perf.json",
                 "--update",
                 *updated_files,
             ]
         )
-        subprocess.run(
-            ["cat", "mypy_perf.json"],
-            cwd=self.code_dir,
-        )
-        subprocess.run(
-            [
-                "python",
-                self.dmypy_path,
-                "status",
-                "--fswatcher-dump-file",
-                "mypy_fswatcher.json",
-            ],
-            cwd=self.code_dir,
-        )
-        subprocess.run(
-            ["cat", "mypy_fswatcher.json"],
-            cwd=self.code_dir,
-        )
+
+        # TODO: remove below after fixing the issue
+        # subprocess.run(
+        #     ["cat", "mypy_perf.json"],
+        #     cwd=self.code_dir,
+        # )
+        # subprocess.run(
+        #     [
+        #         "python",
+        #         self.dmypy_path,
+        #         "status",
+        #         "--fswatcher-dump-file",
+        #         "mypy_fswatcher.json",
+        #     ],
+        #     cwd=self.code_dir,
+        # )
+        # subprocess.run(
+        #     ["cat", "mypy_fswatcher.json"],
+        #     cwd=self.code_dir,
+        # )
 
         return out
 
@@ -331,7 +321,8 @@ def mypy_checker(code_dir: Path, dmypy_path: Path = None):
 
 
 AnyAnnot = cst.Annotation(cst.Name("Any"))
-
+# A special annotation to signal that the type annotation is missing.
+MissingAnnot = cst.Annotation(cst.Name("Missing"))
 
 TypeExpr = cst.BaseExpression
 
@@ -382,6 +373,9 @@ class TypeInfAction:
 class TypeInfEnv:
     """An environment for sequentially annotating a python source file."""
 
+    SpecialComment: str = "# [SPOT Env]"
+    Preamble = "from typing import *  # [SPOT Env]\nMissing=Any"
+
     def __init__(
         self,
         checker: MypyChecker,
@@ -395,12 +389,13 @@ class TypeInfEnv:
         self.original_src = read_file(src_file)
         self.check_any = check_any
         self.print_mypy_output = print_mypy_output
-        if ImportsAdder.SpecialComment in self.original_src:
+        if TypeInfEnv.SpecialComment in self.original_src:
             raise RuntimeError(
                 f"The file {src_file} has already been modified by SPOT since it contains the special comment."
             )
         self.select_annotations = select_annotations
         self.state: TypeInfState = None  # type: ignore
+        self.preamble = cst.parse_module(TypeInfEnv.Preamble).body
 
     def restore_file(self) -> None:
         """Restore the python source file to its original state."""
@@ -420,10 +415,8 @@ class TypeInfEnv:
         paths, annots = collect_annotations(module)
         to_annot: list[AnnotPath] = self.select_annotations(paths, annots)
         to_remove = {p for p in annots.keys() if p in to_annot}
-        module = apply_annotations(module, {p: AnyAnnot for p in to_remove})
-        module = add_imports(
-            module, [("typing", "Any")]
-        )  # add all the necessary imports
+        module = apply_annotations(module, {p: MissingAnnot for p in to_remove})
+        module = add_stmts(module, self.preamble)  # add all the necessary imports
         write_file(self.src_file, module.code)
         annotated = {
             p: annots[p].annotation for p in annots.keys() if p not in to_remove
@@ -448,7 +441,7 @@ class TypeInfEnv:
 
         rejected = out.num_errors > state.num_errors
         if rejected:
-            type = cst.Name("Any")
+            type = cst.parse_expression(f"Annotated[Any, {mod.code_for_node(type)}]")
             mod = apply_annotations(mod, {action.path: cst.Annotation(type)})
             # time.sleep(1.0)
             write_file(self.src_file, mod.code)
@@ -567,7 +560,7 @@ def normalize_type_head(head: tuple[str, ...]) -> tuple[str, ...]:
     return (*head[0 : n - 1], normalize_type_name(head[n - 1]))
 
 
-def normalize_type(typ: PythonType) -> PythonType: 
+def normalize_type(typ: PythonType) -> PythonType:
     n_args = map(normalize_type, typ.args)
     if typ.is_union():
         arg_set = set[PythonType]()
