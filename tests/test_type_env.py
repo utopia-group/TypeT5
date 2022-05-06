@@ -24,23 +24,27 @@ os.chdir(Path(__file__).parent.parent)
 def test_annotation_collection():
     parsed = cst.parse_module(read_file("data/code/env_code_2.py"))
     annot_paths, _ = collect_annotations(parsed)
-    correct_annot_paths: dict[AnnotPath, AnnotCat] = {
-        annot_path("fib", "n"): AnnotCat.FuncArg,
-        annot_path("fib", SpecialNames.Return): AnnotCat.FuncReturn,
-        annot_path("foo", "bar"): AnnotCat.FuncArg,
-        annot_path("foo", SpecialNames.Return): AnnotCat.FuncReturn,
-        annot_path("Bar", "z"): AnnotCat.ClassAtribute,
-        annot_path("Bar", "w"): AnnotCat.ClassAtribute,
-        annot_path("Bar", "__init__", "x"): AnnotCat.FuncArg,
-        annot_path("Bar", "__init__", "self.x"): AnnotCat.ClassAtribute,
-        annot_path("Bar", "__init__", "self.y"): AnnotCat.ClassAtribute,
-        annot_path("Bar", "foo", "z"): AnnotCat.FuncArg,
-        annot_path("Bar", "foo", SpecialNames.Return): AnnotCat.FuncReturn,
-        annot_path("bar"): AnnotCat.GlobalVar,
-    }
-    for p in correct_annot_paths:
-        assert p in annot_paths
-        assert annot_paths[p] == correct_annot_paths[p]
+    correct_annot_paths: list[tuple[AnnotPath, AnnotCat]] = [
+        (annot_path("fib", "n"), AnnotCat.FuncArg),
+        (annot_path("fib", SpecialNames.Return), AnnotCat.FuncReturn),
+        (annot_path("foo", "bar"), AnnotCat.FuncArg),
+        (annot_path("foo", SpecialNames.Return), AnnotCat.FuncReturn),
+        (annot_path("Bar", "z"), AnnotCat.ClassAtribute),
+        (annot_path("Bar", "w"), AnnotCat.ClassAtribute),
+        (annot_path("Bar", "__init__", SpecialNames.Return), AnnotCat.FuncReturn),
+        (annot_path("Bar", "__init__", "x"), AnnotCat.FuncArg),
+        (annot_path("Bar", "__init__", "self.x"), AnnotCat.ClassAtribute),
+        (annot_path("Bar", "__init__", "self.y"), AnnotCat.ClassAtribute),
+        (annot_path("Bar", "reset", "w0"), AnnotCat.FuncArg),
+        (annot_path("Bar", "reset", SpecialNames.Return), AnnotCat.FuncReturn),
+        (annot_path("Bar", "foo", "z"), AnnotCat.FuncArg),
+        (annot_path("Bar", "foo", SpecialNames.Return), AnnotCat.FuncReturn),
+        (annot_path("bar"), AnnotCat.GlobalVar),
+    ]
+    for pair in correct_annot_paths:
+        assert pair in annot_paths
+    for pair in annot_paths:
+        assert pair in correct_annot_paths
 
 
 parsed = cst.parse_module(read_file("data/code/bad_code_1.py"))
@@ -73,15 +77,16 @@ def test_mypy_checker_1():
 
 def test_mypy_checker_2():
     with mypy_checker("data/code_output") as checker:
+        oe = checker.recheck_files("bad_code_1.py").num_errors
         write_file("data/code_output/bad_code_1.py", parsed.code)
-        assert checker.recheck_files("bad_code_1.py").num_errors > 0
+        assert checker.recheck_files("bad_code_1.py").num_errors > oe
         new_code = apply_annotations(parsed, code_1_patch).code
         write_file(
             "data/code_output/bad_code_1.py",
             new_code,
         )
         c_r = checker.recheck_files("bad_code_1.py")
-        assert c_r.num_errors == 0, f"mypy_output: {c_r.output_str}\ncode: {new_code}"
+        assert c_r.num_errors == oe, f"mypy_output: {c_r.output_str}\ncode: {new_code}"
 
 
 def test_type_env():

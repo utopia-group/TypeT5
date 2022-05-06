@@ -96,10 +96,11 @@ class GitRepo:
             rpath = src.relative_to(self.repo_dir(repos_dir))
             m = cst.parse_module(read_file(src))
             paths, annots = collect_annotations(m)
+            path_to_cat = dict(paths)
             n_paths += len(paths)
             n_annots += len(annots)
             file_to_annots[rpath] = {
-                k: (parse_type_expr(m, v.annotation, silent), paths[k])
+                k: (parse_type_expr(m, v.annotation, silent), path_to_cat[k])
                 for k, v in annots.items()
             }
         self.n_type_annots = n_annots
@@ -145,19 +146,21 @@ def mask_type_annots(file_code: Union[str, tuple[Path, str]]) -> Optional[dict]:
         return None
     paths, truths = collect_annotations(m)
     types: list[PythonType] = []
+    types_cat: list[AnnotCat] = []
     replaces = dict()
     label_id = 0
     mask_annot = cst.Annotation(cst.Name("SPOT_TYPE_MASK"))
-    for p in paths:
+    for p, cat in paths:
         if p in truths:
             ty = parse_type_expr(m, truths[p].annotation, silent=True)
             if ty is not None:
                 types.append(ty)
+                types_cat.append(cat)
                 replaces[p] = mask_annot
                 label_id += 1
     m1 = apply_annotations(m, replaces)
     code_segs = m1.code.split("SPOT_TYPE_MASK")
-    return {"code_segs": code_segs, "types": types}
+    return {"code_segs": code_segs, "types": types, "types_cat": types_cat}
 
 
 def tokenize_masked(masked: dict, tokenizer: RobertaTokenizer, device):
@@ -192,8 +195,8 @@ def chunk_masked_code(
             if isinstance(e, int):
                 result.append(e)
             else:
-                assert isinstance(e, PythonType)
-                type_tks = tokenizer.encode(str(e), add_special_tokens=False)
+                assert isinstance(e[0], PythonType)
+                type_tks = tokenizer.encode(str(e[0]), add_special_tokens=False)
                 result.extend(type_tks)
         return result
 
@@ -205,16 +208,24 @@ def chunk_masked_code(
     for src in tqdm(srcs, desc="Concatinating all srcs"):
         segs: list[str] = src["code_segs"]
         types_labels: list[PythonType] = src["types"]
-        assert len(segs) == len(types_labels) + 1
+        types_cat: list[AnnotCat] = src["types_cat"]
+        assert (
+            len(segs) == len(types_labels) + 1
+        ), f"len(segs)={len(segs)}, len(types_labels)={len(types_labels)}"
         all_tks.append(tokenizer.bos_token_id)
         for i in range(len(types_labels)):
             all_tks.extend(tokenizer.encode(segs[i], add_special_tokens=False))
-            all_tks.append(types_labels[i])
+            all_tks.append((types_labels[i], types_cat[i]))
         all_tks.extend(tokenizer.encode(segs[-1], add_special_tokens=False))
         all_tks.append(tokenizer.eos_token_id)
 
     # slide over `all_tks` with step size `stride` to turn them into masked chunks
-    chunks: dict[str, list] = {"input_ids": [], "labels": [], "types": []}
+    chunks: dict[str, list] = {
+        "input_ids": [],
+        "labels": [],
+        "types": [],
+        "types_cat": [],
+    }
     for i in tqdm(range(0, len(all_tks), stride), desc="Chunking"):
         tks = all_tks[i : i + chunk_size]
         if len(tks) != chunk_size:
@@ -222,17 +233,19 @@ def chunk_masked_code(
         extra_id = 0
         middle = []
         types = []
+        types_cat = []
 
         for tk in tks[ctx_margin : ctx_margin + stride]:
             if isinstance(tk, int):
                 middle.append(tk)
             else:
                 assert isinstance(
-                    tk, PythonType
+                    tk[0], PythonType
                 ), f"unexpected token type {type(tk)}: {tk}"
                 assert extra_id <= 99, "> 99 annotations in a single sequence"
                 middle.append(tokenizer.additional_special_tokens_ids[99 - extra_id])
-                types.append(str(tk))
+                types.append(str(tk[0]))
+                types_cat.append(tk[1].value)
                 extra_id += 1
 
         if len(types) == 0:
@@ -251,6 +264,7 @@ def chunk_masked_code(
         chunks["input_ids"].append(input_ids)
         chunks["labels"].append(label_ids)
         chunks["types"].append(types)
+        chunks["types_cat"].append(types_cat)
     return chunks
 
 
@@ -269,7 +283,7 @@ def repos_to_dataset(
         for r in tqdm(repos, desc="read_files")
         for (f, code) in r.src_files(repos_dir)
     ]
-    chunk_size = min(50, len(srcs) // max_workers)
+    chunk_size = max(1, min(50, len(srcs) // max_workers))
     masked_srcs = process_map(
         mask_type_annots,
         srcs,

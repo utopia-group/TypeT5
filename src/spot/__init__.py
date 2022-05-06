@@ -1,1 +1,1 @@
-from spot.type_env import PythonType
+from spot.type_env import AnnotCat, PythonType

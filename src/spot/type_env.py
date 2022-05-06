@@ -22,6 +22,7 @@ from tqdm import tqdm
 from .utils import *
 
 
+@enum.unique
 class AnnotCat(enum.Enum):
     """The category of an annotation."""
 
@@ -59,7 +60,7 @@ def annot_path(*segs: str) -> AnnotPath:
 
 def collect_annotations(
     code: cst.CSTNode,
-) -> Tuple[dict[AnnotPath, AnnotCat], dict[AnnotPath, cst.Annotation]]:
+) -> Tuple[list[tuple[AnnotPath, AnnotCat]], dict[AnnotPath, cst.Annotation]]:
     """Collect all annotation paths and the corresponding type annotations (if any).
     The order of the paths is the same as the order of the annotations in the code."""
     collector = AnnotCollector()
@@ -90,7 +91,7 @@ class AnnotCollector(cst.CSTVisitor):
     def __init__(self):
         self.path: AnnotPath = annot_path()
         # store the type annotations
-        self.annot_paths: dict[AnnotPath, AnnotCat] = {}
+        self.annot_paths: list[tuple[AnnotPath, AnnotCat]] = []
         self.annotations: dict[AnnotPath, cst.Annotation] = {}
         self.cat_stack = [AnnotCat.GlobalVar]
 
@@ -117,8 +118,7 @@ class AnnotCollector(cst.CSTVisitor):
 
     def _record_annot(self, name: str, cat: AnnotCat, annot: cst.Annotation | None):
         path = self.path.append(name)
-        if path not in self.annot_paths:
-            self.annot_paths[path] = cat
+        self.annot_paths.append((path, cat))
         if annot is not None:
             self.annotations[path] = annot
 
@@ -239,7 +239,7 @@ class MypyChecker:
                 self.dmypy_path,
                 "start",
                 "--",
-                "--check-untyped-defs",
+                # "--check-untyped-defs",  # turn off to improve performance
                 "--follow-imports=skip",
                 "--namespace-packages",
                 "--allow-untyped-globals",
@@ -376,14 +376,14 @@ to_annotate: {self.to_annot}
 
 class SelectAnnotations:
     @staticmethod
-    def select_annotated(paths: dict, annotated: dict) -> dict[AnnotPath, AnnotCat]:
+    def select_annotated(paths: list, annotated: dict) -> list[AnnotPath]:
         "Select all places with an existing type annotation"
-        return {k: paths[k] for k in annotated}
+        return [k for k in annotated]
 
     @staticmethod
-    def select_all_paths(paths: dict, annotated: dict) -> dict[AnnotPath, AnnotCat]:
-        "Select all places with an existing type annotation"
-        return paths
+    def select_all_paths(paths: list, annotated: dict) -> list[AnnotPath]:
+        "Select all available places"
+        return [p[0] for p in paths]
 
 
 @dataclass
@@ -408,7 +408,7 @@ class TypeInfEnv:
         self,
         checker: MypyChecker,
         src_file,
-        select_annotations: Callable,
+        select_annotations: Callable[..., list[AnnotPath]],
         check_any=False,
         print_mypy_output=False,
     ):
@@ -441,7 +441,9 @@ class TypeInfEnv:
         self.restore_file()
         module = cst.parse_module(self.original_src)
         paths, annots = collect_annotations(module)
-        to_annot: dict[AnnotPath, AnnotCat] = self.select_annotations(paths, annots)
+        to_annot: list[AnnotPath] = self.select_annotations(paths, annots)
+        paths_cats = dict(paths)
+        to_annot_cats = {p: paths_cats[p] for p in to_annot}
         to_remove = {p for p in annots.keys() if p in to_annot}
         module = apply_annotations(module, {p: MissingAnnot for p in to_remove})
         module = add_stmts(module, self.preamble)  # add all the necessary imports
@@ -450,7 +452,7 @@ class TypeInfEnv:
             p: annots[p].annotation for p in annots.keys() if p not in to_remove
         }
         num_errors = self.checker.recheck_files(self.src_file).num_errors
-        self.state = TypeInfState(module, to_annot, annotated, num_errors)
+        self.state = TypeInfState(module, to_annot_cats, annotated, num_errors)
 
     def step(self, action: TypeInfAction) -> bool:
         state = self.state
