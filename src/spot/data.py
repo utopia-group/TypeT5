@@ -13,6 +13,7 @@ from transformers import RobertaTokenizer
 
 from spot.type_env import (
     AnnotCat,
+    AnnotInfo,
     AnnotPath,
     PythonType,
     apply_annotations,
@@ -95,13 +96,19 @@ class GitRepo:
         for src in self.repo_dir(repos_dir).glob("**/*.py"):
             rpath = src.relative_to(self.repo_dir(repos_dir))
             m = cst.parse_module(read_file(src))
-            paths, annots = collect_annotations(m)
-            path_to_cat = dict(paths)
+            paths = collect_annotations(m)
+            path_to_cat = {pinfo.path: pinfo.cat for pinfo in paths}
             n_paths += len(paths)
-            n_annots += len(annots)
+            annots = (info for info in paths if info.annot is not None)
+            n_annots += sum(1 for _ in annots)
             file_to_annots[rpath] = {
-                k: (parse_type_expr(m, v.annotation, silent), path_to_cat[k])
-                for k, v in annots.items()
+                (k := info.path): (
+                    parse_type_expr(
+                        m, cast(cst.Annotation, info.annot).annotation, silent
+                    ),
+                    path_to_cat[k],
+                )
+                for info in annots
             }
         self.n_type_annots = n_annots
         self.n_type_places = n_paths
@@ -144,23 +151,29 @@ def mask_type_annots(file_code: Union[str, tuple[Path, str]]) -> Optional[dict]:
     except cst.ParserSyntaxError as e:
         logging.warning(f"Failed to parse src file: `{src_path}`")
         return None
-    paths, truths = collect_annotations(m)
+    paths = collect_annotations(m)
     types: list[PythonType] = []
-    types_cat: list[AnnotCat] = []
+    annots_info: list[AnnotInfo] = []
     replaces = dict()
     label_id = 0
     mask_annot = cst.Annotation(cst.Name("SPOT_TYPE_MASK"))
-    for p, cat in paths:
-        if p in truths:
-            ty = parse_type_expr(m, truths[p].annotation, silent=True)
-            if ty is not None:
-                types.append(ty)
-                types_cat.append(cat)
-                replaces[p] = mask_annot
-                label_id += 1
+    for info in paths:
+        if info.annot is None:
+            continue
+        p = info.path
+        ty = parse_type_expr(m, info.annot.annotation, silent=True)
+        if ty is not None:
+            types.append(ty)
+            annots_info.append(info)
+            replaces[p] = mask_annot
+            label_id += 1
     m1 = apply_annotations(m, replaces)
     code_segs = m1.code.split("SPOT_TYPE_MASK")
-    return {"code_segs": code_segs, "types": types, "types_cat": types_cat}
+    return {
+        "code_segs": code_segs,
+        "types": types,
+        "annots_info": annots_info,
+    }
 
 
 def tokenize_masked(masked: dict, tokenizer: RobertaTokenizer, device):

@@ -71,8 +71,8 @@ def test_annotation_applying():
 def test_mypy_checker_1():
     with mypy_checker("data/code") as checker:
         check_r = checker.check_code_dir()
-        assert "bad_code_1.py" in check_r.num_error_dict
-        assert "bad_code_2.py" in check_r.num_error_dict
+        assert "bad_code_1.py" in check_r.error_dict
+        assert "bad_code_2.py" in check_r.error_dict
 
 
 def test_mypy_checker_2():

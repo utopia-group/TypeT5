@@ -1,6 +1,6 @@
 # Env example 2: some existing annotations
 
-from typing import Optional
+from typing import *
 
 
 def fib(n: int):

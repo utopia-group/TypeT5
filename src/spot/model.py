@@ -2,6 +2,7 @@ from collections import Counter
 
 import numpy as np
 from transformers import RobertaTokenizer
+from transformers.models.t5 import T5ForConditionalGeneration
 from transformers.pipelines import Pipeline
 
 from spot.data import mask_type_annots, output_ids_as_types, tokenize_masked
@@ -56,3 +57,14 @@ def compute_metrics(
         "label_types": label_types,
         "pred_types": pred_types,
     }
+
+
+class AugModel:
+    """A type inference model augmented with the feedback from the type checker"""
+
+    def __init__(self, model, tokenizer):
+        self.model: T5ForConditionalGeneration = model
+        self.tokenizer: RobertaTokenizer = tokenizer
+
+    def predict(self, input_text: str, mask_type_annots: bool = True):
+        pass
