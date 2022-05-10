@@ -12,7 +12,6 @@ from posixpath import dirname, realpath
 from typing import *
 from unittest import case
 
-from decorator import contextmanager
 from libcst.metadata import CodeRange, PositionProvider
 from numpy import isin
 from pyrsistent import plist
@@ -33,8 +32,18 @@ class AnnotCat(enum.Enum):
     LocalVar = enum.auto()
 
 
-# This is supposed to be immutable, but setting `frozen=True` would cause notebook auto-reload
-# to fail
+# @dataclass(order=True, unsafe_hash=True)
+# class AnnotSegment:
+#     """A segment of an annotation path. The id records how many segments of the same name
+#     has occurred before this segment."""
+
+#     name: str
+#     id: int
+
+#     def __str__(self):
+#         return self.name if self.id == 0 else f"{self.name}[{self.id}]"
+
+
 @dataclass(order=True, unsafe_hash=True)
 class AnnotPath:
     """The unique path of a type annoation."""
@@ -45,9 +54,10 @@ class AnnotPath:
         return f"AnnotPath({self.__str__()})"
 
     def __str__(self):
-        return f"'{'.'.join(self.value.reverse())}'"
+        return f"'{'.'.join(map(str, self.value.reverse()))}'"
 
-    def append(self, seg: str) -> "AnnotPath":
+    def append(self, seg: str, id: int) -> "AnnotPath":
+        seg = seg if id == 0 else f"{seg}[{id}]"
         return AnnotPath(self.value.cons(seg))
 
     def pop(self) -> "AnnotPath":
@@ -97,12 +107,26 @@ def add_stmts(
     return code.visit(StmtsAdder(stmts))
 
 
-class AnnotCollector(cst.CSTVisitor):
+class CodePathManager:
+    def __init__(self):
+        super().__init__()
+        self.path: AnnotPath = annot_path()
+        self.path_name_counts: dict[AnnotPath, dict[str, int]] = {}
+
+    def get_path(self, name: str) -> AnnotPath:
+        counts = self.path_name_counts.get(self.path, {})
+        self.path_name_counts[self.path] = counts
+        id = counts.get(name, 0)
+        counts[name] = id + 1
+        return self.path.append(name, id)
+
+
+class AnnotCollector(cst.CSTVisitor, CodePathManager):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self):
         super().__init__()
-        self.path: AnnotPath = annot_path()
+        CodePathManager.__init__(self)
         # store the type annotations
         self.annots_info: list[AnnotInfo] = []
         self.cat_stack = [AnnotCat.GlobalVar]
@@ -110,13 +134,13 @@ class AnnotCollector(cst.CSTVisitor):
     def on_visit(self, node):
         match node:
             case cst.FunctionDef():
-                self.path = self.path.append(node.name.value)
+                self.path = self.get_path(node.name.value)
                 self.cat_stack.append(AnnotCat.LocalVar)
             case cst.ClassDef():
-                self.path = self.path.append(node.name.value)
+                self.path = self.get_path(node.name.value)
                 self.cat_stack.append(AnnotCat.ClassAtribute)
             case cst.Lambda():
-                self.path = self.path.append(SpecialNames.Lambda)
+                self.path = self.get_path(SpecialNames.Lambda)
                 self.cat_stack.append(AnnotCat.LocalVar)
         return super().on_visit(node)
 
@@ -135,9 +159,9 @@ class AnnotCollector(cst.CSTVisitor):
         annot: cst.Annotation | None,
     ) -> None:
         def fix_pos(pos: CodePosition):
-            return CodePosition(pos.line, pos.column+1)
+            return CodePosition(pos.line, pos.column + 1)
 
-        path = self.path.append(name)
+        path = self.get_path(name)
         crange = None
         if annot:
             crange = self.get_metadata(PositionProvider, annot)
@@ -160,10 +184,15 @@ class AnnotCollector(cst.CSTVisitor):
                 self._record_annot(l + "." + r, AnnotCat.ClassAtribute, node.annotation)
 
 
-class AnnotApplier(cst.CSTTransformer):
+class AnnotApplier(cst.CSTTransformer, CodePathManager):
+    """Apply the annotations to the code. Note that each AnnotPath will be
+    applied at most once."""
+
     def __init__(self, annots: Dict[AnnotPath, cst.Annotation]):
-        self.annots = annots
-        self.path: AnnotPath = annot_path()
+        super().__init__()
+        CodePathManager.__init__(self)
+
+        self.annots = annots.copy()
 
         # store the target prefixes
         self.prefixes: Set[AnnotPath] = {annot_path()}
@@ -175,9 +204,9 @@ class AnnotApplier(cst.CSTTransformer):
     def on_visit(self, node):
         match node:
             case cst.ClassDef() | cst.FunctionDef():
-                self.path = self.path.append(node.name.value)
+                self.path = self.get_path(node.name.value)
             case cst.Lambda():
-                self.path = self.path.append(SpecialNames.Lambda)
+                self.path = self.get_path(SpecialNames.Lambda)
         if self.path not in self.prefixes:
             return False
         return super().on_visit(node)
@@ -189,22 +218,21 @@ class AnnotApplier(cst.CSTTransformer):
                 self.path = self.path.pop()
         return r
 
-    def _get_annot(self, name: str) -> AnnotPath:
-        return self.path.append(name)
-
     def leave_FunctionDef(
         self, node: cst.FunctionDef, updated: cst.FunctionDef
     ) -> cst.FunctionDef:
-        path = self._get_annot(SpecialNames.Return)
+        path = self.get_path(SpecialNames.Return)
         if path in self.annots:
-            return updated.with_changes(returns=self.annots[path])
+            rep = self.annots.pop(path)
+            return updated.with_changes(returns=rep)
         else:
             return updated
 
     def leave_Param(self, node: cst.Param, updated: cst.Param) -> cst.Param:
-        path = self._get_annot(updated.name.value)
+        path = self.get_path(updated.name.value)
         if path in self.annots:
-            return updated.with_changes(annotation=self.annots[path])
+            rep = self.annots.pop(path)
+            return updated.with_changes(annotation=rep)
         else:
             return updated
 
@@ -218,10 +246,11 @@ class AnnotApplier(cst.CSTTransformer):
                 key_name = l + "." + r
             case _:
                 key_name = SpecialNames.Missing
-        path = self._get_annot(key_name)
+        path = self.get_path(key_name)
 
         if path in self.annots:
-            return updated.with_changes(annotation=self.annots[path])
+            rep = self.annots.pop(path)
+            return updated.with_changes(annotation=rep)
         else:
             return updated
 
@@ -241,7 +270,7 @@ class MypyResult:
     # total number of errors in all files
     num_errors: int
     # records the errors in each file and their locations
-    error_dict: dict[str, dict[CodePosition, str]]
+    error_dict: dict[str, list[tuple[CodePosition, str]]]
     # the original output by mypy
     output_str: str
 
@@ -257,7 +286,11 @@ class MypyChecker:
         "--allow-redefinition",
         "--show-column-numbers",
         "--show-error-codes",
+        "--soft-error-limit=-1",
+        "--config-file=",
     ]
+
+    Preamble = "from typing import * # SPOT\n"
 
     """Run Mypy daemon to (repeatedly) type check given files"""
 
@@ -298,21 +331,20 @@ class MypyChecker:
         return self._run_mypy(["python", self.dmypy_path, "check", self.code_dir])
 
     @staticmethod
-    def check_once(file: Path, cwd: Path, mypy_path: Path = None):
+    def check_project(proj: Path, mypy_path: Path = None):
         if mypy_path is None:
             mypy_path = proj_root() / ".venv/bin/mypy"
-        file = file.relative_to(cwd)
         cmd = [
             "python",
             str(mypy_path),
-            str(file),
+            ".",
             *MypyChecker.TypeCheckFlags,
         ]
         out = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            cwd=cwd,
+            cwd=proj,
         )
         return MypyChecker.parse_mypy_output(out, cmd)
 
@@ -324,16 +356,16 @@ class MypyChecker:
         assert (
             len(lines) > 0
         ), f"mypy failed. Command: `{' '.join(cmd)}`\nError: {output.stderr}"
-        error_dict: dict[str, dict[CodePosition, str]] = {}
+        error_dict: dict[str, list[tuple[CodePosition, str]]] = {}
         for l in lines:
-            m = re.match(r"(.*\.py):(\d+:\d+): error: (.+) \[[a-z\-]+\]", l)
+            m = re.match(r"(.*\.pyi?):(\d+:\d+): error: (.+) \[[a-z\-]+\]", l)
             if m is not None:
                 file = m.group(1)
                 line, col = map(int, m.group(2).split(":"))
                 error = m.group(3)
                 if file not in error_dict:
-                    error_dict[file] = {}
-                error_dict[file][CodePosition(line, col)] = error
+                    error_dict[file] = []
+                error_dict[file].append((CodePosition(line, col), error))
 
         m = re.match(r"Found (\d+) errors? in", lines[-1])
         if m is None:
@@ -342,9 +374,10 @@ class MypyChecker:
             num_errors = int(m.group(1))
 
         total_errors = sum(map(len, error_dict.values()))
-        assert (
-            num_errors == total_errors
-        ), f"{num_errors} != {total_errors}. mypy output: {output.stdout}"
+        # unfortunately, some errors do not have a column number.
+        # assert (
+        #     num_errors == total_errors
+        # ), f"{num_errors} != {total_errors}. errors found: {error_dict.values()}\n mypy output: \n{output.stdout}"
         return MypyResult(num_errors, error_dict, output.stdout)
 
     def recheck_files(self, *updated_files: str) -> MypyResult:
@@ -668,9 +701,11 @@ def normalize_type(typ: PythonType) -> PythonType:
     )
 
 
-def parse_type_str(typ_str: str):
+def parse_type_str(typ_str: str) -> PythonType:
     tree = ast.parse(typ_str, mode="eval").body
-    return parse_type_from_ast(tree)
+    ty = parse_type_from_ast(tree)
+    assert isinstance(ty, PythonType), f"{ty} is not a PythonType"
+    return ty
 
 
 def parse_type_expr(
