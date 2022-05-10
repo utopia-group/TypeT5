@@ -270,7 +270,7 @@ class MypyResult:
     # total number of errors in all files
     num_errors: int
     # records the errors in each file and their locations
-    error_dict: dict[str, list[tuple[CodePosition, str]]]
+    error_dict: dict[Path, list[tuple[CodePosition, str]]]
     # the original output by mypy
     output_str: str
 
@@ -290,7 +290,7 @@ class MypyChecker:
         "--config-file=",
     ]
 
-    Preamble = "from typing import * # SPOT\n"
+    Preamble = "from typing import Any # SPOT\n"
 
     """Run Mypy daemon to (repeatedly) type check given files"""
 
@@ -346,21 +346,23 @@ class MypyChecker:
             text=True,
             cwd=proj,
         )
-        return MypyChecker.parse_mypy_output(out, cmd)
+        return MypyChecker.parse_mypy_output(out, cmd, cwd=proj)
 
     @staticmethod
     def parse_mypy_output(
-        output: subprocess.CompletedProcess[str], cmd: list[str]
+        output: subprocess.CompletedProcess[str],
+        cmd: list[str],
+        cwd: Path,
     ) -> MypyResult:
         lines = output.stdout.splitlines()
         assert (
             len(lines) > 0
         ), f"mypy failed. Command: `{' '.join(cmd)}`\nError: {output.stderr}"
-        error_dict: dict[str, list[tuple[CodePosition, str]]] = {}
+        error_dict: dict[Path, list[tuple[CodePosition, str]]] = {}
         for l in lines:
-            m = re.match(r"(.*\.pyi?):(\d+:\d+): error: (.+) \[[a-z\-]+\]", l)
+            m = re.match(r"(.*\.py):(\d+:\d+): error: (.+) \[[a-z\-]+\]", l)
             if m is not None:
-                file = m.group(1)
+                file = Path(cwd / m.group(1)).resolve()
                 line, col = map(int, m.group(2).split(":"))
                 error = m.group(3)
                 if file not in error_dict:

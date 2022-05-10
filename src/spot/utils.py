@@ -148,7 +148,12 @@ def replace_strs_by_pos(original: str, replaces: Sequence[tuple[CodeRange, str]]
 
     while bool(replaces_sorted):
         r, rtext = replaces_sorted.pop(0)
-        advance_to(r.start, True)
+        try:
+            advance_to(r.start, True)
+        except IndexError:
+            raise IndexError(
+                f"{r.start} is out of range. Original str:\n<<{original}>>"
+            )
         advance_to(r.end, False)
         out_segs.append(rtext)
     last_pos = CodePosition(len(lines), len(lines[-1]) + 1)
