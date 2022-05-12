@@ -116,7 +116,10 @@ def issorted(xs: Iterable) -> bool:
     return True
 
 
-def replace_strs_by_pos(original: str, replaces: Sequence[tuple[CodeRange, str]]):
+def replace_strs_by_pos(original: str, replaces: Sequence[tuple[CodeRange, int, str]]):
+    """Replace the parts specificed by `replaces` with the given strings.
+    Each entry of `replaces` is a tuple of (code_range, priority, new_str)."""
+
     def as_tuple(p: CodePosition):
         return (p.line, p.column)
 
@@ -126,7 +129,7 @@ def replace_strs_by_pos(original: str, replaces: Sequence[tuple[CodeRange, str]]
 
     def advance_to(target: CodePosition, output: bool):
         nonlocal ptr
-        if as_tuple(target) < as_tuple(ptr):
+        if as_tuple(target) <= as_tuple(ptr):
             return
         assert ptr.line <= target.line, f"ptr: {ptr}, target: {target}"
         if output:
@@ -138,16 +141,14 @@ def replace_strs_by_pos(original: str, replaces: Sequence[tuple[CodeRange, str]]
             out_segs.append(lines[ptr.line - 1][ptr.column - 1 : target.column - 1])
         ptr = target
 
-    replaces_sorted = sorted(
-        replaces, key=lambda x: (as_tuple(x[0].start), as_tuple(x[0].end))
-    )
+    replaces_sorted = sorted(replaces, key=lambda x: (as_tuple(x[0].start), x[1]))
     # for (r1, t1), (r2, t2) in zip(replaces_sorted, replaces_sorted[1:]):
     #     assert as_tuple(r1.end) <= as_tuple(
     #         r2.start
     #     ), f"overlapping ranges:\n   {r1}: {t1}\n   {r2}: {t2}"
 
     while bool(replaces_sorted):
-        r, rtext = replaces_sorted.pop(0)
+        r, _, rtext = replaces_sorted.pop(0)
         try:
             advance_to(r.start, True)
         except IndexError:

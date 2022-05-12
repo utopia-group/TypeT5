@@ -1,6 +1,7 @@
 import logging
 
 import torch
+import wandb
 from datasets import Dataset, interleave_datasets
 from IPython.display import display
 from numpy import ndarray
@@ -13,7 +14,6 @@ from transformers import (
 )
 from transformers.trainer import Trainer
 
-import wandb
 from spot.data import (
     GitRepo,
     SpecialNames,
@@ -79,7 +79,7 @@ class DAggerTrainer:
         tqdm_bar = tqdm(range(max_epochs * len(train_repos)), desc="DAgger Training")
         self.current_tqdm = tqdm_bar
 
-        def eval_step() -> float:
+        def eval_step(epoch) -> float:
             with self.log_task("evaluating"):
                 r0_stats, r1_stats, _, _ = self.eval_on_repos(eval_repos)
                 self.log(r0_stats, step=tqdm_bar.n, epoch=epoch)
@@ -88,9 +88,9 @@ class DAggerTrainer:
                 self.log(r1_stats, step=tqdm_bar.n, epoch=epoch)
                 print(f"[Epoch {epoch}] R1 stats:")
                 display(r1_stats)
-                return r1_stats["R1_accuracy_full"]
+                return r1_stats["R1_accuracy_full"]["total"]
 
-        def train_step() -> None:
+        def train_step(epoch) -> None:
             with self.log_task("training"):
                 for repos in grouped(train_repos, repos_group_size):
                     super_data, dagger_data, _ = self.generate_r1_inputs(
@@ -105,10 +105,10 @@ class DAggerTrainer:
                     self.log(train_r, step=tqdm_bar.n, epoch=epoch)
 
         if not self.args.skip_first_eval:
-            assert not early_stopper.should_stop(0, eval_step())
+            assert not early_stopper.should_stop(0, eval_step(0))
         for epoch in range(1, max_epochs + 1):
-            train_step()
-            score = eval_step()
+            train_step(epoch)
+            score = eval_step(epoch)
             if early_stopper.should_stop(epoch, score):
                 print(
                     f"[Epoch {epoch}] Early stopping since R1 accuracy has "
@@ -161,7 +161,7 @@ class DAggerTrainer:
                 r0_data, r0_preds, repos, silent=silent
             )
         with self.log_task("chunk_masked_code"):
-            dagger_dataset, dager_meta = chunk_masked_code(
+            r1_dataset, r1_meta = chunk_masked_code(
                 list(new_inputs.values()),
                 self.tokenizer,
                 self.args.ctx_size,
@@ -170,9 +170,7 @@ class DAggerTrainer:
                 types_in_ctx=self.args.types_in_ctx,
                 silent=silent,
             )
-        r1_data = TypeInfDataset(
-            dagger_dataset, dager_meta, r0_data.files, r0_data.srcs
-        )
+        r1_data = TypeInfDataset(r1_dataset, r1_meta, r0_data.files, r0_data.srcs)
         return r0_data, r1_data, r0_preds
 
     def predict(self, dataset: TypeInfDataset, silent: bool) -> list[list[PythonType]]:
@@ -313,14 +311,14 @@ class DAggerTrainer:
 
         try:
             # apply the file changes and get type checker feedback
-            for file, changes in tqdm(
-                file2changes.items(), desc="apply file changes", disable=silent
-            ):
+            for file, changes in file2changes.items():
                 start = CodeRange(CodePosition(1, 1), CodePosition(1, 1))
                 changes.insert(0, (start, MypyChecker.Preamble))
                 # need this in case libcst does not preserve the original file content
                 code_seen = dataset.srcs[file]
-                new_text = replace_strs_by_pos(code_seen, changes)
+                new_text = replace_strs_by_pos(
+                    code_seen, [(r, 1, v) for r, v in changes]
+                )
                 file.write_text(new_text)
             file2errors = dict[Path, dict[CodePosition, str]]()
             file_to_repo = dict[Path, Path]()

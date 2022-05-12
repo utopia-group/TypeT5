@@ -567,13 +567,14 @@ def patch_code_with_extra(
     code: str, predictions: dict[CodeRange, str], errors: dict[CodePosition, str]
 ) -> str:
     replaces = []
-    first_line = "/* type checked */"
-    replaces.append((CodeRange(CodePosition(1, 1), CodePosition(1, 1)), first_line))
+    # When the ranges overlap, we want to use the order: new_prediction -> prev_prediction -> errors
     for r, t in predictions.items():
-        replaces.append((CodeRange(r.start, r.start), f"/* {t} */"))
-        replaces.append((r, SpecialNames.TypeMask))
+        replaces.append((r, 1, SpecialNames.TypeMask))
+        replaces.append((CodeRange(r.start, r.start), 2, f"/* {t} */"))
+
     for p, e in errors.items():
-        replaces.append((CodeRange(p, p), f"/* error: {e} */"))
+        replaces.append((CodeRange(p, p), 3, f"/* error: {e} */"))
+
     return replace_strs_by_pos(code, replaces)
 
 
