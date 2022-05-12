@@ -327,7 +327,7 @@ class MypyChecker:
             cwd=self.code_dir,
         )
 
-    def check_code_dir(self) -> MypyResult:
+    def check_code_dir(self) -> MypyResult | str:
         return self._run_mypy(["python", self.dmypy_path, "check", self.code_dir])
 
     @staticmethod
@@ -374,7 +374,7 @@ class MypyChecker:
         else:
             num_errors = int(m.group(1))
 
-        total_errors = sum(map(len, error_dict.values()))
+        # total_errors = sum(map(len, error_dict.values()))
         # unfortunately, some errors do not have a column number.
         # assert (
         #     num_errors == total_errors
@@ -428,7 +428,11 @@ class MypyChecker:
             text=True,
             cwd=self.code_dir,
         )
-        return MypyChecker.parse_mypy_output(result, cmd)
+
+        out = MypyChecker.parse_mypy_output(result, cmd, cwd=self.code_dir)
+        if isinstance(out, str):
+            raise RuntimeError(str)
+        return out
 
 
 @contextmanager

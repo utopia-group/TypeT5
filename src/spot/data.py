@@ -223,15 +223,21 @@ def _process_chunk(
     chunk_size,
     ctx_margin: int,
     tokenizer: TokenizerSPOT,
+    types_in_ctx: bool,  # whether to expand the label types in the context. If not, will replace them with <mask>.
 ) -> Optional[dict]:
     def expand_types_as_tks(mixed_tks: list):
         result = list[int]()
+        mask_id = tokenizer.mask_token_id
+        assert mask_id is not None
         for e in mixed_tks:
             if isinstance(e, int):
                 result.append(e)
             else:
-                type_tks = tokenizer.encode(str(e[0]), add_special_tokens=False)
-                result.extend(type_tks)
+                if types_in_ctx:
+                    type_tks = tokenizer.encode(str(e[0]), add_special_tokens=False)
+                    result.extend(type_tks)
+                else:
+                    result.append(mask_id)
         return result
 
     stride = chunk_size - 2 * ctx_margin
@@ -267,12 +273,12 @@ def _process_chunk(
         label_ids.append(tokenizer.additional_special_tokens_ids[99 - i])
         label_ids.extend(tokenizer.encode(str(ty), add_special_tokens=False))
     label_ids.append(tokenizer.eos_token_id)
+    meta = SrcChunkInfo(types, annots_info, src_ids)
 
     return {
         "input_ids": input_ids,
         "labels": label_ids,
-        "n_types": extra_id,
-        "meta": {"types": types, "annots_info": annots_info, "src_ids": src_ids},
+        "meta": meta,
     }
 
 
@@ -283,30 +289,37 @@ class _ChunkingHelper:
     tokenizer: TokenizerSPOT
     chunk_size: int
     ctx_margin: int
+    types_in_ctx: bool
 
     def tokenize(self, src: tuple[int, dict]):
         return _tokenize_masked_code(src[1], src[0], self.tokenizer)
 
     def process_chunk(self, tks: list[int | tuple]):
-        return _process_chunk(tks, self.chunk_size, self.ctx_margin, self.tokenizer)
+        return _process_chunk(
+            tks, self.chunk_size, self.ctx_margin, self.tokenizer, self.types_in_ctx
+        )
 
 
 @dataclass
-class LabelMetaInfo:
-    types: list[PythonType]
-    annots_info: list[AnnotInfo]
-    # maps each label to its source file index
+class SrcChunkInfo:
+    """Stores the source code information for a chunk of tokens."""
+
+    types: list[PythonType]  # the label types in this chunk
+    annots_info: list[AnnotInfo]  # the label AnnotInfos in this chunk
+    # maps each label to its source file id
     src_ids: list[int]
 
 
 def chunk_masked_code(
     srcs: Sequence[dict],
-    chunk_size: int,
     tokenizer: TokenizerSPOT,
+    chunk_size: int,
+    ctx_margin: Optional[int],
+    types_in_ctx: bool,
     max_workers: int,
-    ctx_margin=None,
+    *,
     silent=False,
-) -> tuple[Dataset, LabelMetaInfo]:
+) -> tuple[Dataset, list[SrcChunkInfo]]:
     """
     Concatenate all the code segments into a single long sequence, then break it down
     into even-sized chunks. Each source code is assumed to have already been processed by
@@ -331,7 +344,7 @@ def chunk_masked_code(
     if ctx_margin is None:
         ctx_margin = chunk_size // 4
 
-    helper = _ChunkingHelper(tokenizer, chunk_size, ctx_margin)
+    helper = _ChunkingHelper(tokenizer, chunk_size, ctx_margin, types_in_ctx)
 
     # first, tokenize and concat all files into a single long sequence
     file_tks: list[list[int | tuple]] = pmap(
@@ -342,40 +355,34 @@ def chunk_masked_code(
     all_tks: list[int | tuple] = list(seq_flatten(file_tks))
 
     # the, use a sliding window over `all_tks` with step size `stride` to turn them into masked chunks
+    stride = chunk_size - 2 * ctx_margin
     chunk_outputs = pmap(
         helper.process_chunk,
-        [all_tks[i : i + chunk_size] for i in range(0, len(all_tks), chunk_size)],
+        [all_tks[i : i + chunk_size] for i in range(0, len(all_tks), stride)],
         desc="processing chunks",
     )
 
     chunks: dict[str, list] = {
         "input_ids": [],
         "labels": [],
-        "n_types": [],
     }
-    types = list[PythonType]()
-    annots_info = list[AnnotInfo]()
-    src_ids = list[int]()
-    label_info = LabelMetaInfo(types, annots_info, src_ids)
+    chunks_info: list[SrcChunkInfo] = []
 
     for chunk in chunk_outputs:
         if chunk is None:
             continue
         chunks["input_ids"].append(chunk["input_ids"])
         chunks["labels"].append(chunk["labels"])
-        chunks["n_types"].append(chunk["n_types"])
         meta = chunk["meta"]
-        types.extend(meta["types"])
-        annots_info.extend(meta["annots_info"])
-        src_ids.extend(meta["src_ids"])
+        chunks_info.append(meta)
 
-    return Dataset.from_dict(chunks), label_info
+    return Dataset.from_dict(chunks), chunks_info
 
 
 @dataclass
 class TypeInfDataset:
     data: Dataset
-    meta: LabelMetaInfo
+    chunks_info: list[SrcChunkInfo]
     # The source files of this data set
     files: list[Path]
     # The source contents seen by the parser. All code locations refer to
@@ -385,34 +392,11 @@ class TypeInfDataset:
     def __getitem__(self, key: slice) -> "TypeInfDataset":
         assert isinstance(key, slice)
 
-        rows = set(key.indices(len(self.data)))
-        old_meta = self.meta
-
-        types = []
-        annots_info = []
-        src_ids = []
-        n_annot = 0
-        self.data.set_format(None)
-        for r, n in enumerate(self.data["n_types"]):
-            n_annot1 = n_annot + n
-            if r in rows:
-                types.extend(old_meta.types[n_annot:n_annot1])
-                annots_info.extend(old_meta.annots_info[n_annot:n_annot1])
-                src_ids.extend(old_meta.src_ids[n_annot:n_annot1])
-            n_annot = n_annot1
-        assert n_annot == len(
-            old_meta.types
-        ), f"n_annot={n_annot}, old_meta.types={len(old_meta.types)}"
-
-        meta = LabelMetaInfo(
-            types,
-            annots_info,
-            src_ids,
-        )
         new_data = {n: self.data[n][key] for n in self.data.column_names}
+        new_info = self.chunks_info[key]
         return TypeInfDataset(
             Dataset.from_dict(new_data),
-            meta=meta,
+            chunks_info=new_info,
             files=self.files,
             srcs=self.srcs,
         )
@@ -423,6 +407,8 @@ def repos_to_dataset(
     tokenizer: TokenizerSPOT,
     max_workers: int,
     ctx_margin: Optional[int],
+    types_in_ctx: bool,
+    *,
     silent=False,
 ) -> TypeInfDataset:
     tokenizer.deprecation_warnings[
@@ -455,16 +441,17 @@ def repos_to_dataset(
     if not silent:
         logging.info(f"{len(masked_srcs)} / {len(srcs)} srcs succesfully parsed.")
     context_len = tokenizer.model_max_length
-    dataset, label_info = chunk_masked_code(
+    dataset, chunks_info = chunk_masked_code(
         masked_srcs,
-        context_len,
         tokenizer,
+        context_len,
         ctx_margin=ctx_margin,
         max_workers=max_workers,
+        types_in_ctx=types_in_ctx,
         silent=silent,
     )
 
-    return TypeInfDataset(dataset, label_info, parsed_files, file_to_src)
+    return TypeInfDataset(dataset, chunks_info, parsed_files, file_to_src)
 
 
 def load_or_process_datasets(
@@ -477,6 +464,7 @@ def load_or_process_datasets(
     max_workers: int = 12,
     regenerate: bool = False,
     ctx_margin: Optional[int] = None,
+    types_in_ctx: bool = False,
 ):
     if datasets_dir.exists() and not regenerate:
         print("Loading datasets from:", datasets_dir)
@@ -498,12 +486,16 @@ def load_or_process_datasets(
         print(f"Processing dataset: {name}")
         repo_paths = [repo.repo_dir(repos_dir) for repo in repos]
         tdata = repos_to_dataset(
-            repo_paths, tokenizer, max_workers, ctx_margin=ctx_margin
+            repo_paths,
+            tokenizer,
+            max_workers,
+            ctx_margin=ctx_margin,
+            types_in_ctx=types_in_ctx,
         )
         datasets[name] = tdata
 
         tdata.data.save_to_disk(str(datasets_dir / name))
-        extra = tdata.meta, tdata.files, tdata.srcs
+        extra = tdata.chunks_info, tdata.files, tdata.srcs
         with open(datasets_dir / f"{name}-extra.pkl", "wb") as f:
             pickle.dump(extra, f)
 
@@ -552,7 +544,7 @@ def output_ids_as_types(
     list is of the correct length."""
     seqs = output_ids_as_seqs(output_ids, tokenizer)
     types = list[PythonType]()
-    for seq in seqs:
+    for seq in seqs[:n_types]:
         try:
             ex_str = tokenizer.decode(seq, skip_special_tokens=True)
         except Exception as e:
@@ -567,6 +559,7 @@ def output_ids_as_types(
         ), f"{ty} of type {type(ty)} is not a PythonType."
         types.append(ty)
     types.extend(PythonType.Any() for _ in range(n_types - len(types)))
+    assert len(types) == n_types
     return types
 
 
@@ -645,3 +638,22 @@ def type_accuracies(
         "accuracy_full": accuracy_full,
         "n_labels": n_label_by_cat.total(),
     }
+
+
+def inline_predictions(
+    input_tks: Sequence[int],
+    predictions: Sequence[Sequence[int]],
+    tokenizer: TokenizerSPOT,
+) -> list[int]:
+    """Inline the model predictions into the input code and then decode"""
+    out_tks = list[int]()
+    extra_id = 0
+    next_special = tokenizer.additional_special_tokens_ids[99 - extra_id]
+    for tk in input_tks:
+        out_tks.append(tk)
+        if tk == next_special:
+            out_tks.extend(predictions[extra_id])
+            extra_id += 1
+            next_special = tokenizer.additional_special_tokens_ids[99 - extra_id]
+    assert extra_id == len(predictions), f"{extra_id} != {len(predictions)}"
+    return out_tks

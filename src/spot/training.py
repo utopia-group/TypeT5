@@ -2,6 +2,7 @@ import logging
 
 import torch
 from datasets import Dataset, interleave_datasets
+from IPython.display import display
 from numpy import ndarray
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
@@ -15,8 +16,8 @@ from transformers.trainer import Trainer
 import wandb
 from spot.data import (
     GitRepo,
-    LabelMetaInfo,
     SpecialNames,
+    SrcChunkInfo,
     TypeInfDataset,
     chunk_masked_code,
     output_ids_as_types,
@@ -44,6 +45,7 @@ class DAggerTrainerArgs:
     repos_group_size: int
     ctx_size: int
     ctx_margin: int
+    types_in_ctx: bool
     sampling_batch_size: int
     train_batch_size: int
     max_workers: int
@@ -52,6 +54,7 @@ class DAggerTrainerArgs:
     top_p: float = 0.9
     # when the eval metric is getting worse, how many more evaluation steps to wait before stopping training
     early_stopping_patience: int = 0
+    skip_first_eval: bool = False
 
 
 @dataclass
@@ -63,7 +66,11 @@ class DAggerTrainer:
     current_task: list[str] = field(default_factory=list)
     current_tqdm: Optional[tqdm] = None
 
-    def train(self, train_repos: Sequence[Path], eval_repos: Sequence[Path]) -> None:
+    def train(
+        self,
+        train_repos: Sequence[Path],
+        eval_repos: Sequence[Path],
+    ) -> None:
         max_epochs = self.args.max_epochs
         repos_group_size = self.args.repos_group_size
         optimizer = AdamW(self.model.parameters(), lr=5e-5, weight_decay=0.01)
@@ -71,32 +78,24 @@ class DAggerTrainer:
         best_model_dir = self.args.output_dir / "best_model"
         tqdm_bar = tqdm(range(max_epochs * len(train_repos)), desc="DAgger Training")
         self.current_tqdm = tqdm_bar
-        for epoch in range(max_epochs + 1):
-            # perform evaluation
+
+        def eval_step() -> float:
             with self.log_task("evaluating"):
-                r0_stats, r1_stats = self.eval_on_repos(eval_repos)
+                r0_stats, r1_stats, _, _ = self.eval_on_repos(eval_repos)
                 self.log(r0_stats, step=tqdm_bar.n, epoch=epoch)
-                print(f"[Epoch {epoch}] R0 stats: {r0_stats}")
+                print(f"[Epoch {epoch}] R0 stats:")
+                display(r0_stats)
                 self.log(r1_stats, step=tqdm_bar.n, epoch=epoch)
-                print(f"[Epoch {epoch}] R1 stats: {r1_stats}")
-                if early_stopper.should_stop(epoch, r1_stats["R1_accuracy_full"]):
-                    print(
-                        f"[Epoch {epoch}] Early stopping since R1 accuracy has "
-                        + f"not improved in {self.args.early_stopping_patience} epochs."
-                    )
-                    print("Loading best model...")
-                    self.model = ModelSPOT.from_pretrained(best_model_dir)
-                    break
-                elif epoch == early_stopper.best_step():
-                    with self.log_task("saving best model"):
-                        self.model.save_pretrained(best_model_dir)
+                print(f"[Epoch {epoch}] R1 stats:")
+                display(r1_stats)
+                return r1_stats["R1_accuracy_full"]
 
-            if epoch == max_epochs:
-                break
-
+        def train_step() -> None:
             with self.log_task("training"):
                 for repos in grouped(train_repos, repos_group_size):
-                    super_data, dagger_data, _ = self.generate_data(repos, silent=True)
+                    super_data, dagger_data, _ = self.generate_r1_inputs(
+                        repos, silent=True
+                    )
                     train_data = interleave_datasets(
                         [super_data.data, dagger_data.data]
                     )
@@ -104,6 +103,23 @@ class DAggerTrainer:
                         train_r = self.train_on_data(train_data, optimizer)
                     tqdm_bar.update(len(repos))
                     self.log(train_r, step=tqdm_bar.n, epoch=epoch)
+
+        if not self.args.skip_first_eval:
+            assert not early_stopper.should_stop(0, eval_step())
+        for epoch in range(1, max_epochs + 1):
+            train_step()
+            score = eval_step()
+            if early_stopper.should_stop(epoch, score):
+                print(
+                    f"[Epoch {epoch}] Early stopping since R1 accuracy has "
+                    + f"not improved in {self.args.early_stopping_patience} epochs."
+                )
+                print("Loading best model...")
+                self.model = ModelSPOT.from_pretrained(best_model_dir)
+            elif epoch == early_stopper.best_step():
+                with self.log_task("saving best model"):
+                    self.model.save_pretrained(best_model_dir)
+
         self.current_tqdm = None
 
     @contextmanager
@@ -121,11 +137,11 @@ class DAggerTrainer:
                 task_name = " > ".join(self.current_task)
                 self.current_tqdm.set_postfix_str(f"Current task: {task_name}")
 
-    def generate_data(
+    def generate_r1_inputs(
         self,
         repos: Sequence[Path],
         silent: bool,
-    ) -> tuple[TypeInfDataset, TypeInfDataset, list[PythonType]]:
+    ) -> tuple[TypeInfDataset, TypeInfDataset, list[list[PythonType]]]:
         """Generate two datasets from the given repos. One for training with supervised learning,
         the other for DAgger training, which combines feedback from the type checker."""
         with self.log_task("repos_to_dataset"):
@@ -134,41 +150,44 @@ class DAggerTrainer:
                 self.tokenizer,
                 max_workers=self.args.max_workers,
                 ctx_margin=self.args.ctx_margin,
+                types_in_ctx=self.args.types_in_ctx,
                 silent=silent,
             )
         # make predictions on the original training set
         with self.log_task("predict"):
-            pred_types = self.predict(r0_data.data, silent=silent)
+            r0_preds = self.predict(r0_data, silent=silent)
         with self.log_task("get_type_checked_inputs"):
             new_inputs = self.get_type_checked_inputs(
-                r0_data, pred_types, repos, silent=silent
+                r0_data, r0_preds, repos, silent=silent
             )
         with self.log_task("chunk_masked_code"):
             dagger_dataset, dager_meta = chunk_masked_code(
                 list(new_inputs.values()),
-                self.args.ctx_size,
                 self.tokenizer,
+                self.args.ctx_size,
                 max_workers=self.args.max_workers,
                 ctx_margin=self.args.ctx_margin,
+                types_in_ctx=self.args.types_in_ctx,
                 silent=silent,
             )
         r1_data = TypeInfDataset(
             dagger_dataset, dager_meta, r0_data.files, r0_data.srcs
         )
-        return r0_data, r1_data, pred_types
+        return r0_data, r1_data, r0_preds
 
-    def predict(self, dataset: Dataset, silent: bool) -> list[PythonType]:
+    def predict(self, dataset: TypeInfDataset, silent: bool) -> list[list[PythonType]]:
         """Run the current model on the given dataset and return the predicted types."""
         collator = DataCollatorForSeq2Seq(self.tokenizer, self.model)
         loader = DataLoader(
-            dataset,  # type: ignore
+            dataset.data,  # type: ignore
             shuffle=False,
             batch_size=self.args.sampling_batch_size,
             collate_fn=collator,
         )
         device = self.model.device
-        pred_types = list[PythonType]()
-        tqdm_bar = tqdm(range(len(loader)), desc="predict", disable=silent)
+        pred_types = list[list[PythonType]]()
+        tqdm_bar = tqdm(total=len(dataset.data), desc="predict", disable=silent)
+        chunk_id = 0
         for batch in loader:
             output_ids = self.model.generate(
                 inputs=batch["input_ids"].to(device),
@@ -179,10 +198,13 @@ class DAggerTrainer:
             ).cpu()  # type: ignore
             assert len(output_ids.shape) == 2
 
-            for i in range(output_ids.shape[0]):
+            n_chunks = output_ids.shape[0]
+            for i in range(n_chunks):
+                n_annots = len(dataset.chunks_info[i + chunk_id].annots_info)
                 row = output_ids[i, :]
-                types = output_ids_as_types(row, self.tokenizer, batch["n_types"][i])
-                pred_types.extend(types)
+                types = output_ids_as_types(row, self.tokenizer, n_annots)
+                pred_types.append(types)
+            chunk_id += n_chunks
             tqdm_bar.update(output_ids.shape[0])
         return pred_types
 
@@ -211,27 +233,31 @@ class DAggerTrainer:
         avg_loss = sum(losses) / len(losses)
         return {"loss": avg_loss}
 
-    def eval_on_data(self, dataset: TypeInfDataset, silent: bool = True) -> dict:
-        with self.log_task("predict"):
-            pred_types = self.predict(dataset.data, silent=silent)
-        cats = [i.cat for i in dataset.meta.annots_info]
-        labels = dataset.meta.types
-        return type_accuracies(pred_types, labels, cats)
-
     def eval_on_repos(
         self, repos: Sequence[Path], silent: bool = True
-    ) -> tuple[dict, dict]:
-        r0_data, r1_data, r0_preds = self.generate_data(repos, silent=silent)
-        eval_cats = [i.cat for i in r0_data.meta.annots_info]
-        labels = r0_data.meta.types
+    ) -> tuple[dict, dict, TypeInfDataset, list[list[PythonType]]]:
+        r0_data, r1_data, r0_preds = self.generate_r1_inputs(repos, silent=silent)
+        r0_cats = [an.cat for info in r0_data.chunks_info for an in info.annots_info]
+        r0_labels = [ty for info in r0_data.chunks_info for ty in info.types]
         r0_stats = {
             f"R0_{k}": v
-            for k, v in type_accuracies(r0_preds, labels, eval_cats).items()
+            for k, v in type_accuracies(
+                list(seq_flatten(r0_preds)), r0_labels, r0_cats
+            ).items()
         }
+
+        with self.log_task("predict"):
+            r1_preds = self.predict(r1_data, silent=silent)
+        r1_cats = [an.cat for info in r1_data.chunks_info for an in info.annots_info]
+        r1_labels = [ty for info in r1_data.chunks_info for ty in info.types]
+
         r1_stats = {
-            f"R1_{k}": v for k, v in self.eval_on_data(r1_data, silent=silent).items()
+            f"R1_{k}": v
+            for k, v in type_accuracies(
+                list(seq_flatten(r1_preds)), r1_labels, r1_cats
+            ).items()
         }
-        return r0_stats, r1_stats
+        return r0_stats, r1_stats, r1_data, r1_preds
 
     def _t_map(
         self, f: Callable[[T1], T2], xs: Iterable[T1], desc: str, silent=True
@@ -247,7 +273,7 @@ class DAggerTrainer:
     def get_type_checked_inputs(
         self,
         dataset: TypeInfDataset,
-        pred_types: Sequence[PythonType],
+        pred_types: Sequence[Sequence[PythonType]],
         repo_paths: Sequence[Path],
         silent: bool,
     ) -> dict[Path, dict]:
@@ -259,24 +285,26 @@ class DAggerTrainer:
             set(p.resolve() for p in repo_paths)
         ), "Repo paths must be unique"
 
-        label_info = dataset.meta
-        for ty, info, sid in zip(
-            pred_types, label_info.annots_info, label_info.src_ids
-        ):
-            file = dataset.files[sid]
-            if file not in file2changes:
-                file2changes[file] = []
-            assert info.annot_range is not None
-            file2changes[file].append((info.annot_range, str(ty)))
+        label_info = dataset.chunks_info
+        for chunk_preds, chunk_info in zip(pred_types, label_info):
+            for ty, info, sid in zip(
+                chunk_preds, chunk_info.annots_info, chunk_info.src_ids
+            ):
+                file = dataset.files[sid]
+                if file not in file2changes:
+                    file2changes[file] = []
+                assert info.annot_range is not None
+                file2changes[file].append((info.annot_range, str(ty)))
 
+        changed_files = list(file2changes.keys())
         origin_contents = self._t_map(
             read_file,
-            file2changes.keys(),
+            changed_files,
             "reading orginal srcs",
-            silent=silent,
+            silent=True,
         )
         path_to_original = dict[Path, str]()
-        for f, text in zip(file2changes.keys(), origin_contents):
+        for f, text in zip(changed_files, origin_contents):
             if MypyChecker.Preamble in text:
                 raise RuntimeError(f"{f} is already modified by SPOT.")
             path_to_original[f] = text
@@ -317,12 +345,10 @@ class DAggerTrainer:
                     file_to_repo[file] = dir
 
             # generate feedback-augmented inputs
-            file_errors = [
-                file2errors.get(f.resolve(), {}) for f in file2changes.keys()
-            ]
+            file_errors = [file2errors.get(f.resolve(), {}) for f in changed_files]
             new_inputs = process_map(
                 _generate_augmented_inputs,
-                file2changes.keys(),
+                changed_files,
                 file_errors,
                 origin_contents,
                 chunksize=max(len(file2changes) // (8 * max_workers), 1),
@@ -330,7 +356,7 @@ class DAggerTrainer:
                 desc="generating augmented inputs",
                 disable=silent,
             )
-            return dict(zip(file2changes.keys(), new_inputs))
+            return dict(zip(changed_files, new_inputs))
         finally:
             # restore the files to their original contents
             for file, content in path_to_original.items():
@@ -363,7 +389,10 @@ def _generate_augmented_inputs(
         raise RuntimeError(
             f"Failed to parse file: '{file}' with content:\n{current_code}"
         ) from e
-    current_code = m.code  # use the code from the CST
+    m_code = m.code
+    assert m_code == current_code, "Code 1:\n<<{}>>\nCode 2:\n<<{}>>".format(
+        current_code, m_code
+    )
     current_annots = collect_annotations(m)
     preds_map = dict[CodeRange, str]()
     for a in current_annots:

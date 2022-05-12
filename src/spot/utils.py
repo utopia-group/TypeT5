@@ -152,7 +152,7 @@ def replace_strs_by_pos(original: str, replaces: Sequence[tuple[CodeRange, str]]
             advance_to(r.start, True)
         except IndexError:
             raise IndexError(
-                f"{r.start} is out of range. Original str:\n<<{original}>>"
+                f"{r.start} is out of range. Trying to replace with text <<{rtext}>>. Original str:\n<<{original}>>"
             )
         advance_to(r.end, False)
         out_segs.append(rtext)
