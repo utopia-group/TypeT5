@@ -1,3 +1,5 @@
+import logging
+
 import torch
 from datasets import Dataset, interleave_datasets
 from numpy import ndarray
@@ -23,6 +25,7 @@ from spot.data import (
     type_accuracies,
 )
 from spot.type_env import (
+    AnnotInfo,
     MypyChecker,
     MypyResult,
     PythonType,
@@ -47,6 +50,8 @@ class DAggerTrainerArgs:
     generation_max_length: int = 128
     generation_num_beams: int = 8
     top_p: float = 0.9
+    # when the eval metric is getting worse, how many more evaluation steps to wait before stopping training
+    early_stopping_patience: int = 0
 
 
 @dataclass
@@ -62,33 +67,43 @@ class DAggerTrainer:
         max_epochs = self.args.max_epochs
         repos_group_size = self.args.repos_group_size
         optimizer = AdamW(self.model.parameters(), lr=5e-5, weight_decay=0.01)
+        early_stopper = EarlyStopper(self.args.early_stopping_patience)
+        best_model_dir = self.args.output_dir / "best_model"
         tqdm_bar = tqdm(range(max_epochs * len(train_repos)), desc="DAgger Training")
         self.current_tqdm = tqdm_bar
-        for epoch in range(max_epochs):
+        for epoch in range(max_epochs + 1):
+            # perform evaluation
+            with self.log_task("evaluating"):
+                r0_stats, r1_stats = self.eval_on_repos(eval_repos)
+                self.log(r0_stats, step=tqdm_bar.n, epoch=epoch)
+                print(f"[Epoch {epoch}] R0 stats: {r0_stats}")
+                self.log(r1_stats, step=tqdm_bar.n, epoch=epoch)
+                print(f"[Epoch {epoch}] R1 stats: {r1_stats}")
+                if early_stopper.should_stop(epoch, r1_stats["R1_accuracy_full"]):
+                    print(
+                        f"[Epoch {epoch}] Early stopping since R1 accuracy has "
+                        + f"not improved in {self.args.early_stopping_patience} epochs."
+                    )
+                    print("Loading best model...")
+                    self.model = ModelSPOT.from_pretrained(best_model_dir)
+                    break
+                elif epoch == early_stopper.best_step():
+                    with self.log_task("saving best model"):
+                        self.model.save_pretrained(best_model_dir)
+
+            if epoch == max_epochs:
+                break
+
             with self.log_task("training"):
                 for repos in grouped(train_repos, repos_group_size):
-                    super_data, dagger_data, _ = self.generate_data(repos)
+                    super_data, dagger_data, _ = self.generate_data(repos, silent=True)
                     train_data = interleave_datasets(
                         [super_data.data, dagger_data.data]
                     )
-                    with self.log_task("model fitting"):
+                    with self.log_task("train_on_data"):
                         train_r = self.train_on_data(train_data, optimizer)
                     tqdm_bar.update(len(repos))
                     self.log(train_r, step=tqdm_bar.n, epoch=epoch)
-            # perform evaluation
-            with self.log_task("evaluating"):
-                r0_data, r1_data, r0_preds = self.generate_data(eval_repos)
-                eval_cats = [i.cat for i in r0_data.meta.annots_info]
-                labels = r0_data.meta.types
-                r0_stats = {
-                    f"R0_{k}": v
-                    for k, v in type_accuracies(r0_preds, labels, eval_cats).items()
-                }
-                self.log(r0_stats, step=tqdm_bar.n, epoch=epoch)
-                print(f"[Epoch {epoch}] R0 stats: {r0_stats}")
-                r1_stats = {f"R1_{k}": v for k, v in self.eval_on_data(r1_data).items()}
-                self.log(r1_stats, step=tqdm_bar.n, epoch=epoch)
-                print(f"[Epoch {epoch}] R1 stats: {r1_stats}")
         self.current_tqdm = None
 
     @contextmanager
@@ -97,45 +112,52 @@ class DAggerTrainer:
         task_name = " > ".join(self.current_task)
         if self.current_tqdm is not None:
             self.current_tqdm.set_postfix_str(f"Current task: {task_name}")
-        with self.timer.log_time(task_name):
-            yield
-        self.current_task.pop()
-        if self.current_tqdm is not None:
-            task_name = " > ".join(self.current_task)
-            self.current_tqdm.set_postfix_str(f"Current task: {task_name}")
+        try:
+            with self.timer.log_time(task_name):
+                yield
+        finally:
+            self.current_task.pop()
+            if self.current_tqdm is not None:
+                task_name = " > ".join(self.current_task)
+                self.current_tqdm.set_postfix_str(f"Current task: {task_name}")
 
     def generate_data(
-        self, repos: Sequence[Path]
+        self,
+        repos: Sequence[Path],
+        silent: bool,
     ) -> tuple[TypeInfDataset, TypeInfDataset, list[PythonType]]:
         """Generate two datasets from the given repos. One for training with supervised learning,
         the other for DAgger training, which combines feedback from the type checker."""
-        with self.log_task("preparing data"):
+        with self.log_task("repos_to_dataset"):
             r0_data = repos_to_dataset(
                 repos,
                 self.tokenizer,
-                self.args.max_workers,
-                self.args.ctx_margin,
-                silent=True,
+                max_workers=self.args.max_workers,
+                ctx_margin=self.args.ctx_margin,
+                silent=silent,
             )
         # make predictions on the original training set
-        with self.log_task("model prediction"):
-            pred_types = self.predict(r0_data.data)
-        with self.log_task("type checking"):
+        with self.log_task("predict"):
+            pred_types = self.predict(r0_data.data, silent=silent)
+        with self.log_task("get_type_checked_inputs"):
             new_inputs = self.get_type_checked_inputs(
-                repos, pred_types, r0_data.meta, r0_data.files
+                r0_data, pred_types, repos, silent=silent
             )
-        with self.log_task("preparing data"):
+        with self.log_task("chunk_masked_code"):
             dagger_dataset, dager_meta = chunk_masked_code(
                 list(new_inputs.values()),
                 self.args.ctx_size,
                 self.tokenizer,
-                self.args.ctx_margin,
-                silent=True,
+                max_workers=self.args.max_workers,
+                ctx_margin=self.args.ctx_margin,
+                silent=silent,
             )
-        r1_data = TypeInfDataset(dagger_dataset, dager_meta, r0_data.files)
+        r1_data = TypeInfDataset(
+            dagger_dataset, dager_meta, r0_data.files, r0_data.srcs
+        )
         return r0_data, r1_data, pred_types
 
-    def predict(self, dataset: Dataset) -> list[PythonType]:
+    def predict(self, dataset: Dataset, silent: bool) -> list[PythonType]:
         """Run the current model on the given dataset and return the predicted types."""
         collator = DataCollatorForSeq2Seq(self.tokenizer, self.model)
         loader = DataLoader(
@@ -145,7 +167,8 @@ class DAggerTrainer:
             collate_fn=collator,
         )
         device = self.model.device
-        pred_types = []
+        pred_types = list[PythonType]()
+        tqdm_bar = tqdm(range(len(loader)), desc="predict", disable=silent)
         for batch in loader:
             output_ids = self.model.generate(
                 inputs=batch["input_ids"].to(device),
@@ -160,6 +183,7 @@ class DAggerTrainer:
                 row = output_ids[i, :]
                 types = output_ids_as_types(row, self.tokenizer, batch["n_types"][i])
                 pred_types.extend(types)
+            tqdm_bar.update(output_ids.shape[0])
         return pred_types
 
     def train_on_data(self, dataset: Dataset, optimizer: AdamW) -> dict:
@@ -187,106 +211,188 @@ class DAggerTrainer:
         avg_loss = sum(losses) / len(losses)
         return {"loss": avg_loss}
 
-    def eval_on_data(self, dataset: TypeInfDataset) -> dict:
-        with self.log_task("model prediction"):
-            pred_types = self.predict(dataset.data)
+    def eval_on_data(self, dataset: TypeInfDataset, silent: bool = True) -> dict:
+        with self.log_task("predict"):
+            pred_types = self.predict(dataset.data, silent=silent)
         cats = [i.cat for i in dataset.meta.annots_info]
         labels = dataset.meta.types
         return type_accuracies(pred_types, labels, cats)
 
+    def eval_on_repos(
+        self, repos: Sequence[Path], silent: bool = True
+    ) -> tuple[dict, dict]:
+        r0_data, r1_data, r0_preds = self.generate_data(repos, silent=silent)
+        eval_cats = [i.cat for i in r0_data.meta.annots_info]
+        labels = r0_data.meta.types
+        r0_stats = {
+            f"R0_{k}": v
+            for k, v in type_accuracies(r0_preds, labels, eval_cats).items()
+        }
+        r1_stats = {
+            f"R1_{k}": v for k, v in self.eval_on_data(r1_data, silent=silent).items()
+        }
+        return r0_stats, r1_stats
+
+    def _t_map(
+        self, f: Callable[[T1], T2], xs: Iterable[T1], desc: str, silent=True
+    ) -> list[T2]:
+        return thread_map(
+            f,
+            xs,
+            max_workers=self.args.max_workers,
+            desc=desc,
+            disable=silent,
+        )
+
     def get_type_checked_inputs(
         self,
-        repo_paths: Sequence[Path],
+        dataset: TypeInfDataset,
         pred_types: Sequence[PythonType],
-        label_info: LabelMetaInfo,
-        parsed_files: Sequence[Path],
+        repo_paths: Sequence[Path],
+        silent: bool,
     ) -> dict[Path, dict]:
         """Apply the predicted types to the given files and collect the type checker feedback, then restore the
         files to their original contents."""
-        file_changes = dict[Path, list[tuple[CodeRange, str]]]()
+        file2changes = dict[Path, list[tuple[CodeRange, str]]]()
 
         assert len(repo_paths) == len(
             set(p.resolve() for p in repo_paths)
         ), "Repo paths must be unique"
 
+        label_info = dataset.meta
         for ty, info, sid in zip(
             pred_types, label_info.annots_info, label_info.src_ids
         ):
-            file = parsed_files[sid]
-            if file not in file_changes:
-                file_changes[file] = []
+            file = dataset.files[sid]
+            if file not in file2changes:
+                file2changes[file] = []
             assert info.annot_range is not None
-            file_changes[file].append((info.annot_range, str(ty)))
+            file2changes[file].append((info.annot_range, str(ty)))
 
-        origin_contents = {p: p.read_text() for p in file_changes}
-        for f, text in origin_contents.items():
+        origin_contents = self._t_map(
+            read_file,
+            file2changes.keys(),
+            "reading orginal srcs",
+            silent=silent,
+        )
+        path_to_original = dict[Path, str]()
+        for f, text in zip(file2changes.keys(), origin_contents):
             if MypyChecker.Preamble in text:
                 raise RuntimeError(f"{f} is already modified by SPOT.")
+            path_to_original[f] = text
+
+        max_workers = self.args.max_workers
 
         try:
-            # commit the changes and get type checker feedback
-            for file, changes in file_changes.items():
+            # apply the file changes and get type checker feedback
+            for file, changes in tqdm(
+                file2changes.items(), desc="apply file changes", disable=silent
+            ):
                 start = CodeRange(CodePosition(1, 1), CodePosition(1, 1))
                 changes.insert(0, (start, MypyChecker.Preamble))
-                new_text = replace_strs_by_pos(origin_contents[file], changes)
+                # need this in case libcst does not preserve the original file content
+                code_seen = dataset.srcs[file]
+                new_text = replace_strs_by_pos(code_seen, changes)
                 file.write_text(new_text)
-            file_to_errors = dict[Path, dict[CodePosition, str]]()
+            file2errors = dict[Path, dict[CodePosition, str]]()
             file_to_repo = dict[Path, Path]()
-            check_results: list[MypyResult] = process_map(
-                MypyChecker.check_project,
-                repo_paths,
-                max_workers=self.args.max_workers,
-                desc="type checking",
-                chunk_size=1,
-                disable=True,
-            )
+
+            with self.log_task("Call mypy"):
+                check_results: list[MypyResult | str] = thread_map(
+                    MypyChecker.check_project,
+                    repo_paths,
+                    max_workers=max_workers,
+                    desc="calling mypy",
+                    disable=silent,
+                )
             for dir, check_r in zip(repo_paths, check_results):
+                if isinstance(check_r, str):
+                    logging.warning(f"Mypy errored when checking '{dir}'.")
+                    continue
                 for file, errors in check_r.error_dict.items():
                     assert (
                         file not in file_to_repo
                     ), f"{file} appears in multiple repos? repo1: {file_to_repo[file]}, repo2: {dir}"
-                    file_to_errors[file] = dict(errors)
+                    file2errors[file] = dict(errors)
                     file_to_repo[file] = dir
-            new_inputs = dict[Path, dict]()
-            for file in file_changes:
-                code = file.read_text()
-                m = cst.parse_module(code)
-                annots = collect_annotations(m)
-                preds_map = {
-                    a.annot_range: m.code_for_node(a.annot.annotation)
-                    for a in annots
-                    if a.annot is not None and a.annot_range is not None
-                }
-                file_errors = file_to_errors.pop(file.resolve(), {})
-                new_code = patch_code_with_extra(code, preds_map, file_errors)
-                origin_mod = cst.parse_module(origin_contents[file])
-                origin_labels = collect_annotations(origin_mod)
-                types = [
-                    parse_type_expr(origin_mod, info.annot.annotation, silent=True)
-                    for info in origin_labels
-                    if info.annot is not None
-                ]
-                new_src = {
-                    "code_segs": new_code.split(SpecialNames.TypeMask),
-                    "types": types,
-                    "annots_info": [
-                        info for info in origin_labels if info.annot is not None
-                    ],
-                }
-                new_inputs[file] = new_src
 
-            # files that fail to parse can invalidate this
-            # unchanged_files = set(
-            #     f.resolve() for f in parsed_files if f not in file_changes
-            # )
-            # for f in file_to_errors:
-            #     assert f in unchanged_files, f"Unhandled errors in file: {f}"
-
-            return new_inputs
+            # generate feedback-augmented inputs
+            file_errors = [
+                file2errors.get(f.resolve(), {}) for f in file2changes.keys()
+            ]
+            new_inputs = process_map(
+                _generate_augmented_inputs,
+                file2changes.keys(),
+                file_errors,
+                origin_contents,
+                chunksize=max(len(file2changes) // (8 * max_workers), 1),
+                max_workers=max_workers,
+                desc="generating augmented inputs",
+                disable=silent,
+            )
+            return dict(zip(file2changes.keys(), new_inputs))
         finally:
             # restore the files to their original contents
-            for file, content in origin_contents.items():
+            for file, content in path_to_original.items():
                 file.write_text(content)
 
     def log(self, metrics: dict, **additional) -> None:
         wandb.log({**metrics, **additional})
+
+
+def _generate_augmented_inputs(
+    file: Path, file_errors: dict[CodePosition, str], original_src: str
+) -> dict:
+    origin_mod = cst.parse_module(original_src)
+    origin_labels = collect_annotations(origin_mod)
+    types = list[PythonType]()
+    annots_info = list[AnnotInfo]()
+    for info in origin_labels:
+        if info.annot is None:
+            continue
+        ty = parse_type_expr(origin_mod, info.annot.annotation, silent=True)
+        if ty is not None:
+            types.append(ty)
+            annots_info.append(info)
+    paths_of_interest = set(info.path for info in annots_info)
+
+    current_code = file.read_text()  # the modifed code with R0 predictions
+    try:
+        m = cst.parse_module(current_code)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to parse file: '{file}' with content:\n{current_code}"
+        ) from e
+    current_code = m.code  # use the code from the CST
+    current_annots = collect_annotations(m)
+    preds_map = dict[CodeRange, str]()
+    for a in current_annots:
+        if a.path in paths_of_interest:
+            assert (range := a.annot_range) is not None
+            assert (annot := a.annot) is not None
+            preds_map[range] = m.code_for_node(annot.annotation)
+    new_code = patch_code_with_extra(current_code, preds_map, file_errors)
+
+    return {
+        "code_segs": new_code.split(SpecialNames.TypeMask),
+        "types": types,
+        "annots_info": annots_info,
+    }
+
+
+@dataclass
+class EarlyStopper:
+    patience: int
+    current_best: Optional[tuple[int, float]] = None
+
+    def should_stop(self, eval_step: int, score: float) -> bool:
+        if self.current_best is None or score > self.current_best[1]:
+            self.current_best = (eval_step, score)
+            return False
+        # score is worse
+        return eval_step - self.current_best[0] >= self.patience
+
+    def best_step(self) -> Optional[int]:
+        if self.current_best is None:
+            return None
+        return self.current_best[0]

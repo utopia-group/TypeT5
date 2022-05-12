@@ -331,7 +331,7 @@ class MypyChecker:
         return self._run_mypy(["python", self.dmypy_path, "check", self.code_dir])
 
     @staticmethod
-    def check_project(proj: Path, mypy_path: Path = None):
+    def check_project(proj: Path, mypy_path: Path = None) -> MypyResult | str:
         if mypy_path is None:
             mypy_path = proj_root() / ".venv/bin/mypy"
         cmd = [
@@ -353,11 +353,10 @@ class MypyChecker:
         output: subprocess.CompletedProcess[str],
         cmd: list[str],
         cwd: Path,
-    ) -> MypyResult:
+    ) -> MypyResult | str:
         lines = output.stdout.splitlines()
-        assert (
-            len(lines) > 0
-        ), f"mypy failed. Command: `{' '.join(cmd)}`\nError: {output.stderr}"
+        if len(lines) == 0:
+            return f"mypy failed. Command: `{' '.join(cmd)}` in cwd='{cwd}'\nError: {output.stderr}"
         error_dict: dict[Path, list[tuple[CodePosition, str]]] = {}
         for l in lines:
             m = re.match(r"(.*\.py):(\d+:\d+): error: (.+) \[[a-z\-]+\]", l)
@@ -638,8 +637,11 @@ class PythonType:
 
     def __str__(self):
         h = ".".join(self.head)
+        rest = f"[{', '.join(map(str, self.args))}]"
+        if h == "[List]":
+            return rest
         if self.args:
-            return f"{h}[{', '.join(map(str, self.args))}]"
+            return f"{h}{rest}"
         else:
             return h
 
@@ -741,7 +743,7 @@ def parse_type_from_ast(tree: ast.expr) -> PythonType:
                 return PythonType((str(v),))
         case ast.List(elts=elts):  # this can happen inside Callable
             args = tuple(map(parse_type_from_ast, elts))
-            return PythonType((), args)
+            return PythonType(("[List]",), args)
         case ast.Subscript(value=(ast.Attribute() | ast.Name()) as v, slice=slice):
             head = parse_qualified_name(v)
             if head[-1] == "Literal":

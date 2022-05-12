@@ -178,6 +178,7 @@ def mask_type_annots(
         "code_segs": code_segs,
         "types": types,
         "annots_info": annots_info,
+        "code": m.code,
     }
 
 
@@ -317,7 +318,7 @@ def chunk_masked_code(
     """
 
     def pmap(f, xs: Sequence, desc: str):
-        chunksize = max(len(xs) // (10 * max_workers), 1)
+        chunksize = max(len(xs) // (8 * max_workers), 1)
         return process_map(
             f,
             xs,
@@ -375,8 +376,11 @@ def chunk_masked_code(
 class TypeInfDataset:
     data: Dataset
     meta: LabelMetaInfo
-    # the source fiels of this data set
+    # The source files of this data set
     files: list[Path]
+    # The source contents seen by the parser. All code locations refer to
+    # locations in these contents, which can be different from the original source files.
+    srcs: dict[Path, str]
 
     def __getitem__(self, key: slice) -> "TypeInfDataset":
         assert isinstance(key, slice)
@@ -410,6 +414,7 @@ class TypeInfDataset:
             Dataset.from_dict(new_data),
             meta=meta,
             files=self.files,
+            srcs=self.srcs,
         )
 
 
@@ -440,10 +445,12 @@ def repos_to_dataset(
         )
     # filter out srcs that failed to parse
     parsed_files = list[Path]()
-    masked_srcs = []
+    file_to_src = dict[Path, str]()
+    masked_srcs = list[dict]()
     for f, src in zip(srcs, map_r):
         if src is not None:
             parsed_files.append(f[0])
+            file_to_src[f[0]] = src.pop("code")
             masked_srcs.append(src)
     if not silent:
         logging.info(f"{len(masked_srcs)} / {len(srcs)} srcs succesfully parsed.")
@@ -457,7 +464,7 @@ def repos_to_dataset(
         silent=silent,
     )
 
-    return TypeInfDataset(dataset, label_info, parsed_files)
+    return TypeInfDataset(dataset, label_info, parsed_files, file_to_src)
 
 
 def load_or_process_datasets(
@@ -471,46 +478,50 @@ def load_or_process_datasets(
     regenerate: bool = False,
     ctx_margin: Optional[int] = None,
 ):
-    repos_split: dict[str, Sequence[GitRepo]]
-    meta: dict[str, LabelMetaInfo]
-    files: dict[str, list[Path]]
-    datasets: dict[str, Dataset]
-
-    set_names = ["train", "valid", "test"]
     if datasets_dir.exists() and not regenerate:
         print("Loading datasets from:", datasets_dir)
-        with open(datasets_dir / "extra.pkl", "rb") as f:
-            repos_split, meta, files = pickle.load(f)
-        datasets = {
-            name: Dataset.load_from_disk(str(datasets_dir / name)) for name in set_names
-        }
-    else:
-        # need to generate datasets
-        if datasets_dir.exists():
-            print("Deleting old datasets at:", datasets_dir)
-            shutil.rmtree(datasets_dir)
-        repos_split = {"train": repos_train, "valid": repos_valid, "test": repos_test}
-        datasets_dir.mkdir(parents=True)
+        return load_datasets(datasets_dir)
 
-        with open(datasets_dir / "repos_split.pkl", "wb") as f:
-            pickle.dump(repos_split, f)
+    repos_split: dict[str, Sequence[GitRepo]]
 
-        datasets = dict()
-        meta = dict()
-        files = dict()
-        for name, repos in repos_split.items():
-            print(f"Processing dataset: {name}")
-            repo_paths = [repo.repo_dir(repos_dir) for repo in repos]
-            tdata = repos_to_dataset(
-                repo_paths, tokenizer, max_workers, ctx_margin=ctx_margin
-            )
-            datasets[name] = tdata.data
-            meta[name] = tdata.meta
-            files[name] = tdata.files
-            tdata.data.save_to_disk(str(datasets_dir / name))
+    if datasets_dir.exists():
+        print("Deleting old datasets at:", datasets_dir)
+        shutil.rmtree(datasets_dir)
+    repos_split = {"train": repos_train, "valid": repos_valid, "test": repos_test}
+    datasets_dir.mkdir(parents=True)
 
-    tdatasets = {n: TypeInfDataset(datasets[n], meta[n], files[n]) for n in set_names}
-    return tdatasets, repos_split
+    with open(datasets_dir / "repos_split.pkl", "wb") as f:
+        pickle.dump(repos_split, f)
+
+    datasets = dict()
+    for name, repos in repos_split.items():
+        print(f"Processing dataset: {name}")
+        repo_paths = [repo.repo_dir(repos_dir) for repo in repos]
+        tdata = repos_to_dataset(
+            repo_paths, tokenizer, max_workers, ctx_margin=ctx_margin
+        )
+        datasets[name] = tdata
+
+        tdata.data.save_to_disk(str(datasets_dir / name))
+        extra = tdata.meta, tdata.files, tdata.srcs
+        with open(datasets_dir / f"{name}-extra.pkl", "wb") as f:
+            pickle.dump(extra, f)
+
+    return datasets, repos_split
+
+
+def load_datasets(datasets_dir: Path):
+    set_names = ["train", "valid", "test"]
+    with open(datasets_dir / "repos_split.pkl", "rb") as f:
+        repos_split = pickle.load(f)
+    datasets = dict()
+    for name in set_names:
+        with open(datasets_dir / f"{name}-extra.pkl", "rb") as f:
+            extra = pickle.load(f)
+        dataset = Dataset.load_from_disk(str(datasets_dir / name))
+        datasets[name] = TypeInfDataset(dataset, *extra)
+
+    return datasets, repos_split
 
 
 def output_ids_as_seqs(output_ids: Iterable[int], tokenizer: TokenizerSPOT):
@@ -551,6 +562,9 @@ def output_ids_as_types(
             ty = parse_type_from_ast(tree)
         except:
             ty = PythonType.Any()
+        assert isinstance(
+            ty, PythonType
+        ), f"{ty} of type {type(ty)} is not a PythonType."
         types.append(ty)
     types.extend(PythonType.Any() for _ in range(n_types - len(types)))
     return types
