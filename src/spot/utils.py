@@ -211,3 +211,6 @@ class TimeLogger:
         )
         df.sort_values(by="total_time", ascending=False, inplace=True)
         return df
+
+    def total_times(self) -> dict[str, float]:
+        return {name: sum(ts) for name, ts in self.times.items()}

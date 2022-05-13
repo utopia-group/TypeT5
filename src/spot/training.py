@@ -15,6 +15,7 @@ from transformers import (
 from transformers.trainer import Trainer
 
 from spot.data import (
+    CtxArgs,
     GitRepo,
     SpecialNames,
     SrcChunkInfo,
@@ -43,12 +44,11 @@ class DAggerTrainerArgs:
     output_dir: Path
     max_epochs: int
     repos_group_size: int
-    ctx_size: int
-    ctx_margin: int
-    types_in_ctx: bool
+    ctx_args: CtxArgs
     sampling_batch_size: int
     train_batch_size: int
     max_workers: int
+    eval_ctx_args: Optional[CtxArgs] = None
     generation_max_length: int = 128
     generation_num_beams: int = 8
     top_p: float = 0.9
@@ -81,7 +81,9 @@ class DAggerTrainer:
 
         def eval_step(epoch) -> float:
             with self.log_task("evaluating"):
-                r0_stats, r1_stats, _, _ = self.eval_on_repos(eval_repos)
+                r0_stats, r1_stats, _, _ = self.eval_on_repos(
+                    eval_repos, tqdm_args={"disable": True}
+                )
                 self.log(r0_stats, step=tqdm_bar.n, epoch=epoch)
                 print(f"[Epoch {epoch}] R0 stats:")
                 display(r0_stats)
@@ -94,7 +96,9 @@ class DAggerTrainer:
             with self.log_task("training"):
                 for repos in grouped(train_repos, repos_group_size):
                     super_data, dagger_data, _ = self.generate_r1_inputs(
-                        repos, silent=True
+                        repos,
+                        self.args.ctx_args,
+                        tqdm_args={"leave": False},
                     )
                     train_data = interleave_datasets(
                         [super_data.data, dagger_data.data]
@@ -116,6 +120,7 @@ class DAggerTrainer:
                 )
                 print("Loading best model...")
                 self.model = ModelSPOT.from_pretrained(best_model_dir)
+                break
             elif epoch == early_stopper.best_step():
                 with self.log_task("saving best model"):
                     self.model.save_pretrained(best_model_dir)
@@ -140,7 +145,8 @@ class DAggerTrainer:
     def generate_r1_inputs(
         self,
         repos: Sequence[Path],
-        silent: bool,
+        ctx_args: CtxArgs,
+        tqdm_args: dict,
     ) -> tuple[TypeInfDataset, TypeInfDataset, list[list[PythonType]]]:
         """Generate two datasets from the given repos. One for training with supervised learning,
         the other for DAgger training, which combines feedback from the type checker."""
@@ -148,32 +154,31 @@ class DAggerTrainer:
             r0_data = repos_to_dataset(
                 repos,
                 self.tokenizer,
+                ctx_args,
                 max_workers=self.args.max_workers,
-                ctx_margin=self.args.ctx_margin,
-                types_in_ctx=self.args.types_in_ctx,
-                silent=silent,
+                tqdm_args=tqdm_args,
             )
         # make predictions on the original training set
         with self.log_task("predict"):
-            r0_preds = self.predict(r0_data, silent=silent)
+            r0_preds = self.predict(r0_data, tqdm_args=tqdm_args)
         with self.log_task("get_type_checked_inputs"):
             new_inputs = self.get_type_checked_inputs(
-                r0_data, r0_preds, repos, silent=silent
+                r0_data, r0_preds, repos, tqdm_args=tqdm_args
             )
         with self.log_task("chunk_masked_code"):
             r1_dataset, r1_meta = chunk_masked_code(
                 list(new_inputs.values()),
                 self.tokenizer,
-                self.args.ctx_size,
+                ctx_args,
                 max_workers=self.args.max_workers,
-                ctx_margin=self.args.ctx_margin,
-                types_in_ctx=self.args.types_in_ctx,
-                silent=silent,
+                tqdm_args=tqdm_args,
             )
         r1_data = TypeInfDataset(r1_dataset, r1_meta, r0_data.files, r0_data.srcs)
         return r0_data, r1_data, r0_preds
 
-    def predict(self, dataset: TypeInfDataset, silent: bool) -> list[list[PythonType]]:
+    def predict(
+        self, dataset: TypeInfDataset, tqdm_args: dict
+    ) -> list[list[PythonType]]:
         """Run the current model on the given dataset and return the predicted types."""
         collator = DataCollatorForSeq2Seq(self.tokenizer, self.model)
         loader = DataLoader(
@@ -184,7 +189,7 @@ class DAggerTrainer:
         )
         device = self.model.device
         pred_types = list[list[PythonType]]()
-        tqdm_bar = tqdm(total=len(dataset.data), desc="predict", disable=silent)
+        tqdm_bar = tqdm(total=len(dataset.data), desc="predict", **tqdm_args)
         chunk_id = 0
         for batch in loader:
             output_ids = self.model.generate(
@@ -232,9 +237,13 @@ class DAggerTrainer:
         return {"loss": avg_loss}
 
     def eval_on_repos(
-        self, repos: Sequence[Path], silent: bool = True
+        self,
+        repos: Sequence[Path],
+        ctx_args: Optional[CtxArgs] = None,
+        tqdm_args: dict = {"leave": False},
     ) -> tuple[dict, dict, TypeInfDataset, list[list[PythonType]]]:
-        r0_data, r1_data, r0_preds = self.generate_r1_inputs(repos, silent=silent)
+        ctx_args = ctx_args or self.args.eval_ctx_args or self.args.ctx_args
+        r0_data, r1_data, r0_preds = self.generate_r1_inputs(repos, ctx_args, tqdm_args)
         r0_cats = [an.cat for info in r0_data.chunks_info for an in info.annots_info]
         r0_labels = [ty for info in r0_data.chunks_info for ty in info.types]
         r0_stats = {
@@ -245,7 +254,7 @@ class DAggerTrainer:
         }
 
         with self.log_task("predict"):
-            r1_preds = self.predict(r1_data, silent=silent)
+            r1_preds = self.predict(r1_data, tqdm_args=tqdm_args)
         r1_cats = [an.cat for info in r1_data.chunks_info for an in info.annots_info]
         r1_labels = [ty for info in r1_data.chunks_info for ty in info.types]
 
@@ -258,14 +267,18 @@ class DAggerTrainer:
         return r0_stats, r1_stats, r1_data, r1_preds
 
     def _t_map(
-        self, f: Callable[[T1], T2], xs: Iterable[T1], desc: str, silent=True
+        self,
+        f: Callable[[T1], T2],
+        xs: Iterable[T1],
+        desc: str,
+        tqdm_args={"disable": True},
     ) -> list[T2]:
         return thread_map(
             f,
             xs,
             max_workers=self.args.max_workers,
             desc=desc,
-            disable=silent,
+            **tqdm_args,
         )
 
     def get_type_checked_inputs(
@@ -273,7 +286,7 @@ class DAggerTrainer:
         dataset: TypeInfDataset,
         pred_types: Sequence[Sequence[PythonType]],
         repo_paths: Sequence[Path],
-        silent: bool,
+        tqdm_args: dict,
     ) -> dict[Path, dict]:
         """Apply the predicted types to the given files and collect the type checker feedback, then restore the
         files to their original contents."""
@@ -299,7 +312,7 @@ class DAggerTrainer:
             read_file,
             changed_files,
             "reading orginal srcs",
-            silent=True,
+            tqdm_args=tqdm_args,
         )
         path_to_original = dict[Path, str]()
         for f, text in zip(changed_files, origin_contents):
@@ -329,7 +342,7 @@ class DAggerTrainer:
                     repo_paths,
                     max_workers=max_workers,
                     desc="calling mypy",
-                    disable=silent,
+                    **tqdm_args,
                 )
             for dir, check_r in zip(repo_paths, check_results):
                 if isinstance(check_r, str):
@@ -352,7 +365,7 @@ class DAggerTrainer:
                 chunksize=max(len(file2changes) // (8 * max_workers), 1),
                 max_workers=max_workers,
                 desc="generating augmented inputs",
-                disable=silent,
+                **tqdm_args,
             )
             return dict(zip(changed_files, new_inputs))
         finally:

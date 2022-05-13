@@ -138,6 +138,13 @@ class GitRepo:
         )
 
 
+@dataclass
+class CtxArgs:
+    ctx_size: int
+    ctx_margin: int
+    types_in_ctx: bool  # whether to expand the label types in the context. If not, will replace them with <mask>.
+
+
 def mask_type_annots(
     file_code: Union[str, tuple[Path, str]], silent: bool = True
 ) -> Optional[dict]:
@@ -220,10 +227,8 @@ def _tokenize_masked_code(
 
 def _process_chunk(
     tks: list[int | tuple],
-    chunk_size,
-    ctx_margin: int,
     tokenizer: TokenizerSPOT,
-    types_in_ctx: bool,  # whether to expand the label types in the context. If not, will replace them with <mask>.
+    args: CtxArgs,
 ) -> Optional[dict]:
     def expand_types_as_tks(mixed_tks: list):
         result = list[int]()
@@ -233,13 +238,14 @@ def _process_chunk(
             if isinstance(e, int):
                 result.append(e)
             else:
-                if types_in_ctx:
+                if args.types_in_ctx:
                     type_tks = tokenizer.encode(str(e[0]), add_special_tokens=False)
                     result.extend(type_tks)
                 else:
                     result.append(mask_id)
         return result
 
+    chunk_size, ctx_margin = args.ctx_size, args.ctx_margin
     stride = chunk_size - 2 * ctx_margin
     if len(tks) != chunk_size:
         # add padding
@@ -287,17 +293,13 @@ class _ChunkingHelper:
     """Multi-process helper for `chunk_masked_code`."""
 
     tokenizer: TokenizerSPOT
-    chunk_size: int
-    ctx_margin: int
-    types_in_ctx: bool
+    ctx_args: CtxArgs
 
     def tokenize(self, src: tuple[int, dict]):
         return _tokenize_masked_code(src[1], src[0], self.tokenizer)
 
     def process_chunk(self, tks: list[int | tuple]):
-        return _process_chunk(
-            tks, self.chunk_size, self.ctx_margin, self.tokenizer, self.types_in_ctx
-        )
+        return _process_chunk(tks, self.tokenizer, self.ctx_args)
 
 
 @dataclass
@@ -313,12 +315,10 @@ class SrcChunkInfo:
 def chunk_masked_code(
     srcs: Sequence[dict],
     tokenizer: TokenizerSPOT,
-    chunk_size: int,
-    ctx_margin: Optional[int],
-    types_in_ctx: bool,
+    ctx_args: CtxArgs,
     max_workers: int,
     *,
-    silent=False,
+    tqdm_args: dict = {},
 ) -> tuple[Dataset, list[SrcChunkInfo]]:
     """
     Concatenate all the code segments into a single long sequence, then break it down
@@ -338,13 +338,12 @@ def chunk_masked_code(
             max_workers=max_workers,
             chunksize=chunksize,
             desc=desc,
-            disable=silent,
+            **tqdm_args,
         )
 
-    if ctx_margin is None:
-        ctx_margin = chunk_size // 4
+    chunk_size, ctx_margin = ctx_args.ctx_size, ctx_args.ctx_margin
 
-    helper = _ChunkingHelper(tokenizer, chunk_size, ctx_margin, types_in_ctx)
+    helper = _ChunkingHelper(tokenizer, ctx_args)
 
     # first, tokenize and concat all files into a single long sequence
     file_tks: list[list[int | tuple]] = pmap(
@@ -405,11 +404,9 @@ class TypeInfDataset:
 def repos_to_dataset(
     repos_paths: Iterable[Path],
     tokenizer: TokenizerSPOT,
+    ctx_args: CtxArgs,
     max_workers: int,
-    ctx_margin: Optional[int],
-    types_in_ctx: bool,
-    *,
-    silent=False,
+    tqdm_args: dict = {},
 ) -> TypeInfDataset:
     tokenizer.deprecation_warnings[
         "sequence-length-is-longer-than-the-specified-maximum"
@@ -427,7 +424,7 @@ def repos_to_dataset(
             max_workers=max_workers,
             desc="parsing and masking sources",
             chunksize=chunk_size,
-            disable=silent,
+            **tqdm_args,
         )
     # filter out srcs that failed to parse
     parsed_files = list[Path]()
@@ -438,17 +435,14 @@ def repos_to_dataset(
             parsed_files.append(f[0])
             file_to_src[f[0]] = src.pop("code")
             masked_srcs.append(src)
-    if not silent:
+    if not tqdm_args.get("disable", False):
         logging.info(f"{len(masked_srcs)} / {len(srcs)} srcs succesfully parsed.")
-    context_len = tokenizer.model_max_length
     dataset, chunks_info = chunk_masked_code(
         masked_srcs,
         tokenizer,
-        context_len,
-        ctx_margin=ctx_margin,
+        ctx_args,
         max_workers=max_workers,
-        types_in_ctx=types_in_ctx,
-        silent=silent,
+        tqdm_args=tqdm_args,
     )
 
     return TypeInfDataset(dataset, chunks_info, parsed_files, file_to_src)
@@ -457,14 +451,13 @@ def repos_to_dataset(
 def load_or_process_datasets(
     datasets_dir: Path,
     tokenizer: TokenizerSPOT,
+    ctx_args: CtxArgs,
     repos_dir,
     repos_train: Sequence[GitRepo],
     repos_valid: Sequence[GitRepo],
     repos_test: Sequence[GitRepo],
     max_workers: int = 12,
     regenerate: bool = False,
-    ctx_margin: Optional[int] = None,
-    types_in_ctx: bool = False,
 ):
     if datasets_dir.exists() and not regenerate:
         print("Loading datasets from:", datasets_dir)
@@ -488,9 +481,8 @@ def load_or_process_datasets(
         tdata = repos_to_dataset(
             repo_paths,
             tokenizer,
-            max_workers,
-            ctx_margin=ctx_margin,
-            types_in_ctx=types_in_ctx,
+            ctx_args,
+            max_workers=max_workers,
         )
         datasets[name] = tdata
 
@@ -612,6 +604,11 @@ def type_accuracies(
         label_types
     ), f"{len(pred_types)} != {len(label_types)}"
 
+    def safe_div(a, b):
+        if b == 0:
+            return float("nan")
+        return a / b
+
     if normalize_types:
         pred_types = [normalize_type(ty) for ty in pred_types]
         label_types = [normalize_type(ty) for ty in label_types]
@@ -619,24 +616,35 @@ def type_accuracies(
     n_correct_by_cat = Counter[AnnotCat]()
     n_partial_by_cat = Counter[AnnotCat]()
     n_label_by_cat = Counter[AnnotCat](types_cat)
+    n_partial_no_any = 0
+    n_label_no_any = 0
 
     for p, l, cat in zip(pred_types, label_types, types_cat):
         if p == l:
             n_correct_by_cat[cat] += 1
         if p.head_name() == l.head_name():
             n_partial_by_cat[cat] += 1
+        if l.head_name() != "Any":
+            n_label_no_any += 1
+            if p.head_name() == l.head_name():
+                n_partial_no_any += 1
 
-    accuracy_partial = {"total": n_partial_by_cat.total() / n_label_by_cat.total()}
-    for k in n_partial_by_cat.keys():
-        accuracy_partial[k.name] = n_partial_by_cat[k] / n_label_by_cat[k]
+    partial_acc = safe_div(n_partial_by_cat.total(), n_label_by_cat.total())
+    partial_accs = {}
+    for k in sorted(n_partial_by_cat.keys(), key=lambda k: k.value):
+        partial_accs[k.name] = safe_div(n_partial_by_cat[k], n_label_by_cat[k])
 
-    accuracy_full = {"total": n_correct_by_cat.total() / n_label_by_cat.total()}
-    for k in n_correct_by_cat.keys():
-        accuracy_full[k.name] = n_correct_by_cat[k] / n_label_by_cat[k]
+    full_acc = safe_div(n_correct_by_cat.total(), n_label_by_cat.total())
+    full_accs = {}
+    for k in sorted(n_correct_by_cat.keys(), key=lambda k: k.value):
+        full_accs[k.name] = safe_div(n_correct_by_cat[k], n_label_by_cat[k])
 
     return {
-        "accuracy_partial": accuracy_partial,
-        "accuracy_full": accuracy_full,
+        "partial_acc_no_any": safe_div(n_partial_no_any, n_label_no_any),
+        "partial_acc": partial_acc,
+        "partial_accs": partial_accs,
+        "full_acc": full_acc,
+        "full_accs": full_accs,
         "n_labels": n_label_by_cat.total(),
     }
 
