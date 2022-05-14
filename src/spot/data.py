@@ -150,6 +150,10 @@ def mask_type_annots(
 ) -> Optional[dict]:
     """Preprocess the Python code to carve out all the type annotations. The original
     code is split into sequences at the type annotations."""
+
+    def as_tuple(pos: CodePosition):
+        return pos.line, pos.column
+
     if isinstance(file_code, tuple):
         src_path, code = file_code
     else:
@@ -165,19 +169,26 @@ def mask_type_annots(
     paths = collect_annotations(m)
     types: list[PythonType] = []
     annots_info: list[AnnotInfo] = []
+    labels_pos: list[tuple[int, int]] = []
     replaces = dict()
     mask_annot = cst.Annotation(cst.Name(SpecialNames.TypeMask))
     for info in paths:
         if info.annot is None:
             continue
         ty = parse_type_expr(m, info.annot.annotation, silent=True)
-        # Wierd: check if ty is None does not always work when using multiprocessing.
-        if hasattr(ty, "head") and hasattr(ty, "args"):
-            types.append(cast(PythonType, ty))
-            annots_info.append(info)
-            replaces[info.path] = mask_annot
+        if ty is None:
+            continue
+        types.append(ty)
+        annots_info.append(info)
+        labels_pos.append(as_tuple(not_none(info.annot_range).start))
+        replaces[info.path] = mask_annot
     m1 = apply_annotations(m, replaces)
     code_segs = m1.code.split(SpecialNames.TypeMask)
+
+    # reorder labels according to src code positions
+    reorder = sorted(range(len(labels_pos)), key=lambda i: labels_pos[i])
+    types = [types[i] for i in reorder]
+    annots_info = [annots_info[i] for i in reorder]
     assert (
         len(code_segs) == len(types) + 1
     ), f"{len(code_segs)} != {len(types) + 1}. replaces: {replaces}\ncode: {m1.code}"
@@ -270,7 +281,9 @@ def _process_chunk(
     if extra_id == 0:
         return None  # no types to predict in this chunk, discard
     left_ctx = expand_types_as_tks(tks[:ctx_margin])[-ctx_margin:]
+    assert len(left_ctx) == ctx_margin, f"{len(left_ctx)} != {ctx_margin}"
     right_ctx = expand_types_as_tks(tks[-ctx_margin:])[:ctx_margin]
+    assert len(right_ctx) == ctx_margin, f"{len(right_ctx)} != {ctx_margin}"
     input_ids = left_ctx + middle + right_ctx
     assert len(input_ids) == chunk_size
 
@@ -414,16 +427,16 @@ def repos_to_dataset(
     srcs: list[tuple[Path, str]] = [
         (f, f.read_text()) for p in repos_paths for f in sorted(p.glob("**/*.py"))
     ]
-    chunk_size = max(1, len(srcs) // (10 * max_workers))
     if max_workers <= 1:
         map_r = map(mask_type_annots, srcs)
     else:
+        chunksize = max(1, len(srcs) // (10 * max_workers))
         map_r = process_map(
             mask_type_annots,
             srcs,
             max_workers=max_workers,
             desc="parsing and masking sources",
-            chunksize=chunk_size,
+            chunksize=chunksize,
             **tqdm_args,
         )
     # filter out srcs that failed to parse
@@ -640,13 +653,31 @@ def type_accuracies(
         full_accs[k.name] = safe_div(n_correct_by_cat[k], n_label_by_cat[k])
 
     return {
-        "partial_acc_no_any": safe_div(n_partial_no_any, n_label_no_any),
         "partial_acc": partial_acc,
+        "partial_acc_wo_any": safe_div(n_partial_no_any, n_label_no_any),
         "partial_accs": partial_accs,
         "full_acc": full_acc,
         "full_accs": full_accs,
         "n_labels": n_label_by_cat.total(),
     }
+
+
+def pretty_print_accuracies(
+    accs: dict[str, Any],
+    level: int = 0,
+    max_show_level: int = 1000,
+):
+    if level > max_show_level:
+        return print("   " * level + "...")
+    for k, v in accs.items():
+        print("   " * level, end="")
+        if isinstance(v, float):
+            print(f"{k}: {v:.2%}")
+        elif isinstance(v, dict):
+            print(f"{k}:")
+            pretty_print_accuracies(v, level=level + 1, max_show_level=max_show_level)
+        else:
+            print(f"{k}: {v}")
 
 
 def inline_predictions(

@@ -1,4 +1,5 @@
 import logging
+from copy import copy
 
 import torch
 import wandb
@@ -7,27 +8,23 @@ from IPython.display import display
 from numpy import ndarray
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
-from transformers import (
-    DataCollatorForSeq2Seq,
-    Seq2SeqTrainer,
-    Seq2SeqTrainingArguments,
-)
+from transformers import DataCollatorForSeq2Seq
 from transformers.trainer import Trainer
 
 from spot.data import (
     CtxArgs,
-    GitRepo,
     SpecialNames,
-    SrcChunkInfo,
     TypeInfDataset,
     chunk_masked_code,
     output_ids_as_types,
     patch_code_with_extra,
+    pretty_print_accuracies,
     repos_to_dataset,
     type_accuracies,
 )
 from spot.type_env import (
     AnnotInfo,
+    AnnotPath,
     MypyChecker,
     MypyResult,
     PythonType,
@@ -55,11 +52,20 @@ class DAggerTrainerArgs:
     # when the eval metric is getting worse, how many more evaluation steps to wait before stopping training
     early_stopping_patience: int = 0
     skip_first_eval: bool = False
+    per_file_feedback: bool = True
 
 
 @dataclass
 class DAggerTrainer:
-    model: ModelSPOT
+    """
+    Args:
+        r0_model: the model used to make the initial predictions, will not be trained.
+        r1_model: the model that combines the output of r0_model with the feedback
+        from the type checker.
+    """
+
+    r0_model: ModelSPOT
+    r1_model: ModelSPOT
     tokenizer: TokenizerSPOT
     args: DAggerTrainerArgs
     timer: TimeLogger = field(default_factory=TimeLogger)
@@ -73,7 +79,7 @@ class DAggerTrainer:
     ) -> None:
         max_epochs = self.args.max_epochs
         repos_group_size = self.args.repos_group_size
-        optimizer = AdamW(self.model.parameters(), lr=5e-5, weight_decay=0.01)
+        optimizer = AdamW(self.r1_model.parameters(), lr=5e-5, weight_decay=0.01)
         early_stopper = EarlyStopper(self.args.early_stopping_patience)
         best_model_dir = self.args.output_dir / "best_model"
         tqdm_bar = tqdm(range(max_epochs * len(train_repos)), desc="DAgger Training")
@@ -81,30 +87,31 @@ class DAggerTrainer:
 
         def eval_step(epoch) -> float:
             with self.log_task("evaluating"):
-                r0_stats, r1_stats, _, _ = self.eval_on_repos(
-                    eval_repos, tqdm_args={"disable": True}
-                )
+                r0_r, r1_r = self.eval_on_repos(eval_repos, tqdm_args={"leave": False})
+                r0_stats, r1_stats = r0_r[0], r1_r[0]
                 self.log(r0_stats, step=tqdm_bar.n, epoch=epoch)
                 print(f"[Epoch {epoch}] R0 stats:")
-                display(r0_stats)
+                pretty_print_accuracies(r0_stats, max_show_level=0)
                 self.log(r1_stats, step=tqdm_bar.n, epoch=epoch)
                 print(f"[Epoch {epoch}] R1 stats:")
-                display(r1_stats)
-                return r1_stats["R1_accuracy_full"]["total"]
+                pretty_print_accuracies(r1_stats, max_show_level=0)
+                score = r1_stats["R1_full_acc"]
+                assert isinstance(score, float)
+                return score
 
         def train_step(epoch) -> None:
             with self.log_task("training"):
                 for repos in grouped(train_repos, repos_group_size):
-                    super_data, dagger_data, _ = self.generate_r1_inputs(
+                    r0_data, r1_data, _ = self.generate_r1_inputs(
                         repos,
                         self.args.ctx_args,
-                        tqdm_args={"leave": False},
+                        tqdm_args={"disable": True},
                     )
-                    train_data = interleave_datasets(
-                        [super_data.data, dagger_data.data]
-                    )
+                    # train_data = interleave_datasets(
+                    #     [super_data.data, dagger_data.data]
+                    # )
                     with self.log_task("train_on_data"):
-                        train_r = self.train_on_data(train_data, optimizer)
+                        train_r = self.train_on_data(r1_data.data, optimizer)
                     tqdm_bar.update(len(repos))
                     self.log(train_r, step=tqdm_bar.n, epoch=epoch)
 
@@ -119,11 +126,11 @@ class DAggerTrainer:
                     + f"not improved in {self.args.early_stopping_patience} epochs."
                 )
                 print("Loading best model...")
-                self.model = ModelSPOT.from_pretrained(best_model_dir)
+                self.r1_model = ModelSPOT.from_pretrained(best_model_dir)
                 break
             elif epoch == early_stopper.best_step():
                 with self.log_task("saving best model"):
-                    self.model.save_pretrained(best_model_dir)
+                    self.r1_model.save_pretrained(best_model_dir)
 
         self.current_tqdm = None
 
@@ -150,7 +157,9 @@ class DAggerTrainer:
     ) -> tuple[TypeInfDataset, TypeInfDataset, list[list[PythonType]]]:
         """Generate two datasets from the given repos. One for training with supervised learning,
         the other for DAgger training, which combines feedback from the type checker."""
+        ctx_args = copy(ctx_args)
         with self.log_task("repos_to_dataset"):
+            ctx_args.types_in_ctx = True
             r0_data = repos_to_dataset(
                 repos,
                 self.tokenizer,
@@ -160,12 +169,14 @@ class DAggerTrainer:
             )
         # make predictions on the original training set
         with self.log_task("predict"):
-            r0_preds = self.predict(r0_data, tqdm_args=tqdm_args)
+            r0_preds = self.predict(r0_data, self.r0_model, tqdm_args=tqdm_args)
         with self.log_task("get_type_checked_inputs"):
             new_inputs = self.get_type_checked_inputs(
                 r0_data, r0_preds, repos, tqdm_args=tqdm_args
             )
+            new_files = list(new_inputs.keys())
         with self.log_task("chunk_masked_code"):
+            ctx_args.types_in_ctx = False
             r1_dataset, r1_meta = chunk_masked_code(
                 list(new_inputs.values()),
                 self.tokenizer,
@@ -173,26 +184,26 @@ class DAggerTrainer:
                 max_workers=self.args.max_workers,
                 tqdm_args=tqdm_args,
             )
-        r1_data = TypeInfDataset(r1_dataset, r1_meta, r0_data.files, r0_data.srcs)
+        r1_data = TypeInfDataset(r1_dataset, r1_meta, new_files, dict())
         return r0_data, r1_data, r0_preds
 
     def predict(
-        self, dataset: TypeInfDataset, tqdm_args: dict
+        self, dataset: TypeInfDataset, model: ModelSPOT, tqdm_args: dict
     ) -> list[list[PythonType]]:
         """Run the current model on the given dataset and return the predicted types."""
-        collator = DataCollatorForSeq2Seq(self.tokenizer, self.model)
+        collator = DataCollatorForSeq2Seq(self.tokenizer, model)
         loader = DataLoader(
             dataset.data,  # type: ignore
             shuffle=False,
             batch_size=self.args.sampling_batch_size,
             collate_fn=collator,
         )
-        device = self.model.device
+        device = model.device
         pred_types = list[list[PythonType]]()
         tqdm_bar = tqdm(total=len(dataset.data), desc="predict", **tqdm_args)
         chunk_id = 0
         for batch in loader:
-            output_ids = self.model.generate(
+            output_ids = model.generate(
                 inputs=batch["input_ids"].to(device),
                 do_sample=True,
                 top_p=self.args.top_p,
@@ -212,7 +223,8 @@ class DAggerTrainer:
         return pred_types
 
     def train_on_data(self, dataset: Dataset, optimizer: AdamW) -> dict:
-        collator = DataCollatorForSeq2Seq(self.tokenizer, self.model)
+        model = self.r1_model
+        collator = DataCollatorForSeq2Seq(self.tokenizer, model)
         loader = DataLoader(
             dataset,  # type: ignore
             shuffle=True,
@@ -220,10 +232,10 @@ class DAggerTrainer:
             collate_fn=collator,
         )
 
-        device = self.model.device
+        device = model.device
         losses = []
         for batch in loader:
-            outputs = self.model(
+            outputs = model(
                 input_ids=batch["input_ids"].to(device),
                 labels=batch["labels"].to(device),
             )
@@ -241,7 +253,7 @@ class DAggerTrainer:
         repos: Sequence[Path],
         ctx_args: Optional[CtxArgs] = None,
         tqdm_args: dict = {"leave": False},
-    ) -> tuple[dict, dict, TypeInfDataset, list[list[PythonType]]]:
+    ) -> tuple[tuple[dict, TypeInfDataset, list[list[PythonType]]], ...]:
         ctx_args = ctx_args or self.args.eval_ctx_args or self.args.ctx_args
         r0_data, r1_data, r0_preds = self.generate_r1_inputs(repos, ctx_args, tqdm_args)
         r0_cats = [an.cat for info in r0_data.chunks_info for an in info.annots_info]
@@ -254,7 +266,7 @@ class DAggerTrainer:
         }
 
         with self.log_task("predict"):
-            r1_preds = self.predict(r1_data, tqdm_args=tqdm_args)
+            r1_preds = self.predict(r1_data, self.r1_model, tqdm_args=tqdm_args)
         r1_cats = [an.cat for info in r1_data.chunks_info for an in info.annots_info]
         r1_labels = [ty for info in r1_data.chunks_info for ty in info.types]
 
@@ -264,7 +276,7 @@ class DAggerTrainer:
                 list(seq_flatten(r1_preds)), r1_labels, r1_cats
             ).items()
         }
-        return r0_stats, r1_stats, r1_data, r1_preds
+        return (r0_stats, r0_data, r0_preds), (r1_stats, r1_data, r1_preds)
 
     def _t_map(
         self,
@@ -288,8 +300,130 @@ class DAggerTrainer:
         repo_paths: Sequence[Path],
         tqdm_args: dict,
     ) -> dict[Path, dict]:
-        """Apply the predicted types to the given files and collect the type checker feedback, then restore the
-        files to their original contents."""
+        if self.args.per_file_feedback:
+            return self.get_type_checked_inputs_per_file(
+                dataset, pred_types, repo_paths, tqdm_args
+            )
+        else:
+            return self.get_type_checked_inputs_per_project(
+                dataset, pred_types, repo_paths, tqdm_args
+            )
+
+    def get_type_checked_inputs_per_file(
+        self,
+        dataset: TypeInfDataset,
+        pred_types: Sequence[Sequence[PythonType]],
+        repo_paths: Sequence[Path],
+        tqdm_args: dict,
+    ) -> dict[Path, dict]:
+        """Apply the predicted types to each file, collect the corresponding type checker
+        feedback (assuming other files have the correct types), then restore the file
+        to its original contents."""
+
+        def feedback_for_file(
+            file: Path, changes: list[tuple[CodeRange, str]], repo: Path
+        ) -> tuple[dict[CodePosition, str], str]:
+            with open(file, "r") as f:
+                origin_code = f.read()
+            if MypyChecker.Preamble in origin_code:
+                raise RuntimeError(f"{f} is already modified by SPOT.")
+            code_seen = dataset.srcs[file]
+            new_text = replace_strs_by_pos(code_seen, [(r, 1, v) for r, v in changes])
+            file.write_text(new_text)
+            try:
+                pass
+                check_r = MypyChecker.check_project(repo)
+                if isinstance(check_r, str):
+                    logging.warning(f"Mypy errored when checking '{dir}'.")
+                    errors = {}
+                else:
+                    errors = dict(check_r.error_dict.get(file.resolve(), []))
+            finally:
+                file.write_text(origin_code)
+            return errors, new_text
+
+        file2changes = dict[Path, list[tuple[CodeRange, str]]]()
+
+        assert len(repo_paths) == len(
+            set(p.resolve() for p in repo_paths)
+        ), "Repo paths must be unique"
+
+        label_info = dataset.chunks_info
+        for chunk_preds, chunk_info in zip(pred_types, label_info):
+            for ty, info, sid in zip(
+                chunk_preds, chunk_info.annots_info, chunk_info.src_ids
+            ):
+                file = dataset.files[sid]
+                if file not in file2changes:
+                    file2changes[file] = []
+                assert info.annot_range is not None
+                file2changes[file].append((info.annot_range, str(ty)))
+
+        repo2files = dict[Path, list[Path]]()
+        for repo in repo_paths:
+            files = [f for f in repo.glob("**/*.py") if f in file2changes]
+            repo2files[repo] = files
+
+        def feedback_for_repo(
+            repo: Path,
+        ) -> dict[Path, tuple[dict[CodePosition, str], str]]:
+            files = repo2files[repo]
+            changes_list = [file2changes[f] for f in files]
+            file2errors_content = {}
+            for file, changes in zip(files, changes_list):
+                start = CodeRange(CodePosition(1, 1), CodePosition(1, 1))
+                changes.append((start, MypyChecker.Preamble))
+                file2errors_content[file.resolve()] = feedback_for_file(
+                    file, changes, repo
+                )
+            return file2errors_content
+
+        repo_paths = list(
+            sorted(repo_paths, key=lambda p: len(repo2files[p]), reverse=True)
+        )
+
+        feedback_list = self._t_map(
+            feedback_for_repo,
+            repo_paths,
+            "Collect type checker feedback",
+            tqdm_args=tqdm_args,
+        )
+        file2errors = dict[Path, dict[CodePosition, str]]()
+        file2contents = dict[Path, str]()
+        for ls in feedback_list:
+            for k, v in ls.items():
+                file2errors[k] = v[0]
+                file2contents[k] = v[1]
+
+        # generate feedback-augmented inputs
+        changed_files = list(file2changes.keys())
+        file_errors = [file2errors.get(f.resolve(), {}) for f in changed_files]
+        new_contents = [file2contents[f.resolve()] for f in changed_files]
+        origin_contents = [f.read_text() for f in changed_files]
+        max_workers = self.args.max_workers
+        new_inputs = process_map(
+            _generate_augmented_inputs,
+            changed_files,
+            file_errors,
+            origin_contents,
+            new_contents,
+            chunksize=max(len(file2changes) // (8 * max_workers), 1),
+            max_workers=max_workers,
+            desc="generating augmented inputs",
+            **tqdm_args,
+        )
+        return dict(zip(changed_files, new_inputs))
+
+    def get_type_checked_inputs_per_project(
+        self,
+        dataset: TypeInfDataset,
+        pred_types: Sequence[Sequence[PythonType]],
+        repo_paths: Sequence[Path],
+        tqdm_args: dict,
+    ) -> dict[Path, dict]:
+        """Apply the predicted types to the given files in each project first and then
+        collect the type checker feedback. Will always restore the files to
+        their original contents afterwards."""
         file2changes = dict[Path, list[tuple[CodeRange, str]]]()
 
         assert len(repo_paths) == len(
@@ -324,14 +458,16 @@ class DAggerTrainer:
 
         try:
             # apply the file changes and get type checker feedback
+            current_contents = list[str]()
             for file, changes in file2changes.items():
                 start = CodeRange(CodePosition(1, 1), CodePosition(1, 1))
-                changes.insert(0, (start, MypyChecker.Preamble))
                 # need this in case libcst does not preserve the original file content
                 code_seen = dataset.srcs[file]
+                changes.insert(0, (start, MypyChecker.Preamble))
                 new_text = replace_strs_by_pos(
                     code_seen, [(r, 1, v) for r, v in changes]
                 )
+                current_contents.append(new_text)
                 file.write_text(new_text)
             file2errors = dict[Path, dict[CodePosition, str]]()
             file_to_repo = dict[Path, Path]()
@@ -362,6 +498,7 @@ class DAggerTrainer:
                 changed_files,
                 file_errors,
                 origin_contents,
+                current_contents,
                 chunksize=max(len(file2changes) // (8 * max_workers), 1),
                 max_workers=max_workers,
                 desc="generating augmented inputs",
@@ -378,22 +515,23 @@ class DAggerTrainer:
 
 
 def _generate_augmented_inputs(
-    file: Path, file_errors: dict[CodePosition, str], original_src: str
+    file: Path,
+    file_errors: dict[CodePosition, str],
+    original_code: str,
+    current_code: str,
 ) -> dict:
-    origin_mod = cst.parse_module(original_src)
+    origin_mod = cst.parse_module(original_code)
     origin_labels = collect_annotations(origin_mod)
-    types = list[PythonType]()
+    path2types = dict[AnnotPath, PythonType]()
     annots_info = list[AnnotInfo]()
     for info in origin_labels:
         if info.annot is None:
             continue
         ty = parse_type_expr(origin_mod, info.annot.annotation, silent=True)
         if ty is not None:
-            types.append(ty)
             annots_info.append(info)
-    paths_of_interest = set(info.path for info in annots_info)
+            path2types[info.path] = ty
 
-    current_code = file.read_text()  # the modifed code with R0 predictions
     try:
         m = cst.parse_module(current_code)
     except Exception as e:
@@ -406,15 +544,19 @@ def _generate_augmented_inputs(
     )
     current_annots = collect_annotations(m)
     preds_map = dict[CodeRange, str]()
+    types = list[PythonType]()
     for a in current_annots:
-        if a.path in paths_of_interest:
+        if a.path in path2types:
             assert (range := a.annot_range) is not None
             assert (annot := a.annot) is not None
             preds_map[range] = m.code_for_node(annot.annotation)
+            types.append(path2types[a.path])
     new_code = patch_code_with_extra(current_code, preds_map, file_errors)
+    code_segs = new_code.split(SpecialNames.TypeMask)
+    assert len(code_segs) == len(types) + 1, f"{len(code_segs)} != {len(types)} + 1"
 
     return {
-        "code_segs": new_code.split(SpecialNames.TypeMask),
+        "code_segs": code_segs,
         "types": types,
         "annots_info": annots_info,
     }

@@ -2,6 +2,8 @@ import os
 import shutil
 from pathlib import Path
 
+import pytest
+
 from spot.type_env import (
     AnnotCat,
     AnnotPath,
@@ -23,7 +25,8 @@ os.chdir(Path(__file__).parent.parent)
 
 def test_annotation_collection():
     parsed = cst.parse_module(read_file("data/code/env_code_2.py"))
-    annot_paths, _ = collect_annotations(parsed)
+    annots = collect_annotations(parsed)
+    annot_paths = [(a.path, a.cat) for a in annots]
     correct_annot_paths: list[tuple[AnnotPath, AnnotCat]] = [
         (annot_path("fib", "n"), AnnotCat.FuncArg),
         (annot_path("fib", SpecialNames.Return), AnnotCat.FuncReturn),
@@ -59,15 +62,18 @@ code_1_patch = {
 
 
 def test_annotation_applying():
-    _, old_annots = collect_annotations(parsed)
+    old_annots = collect_annotations(parsed)
+    old_map = {a.path: a.annot for a in old_annots}
     new_parsed = apply_annotations(parsed, code_1_patch)
-    _, new_annots = collect_annotations(new_parsed)
+    new_annots = collect_annotations(new_parsed)
+    new_map = {a.path: a.annot for a in new_annots}
 
     for k, v in code_1_patch.items():
-        assert old_annots[k].annotation.value != new_annots[k].annotation.value
-        assert new_annots[k].annotation.value == v.annotation.value
+        assert old_map[k].annotation.value != new_map[k].annotation.value
+        assert new_map[k].annotation.value == v.annotation.value
 
 
+@pytest.mark.skip(reason="Is considering to deprecate incremental type checking.")
 def test_mypy_checker_1():
     with mypy_checker("data/code") as checker:
         check_r = checker.check_code_dir()
@@ -75,6 +81,7 @@ def test_mypy_checker_1():
         assert "bad_code_2.py" in check_r.error_dict
 
 
+@pytest.mark.skip(reason="Is considering to deprecate incremental type checking.")
 def test_mypy_checker_2():
     with mypy_checker("data/code_output") as checker:
         oe = checker.recheck_files("bad_code_1.py").num_errors
@@ -89,6 +96,7 @@ def test_mypy_checker_2():
         assert c_r.num_errors == oe, f"mypy_output: {c_r.output_str}\ncode: {new_code}"
 
 
+@pytest.mark.skip(reason="Is considering to deprecate incremental type checking.")
 def test_type_env():
     # remove `data/temp` if it exists
     inference_dir = "data/code_output/inference"

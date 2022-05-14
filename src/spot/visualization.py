@@ -1,4 +1,5 @@
 import html
+import re
 from typing import Sequence
 
 import ipywidgets as widgets
@@ -26,7 +27,7 @@ def display_code_sequence(texts: Sequence[str], titles=None):
     return tab
 
 
-def colorize_code_html(code: str):
+def colorize_code_html(code: str) -> str:
     "Highligh the special comments in the type checker-augmented python code."
     output = list[str]()
     for i in range(len(code)):
@@ -38,5 +39,23 @@ def colorize_code_html(code: str):
         output.append(c)
         if prev == "*" and c == "/":
             output.append("</span>")
+    new_code = "".join(output)
 
-    return "".join(output)
+    def replace(m: re.Match[str]):
+        ml = re.match(r"&lt;label;([^;]+);label&gt;", m[0])
+        assert ml is not None
+        l = ml.group(1)
+        return f"<span style='color: rgb(78, 201, 176)'>({l})</span>"
+
+    return re.sub(r"(&lt;label;[^;]+;label&gt;)", replace, new_code)
+
+
+def code_inline_extra_ids(code: str, preds: list):
+    def replace(m: re.Match[str]):
+        mi = re.match(r"<extra_id_(\d+)>", m[0])
+        assert mi is not None
+        id = int(mi.group(1))
+        label = str(preds[id])
+        return f"<label;{label};label>"
+
+    return re.sub(r"(<extra_id_\d+>)", replace, code)

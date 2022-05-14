@@ -80,7 +80,8 @@ def collect_annotations(
     code: cst.Module | cst.MetadataWrapper,
 ) -> list[AnnotInfo]:
     """Collect all annotation paths and the corresponding type annotations (if any).
-    The order of the paths is the same as the order of the annotations in the code."""
+    Note: the order of the paths are not guaranteed to follow the order of the source code.
+    Check the `annot_range` of the returned AnnotInfo to get the correct order."""
     collector = AnnotCollector()
     if not isinstance(code, cst.MetadataWrapper):
         code = cst.MetadataWrapper(code)

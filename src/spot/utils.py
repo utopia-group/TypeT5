@@ -57,6 +57,11 @@ T1 = TypeVar("T1")
 T2 = TypeVar("T2")
 
 
+def not_none(x: Optional[T1]) -> T1:
+    assert x is not None
+    return x
+
+
 def seq_flatten(xs: Sequence[Sequence[T1]]) -> Generator[T1, None, None]:
     return (item for sublist in xs for item in sublist)
 
