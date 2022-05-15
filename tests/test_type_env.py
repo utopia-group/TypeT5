@@ -12,7 +12,7 @@ from spot.type_env import (
     TypeInfAction,
     annot_path,
     apply_annotations,
-    collect_annotations,
+    collect_annots_info,
     mypy_checker,
     normalize_type,
     parse_type_str,
@@ -25,7 +25,7 @@ os.chdir(Path(__file__).parent.parent)
 
 def test_annotation_collection():
     parsed = cst.parse_module(read_file("data/code/env_code_2.py"))
-    annots = collect_annotations(parsed)
+    annots = collect_annots_info(parsed)
     annot_paths = [(a.path, a.cat) for a in annots]
     correct_annot_paths: list[tuple[AnnotPath, AnnotCat]] = [
         (annot_path("fib", "n"), AnnotCat.FuncArg),
@@ -62,10 +62,10 @@ code_1_patch = {
 
 
 def test_annotation_applying():
-    old_annots = collect_annotations(parsed)
+    old_annots = collect_annots_info(parsed)
     old_map = {a.path: a.annot for a in old_annots}
     new_parsed = apply_annotations(parsed, code_1_patch)
-    new_annots = collect_annotations(new_parsed)
+    new_annots = collect_annots_info(new_parsed)
     new_map = {a.path: a.annot for a in new_annots}
 
     for k, v in code_1_patch.items():
@@ -125,7 +125,7 @@ def test_type_env():
                 else:
                     assert v.deep_equals(cst.Name("int")), f"{k}:{v}"
 
-        _, annots = collect_annotations(
+        _, annots = collect_annots_info(
             cst.parse_module(read_file(f"{inference_dir}/env_code_2.py"))
         )
         with type_inf_env(

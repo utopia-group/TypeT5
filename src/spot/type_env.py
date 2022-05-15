@@ -75,11 +75,16 @@ class AnnotInfo:
     annot: Optional[cst.Annotation]
     annot_range: Optional[CodeRange]
 
+    def __str__(self):
+        if self.annot is not None:
+            expr = cst.Module([]).code_for_node(self.annot.annotation)
+        else:
+            expr = None
+        return f"AnnotInfo({str(self.path)}, {self.cat.name}, range={self.annot_range}, expr={expr})"
 
-def collect_annotations(
-    code: cst.Module | cst.MetadataWrapper,
-) -> list[AnnotInfo]:
-    """Collect all annotation paths and the corresponding type annotations (if any).
+
+def collect_annots_info(code: cst.Module | cst.MetadataWrapper) -> list[AnnotInfo]:
+    """Collect all AnnotInfo in the given source code.
     Note: the order of the paths are not guaranteed to follow the order of the source code.
     Check the `annot_range` of the returned AnnotInfo to get the correct order."""
     collector = AnnotCollector()
@@ -87,6 +92,38 @@ def collect_annotations(
         code = cst.MetadataWrapper(code)
     code.visit(collector)
     return collector.annots_info
+
+
+def collect_user_annotations(
+    code: cst.Module | cst.MetadataWrapper,
+) -> tuple[list[AnnotInfo], list['PythonType']]:
+    """Collect all user-added type annotations in the given source code. Unlike `collect_annots_info`,
+    The order of the returned annotations is gurated to follow the order of the source code."""
+
+    def as_tuple(pos: CodePosition):
+        return pos.line, pos.column
+
+    annots = collect_annots_info(code)
+    m = code if isinstance(code, cst.Module) else code.module
+
+    types: list[PythonType] = []
+    annots_info: list[AnnotInfo] = []
+    labels_pos: list[tuple[int, int]] = []
+
+    for info in annots:
+        if info.annot is None:
+            continue
+        ty = parse_type_expr(m, info.annot.annotation, silent=True)
+        if ty is None:
+            continue
+        types.append(ty)
+        annots_info.append(info)
+        labels_pos.append(as_tuple(not_none(info.annot_range).start))
+
+    reorder = sorted(range(len(labels_pos)), key=lambda i: labels_pos[i])
+    types = [types[i] for i in reorder]
+    annots_info = [annots_info[i] for i in reorder]
+    return annots_info, types
 
 
 def apply_annotations(
@@ -533,7 +570,7 @@ class TypeInfEnv:
 
     def init_to_annot(self) -> dict[AnnotPath, AnnotCat]:
         module = cst.parse_module(self.original_src)
-        paths, annots = collect_annotations(module)
+        paths, annots = collect_annots_info(module)
         to_annot = self.select_annotations(paths, annots)
         assert isinstance(to_annot, dict)
         return to_annot
@@ -542,7 +579,7 @@ class TypeInfEnv:
         """Reset the environment to the initial state. This will remove some of the type annotations in the original source file."""
         self.restore_file()
         module = cst.parse_module(self.original_src)
-        paths_info = collect_annotations(module)
+        paths_info = collect_annots_info(module)
         to_annot: list[AnnotInfo] = self.select_annotations(paths_info)
         # to_remove = {info.path for info in paths_info if bool(info.annotation)}
         # module = apply_annotations(module, {p: MissingAnnot for p in to_remove})

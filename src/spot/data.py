@@ -10,14 +10,14 @@ from typing import *
 import dateparser
 from datasets import Dataset
 
-from spot.model import TokenizerSPOT
 from spot.type_env import (
     AnnotCat,
     AnnotInfo,
     AnnotPath,
     PythonType,
     apply_annotations,
-    collect_annotations,
+    collect_annots_info,
+    collect_user_annotations,
     normalize_type,
     parse_type_expr,
     parse_type_from_ast,
@@ -97,7 +97,7 @@ class GitRepo:
         for src in self.repo_dir(repos_dir).glob("**/*.py"):
             rpath = src.relative_to(self.repo_dir(repos_dir))
             m = cst.parse_module(read_file(src))
-            paths = collect_annotations(m)
+            paths = collect_annots_info(m)
             path_to_cat = {pinfo.path: pinfo.cat for pinfo in paths}
             n_paths += len(paths)
             annots = (info for info in paths if info.annot is not None)
@@ -151,9 +151,6 @@ def mask_type_annots(
     """Preprocess the Python code to carve out all the type annotations. The original
     code is split into sequences at the type annotations."""
 
-    def as_tuple(pos: CodePosition):
-        return pos.line, pos.column
-
     if isinstance(file_code, tuple):
         src_path, code = file_code
     else:
@@ -166,49 +163,24 @@ def mask_type_annots(
         if not silent:
             logging.warning(f"Failed to parse src file: `{src_path}`")
         return None
-    paths = collect_annotations(m)
-    types: list[PythonType] = []
-    annots_info: list[AnnotInfo] = []
-    labels_pos: list[tuple[int, int]] = []
-    replaces = dict()
-    mask_annot = cst.Annotation(cst.Name(SpecialNames.TypeMask))
-    for info in paths:
-        if info.annot is None:
-            continue
-        ty = parse_type_expr(m, info.annot.annotation, silent=True)
-        if ty is None:
-            continue
-        types.append(ty)
-        annots_info.append(info)
-        labels_pos.append(as_tuple(not_none(info.annot_range).start))
-        replaces[info.path] = mask_annot
-    m1 = apply_annotations(m, replaces)
-    code_segs = m1.code.split(SpecialNames.TypeMask)
 
-    # reorder labels according to src code positions
-    reorder = sorted(range(len(labels_pos)), key=lambda i: labels_pos[i])
-    types = [types[i] for i in reorder]
-    annots_info = [annots_info[i] for i in reorder]
+    annots_info, types = collect_user_annotations(m)
+    mask_annot = cst.Annotation(cst.Name(SpecialNames.TypeMask))
+    replaces = dict()
+    for info in annots_info:
+        replaces[info.path] = mask_annot
+    new_code = apply_annotations(m, replaces).code
+    code_segs = new_code.split(SpecialNames.TypeMask)
+
     assert (
         len(code_segs) == len(types) + 1
-    ), f"{len(code_segs)} != {len(types) + 1}. replaces: {replaces}\ncode: {m1.code}"
+    ), f"{len(code_segs)} != {len(types) + 1}. replaces: {replaces}\ncode: {new_code}"
     return {
         "code_segs": code_segs,
         "types": types,
         "annots_info": annots_info,
-        "code": m.code,
+        "original_code": m.code,
     }
-
-
-# Todo: deprecate this
-def tokenize_masked(masked: dict, tokenizer: TokenizerSPOT, device):
-    mask_tokens = [f"<extra_id_{i}>" for i in range(len(masked["types"]))]
-    input_ids = tokenizer.encode(
-        join_str(masked["code_segs"], mask_tokens), return_tensors="pt"
-    )
-    label_str = "".join(a + str(b) for a, b in zip(mask_tokens, masked["types"]))
-    labels = tokenizer.encode(label_str, return_tensors="pt")
-    return {"input_ids": input_ids.to(device), "labels": labels.to(device)}
 
 
 def _tokenize_masked_code(
@@ -223,6 +195,18 @@ def _tokenize_masked_code(
     segs: list[str] = src["code_segs"]
     types_labels: list[PythonType] = src["types"]
     types_info: list[AnnotInfo] = src["annots_info"]
+
+    def as_tuple(p: CodePosition):
+        return (p.line, p.column)
+
+    labels_pos = [as_tuple(not_none(info.annot_range).start) for info in types_info]
+
+    if not issorted(labels_pos):
+        info_str = "\n".join(map(str, types_info))
+        raise RuntimeError(
+            "labels are not sorted according to their src locations:\n" + info_str
+        )
+
     assert (
         len(segs) == len(types_labels) + 1
     ), f"len(segs)={len(segs)}, len(types_labels)={len(types_labels)}"
@@ -343,6 +327,10 @@ def chunk_masked_code(
         the `chunk_size - 2 * ctx_margin` middle tokens in the chunk are masked.
     """
 
+    tokenizer.deprecation_warnings[
+        "sequence-length-is-longer-than-the-specified-maximum"
+    ] = True
+
     def pmap(f, xs: Sequence, desc: str):
         chunksize = max(len(xs) // (8 * max_workers), 1)
         return process_map(
@@ -446,7 +434,7 @@ def repos_to_dataset(
     for f, src in zip(srcs, map_r):
         if src is not None:
             parsed_files.append(f[0])
-            file_to_src[f[0]] = src.pop("code")
+            file_to_src[f[0]] = src.pop("original_code")
             masked_srcs.append(src)
     if not tqdm_args.get("disable", False):
         logging.info(f"{len(masked_srcs)} / {len(srcs)} srcs succesfully parsed.")
@@ -466,9 +454,9 @@ def load_or_process_datasets(
     tokenizer: TokenizerSPOT,
     ctx_args: CtxArgs,
     repos_dir,
-    repos_train: Sequence[GitRepo],
-    repos_valid: Sequence[GitRepo],
-    repos_test: Sequence[GitRepo],
+    repos_train: list[GitRepo],
+    repos_valid: list[GitRepo],
+    repos_test: list[GitRepo],
     max_workers: int = 12,
     regenerate: bool = False,
 ):
@@ -476,16 +464,7 @@ def load_or_process_datasets(
         print("Loading datasets from:", datasets_dir)
         return load_datasets(datasets_dir)
 
-    repos_split: dict[str, Sequence[GitRepo]]
-
-    if datasets_dir.exists():
-        print("Deleting old datasets at:", datasets_dir)
-        shutil.rmtree(datasets_dir)
     repos_split = {"train": repos_train, "valid": repos_valid, "test": repos_test}
-    datasets_dir.mkdir(parents=True)
-
-    with open(datasets_dir / "repos_split.pkl", "wb") as f:
-        pickle.dump(repos_split, f)
 
     datasets = dict()
     for name, repos in repos_split.items():
@@ -499,19 +478,39 @@ def load_or_process_datasets(
         )
         datasets[name] = tdata
 
-        tdata.data.save_to_disk(str(datasets_dir / name))
-        extra = tdata.chunks_info, tdata.files, tdata.srcs
-        with open(datasets_dir / f"{name}-extra.pkl", "wb") as f:
-            pickle.dump(extra, f)
+    save_datasets(datasets, repos_split, datasets_dir)
 
     return datasets, repos_split
+
+
+def save_datasets(
+    datasets: dict[str, TypeInfDataset],
+    repos_split: dict[str, list[GitRepo]],
+    datasets_dir: Path,
+):
+    if datasets_dir.exists():
+        print("Deleting old datasets at:", datasets_dir)
+        shutil.rmtree(datasets_dir)
+    datasets_dir.mkdir(parents=True)
+
+    with open(datasets_dir / "repos_split.pkl", "wb") as f:
+        pickle.dump(repos_split, f)
+
+    for name, dataset in datasets.items():
+        dataset.data.save_to_disk(str(datasets_dir / name))
+        extra = dataset.chunks_info, dataset.files, dataset.srcs
+        with open(datasets_dir / f"{name}-extra.pkl", "wb") as f:
+            pickle.dump(extra, f)
+    import subprocess
+
+    subprocess.run(["du", "-sh", datasets_dir])
 
 
 def load_datasets(datasets_dir: Path):
     set_names = ["train", "valid", "test"]
     with open(datasets_dir / "repos_split.pkl", "rb") as f:
-        repos_split = pickle.load(f)
-    datasets = dict()
+        repos_split: dict[str, list[GitRepo]] = pickle.load(f)
+    datasets = dict[str, TypeInfDataset]()
     for name in set_names:
         with open(datasets_dir / f"{name}-extra.pkl", "rb") as f:
             extra = pickle.load(f)
@@ -559,8 +558,8 @@ def output_ids_as_types(
             ty = parse_type_from_ast(tree)
         except:
             ty = PythonType.Any()
-        assert isinstance(
-            ty, PythonType
+        assert (
+            ty.__class__.__name__ == PythonType.__name__
         ), f"{ty} of type {type(ty)} is not a PythonType."
         types.append(ty)
     types.extend(PythonType.Any() for _ in range(n_types - len(types)))
@@ -680,20 +679,7 @@ def pretty_print_accuracies(
             print(f"{k}: {v}")
 
 
-def inline_predictions(
-    input_tks: Sequence[int],
-    predictions: Sequence[Sequence[int]],
-    tokenizer: TokenizerSPOT,
-) -> list[int]:
-    """Inline the model predictions into the input code and then decode"""
-    out_tks = list[int]()
-    extra_id = 0
-    next_special = tokenizer.additional_special_tokens_ids[99 - extra_id]
-    for tk in input_tks:
-        out_tks.append(tk)
-        if tk == next_special:
-            out_tks.extend(predictions[extra_id])
-            extra_id += 1
-            next_special = tokenizer.additional_special_tokens_ids[99 - extra_id]
-    assert extra_id == len(predictions), f"{extra_id} != {len(predictions)}"
-    return out_tks
+def preds_to_accuracies(preds: Sequence[Sequence[PythonType]], dataset: TypeInfDataset):
+    cats = [an.cat for info in dataset.chunks_info for an in info.annots_info]
+    labels = [ty for info in dataset.chunks_info for ty in info.types]
+    return type_accuracies(list(seq_flatten(preds)), labels, cats)

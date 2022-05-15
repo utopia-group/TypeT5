@@ -1,7 +1,9 @@
 import ast
+import logging
 import os
 import pickle
 import time
+from abc import ABC, abstractmethod
 from asyncio import current_task
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -27,6 +29,11 @@ from libcst.metadata import CodePosition, CodeRange
 from sklearn.metrics import confusion_matrix
 from tqdm.auto import tqdm
 from tqdm.contrib.concurrent import process_map, thread_map
+from transformers import RobertaTokenizer
+from transformers.models.t5 import T5ForConditionalGeneration
+
+TokenizerSPOT = RobertaTokenizer
+ModelSPOT = T5ForConditionalGeneration
 
 
 class SpecialNames:
@@ -219,3 +226,32 @@ class TimeLogger:
 
     def total_times(self) -> dict[str, float]:
         return {name: sum(ts) for name, ts in self.times.items()}
+
+
+class TaskMonitor(ABC):
+    @abstractmethod
+    def log_task(self, name: str):
+        pass
+
+
+@dataclass
+class TaskLoggingMonitor(TaskMonitor):
+    monitor_name: str
+    current_task: list[str] = field(default_factory=list)
+    timer: TimeLogger = field(default_factory=TimeLogger)
+
+    @contextmanager
+    def log_task(self, name: str):
+        self.current_task.append(name)
+        task_name = " > ".join(self.current_task)
+        # if self.current_tqdm is not None:
+        #     self.current_tqdm.set_postfix_str(f"Current task: {task_name}")
+        print(f"[{self.monitor_name}] Current task: {task_name}")
+        try:
+            with self.timer.log_time(task_name):
+                yield
+        finally:
+            self.current_task.pop()
+            # if self.current_tqdm is not None:
+            #     task_name = " > ".join(self.current_task)
+            #     self.current_tqdm.set_postfix_str(f"Current task: {task_name}")

@@ -1,21 +1,416 @@
+import logging
 from collections import Counter
 
 import numpy as np
-from transformers import RobertaTokenizer
-from transformers.models.t5 import T5ForConditionalGeneration
+from datasets import Dataset
+from torch.optim import Optimizer
+from torch.utils.data import DataLoader
+from transformers import (
+    DataCollatorForSeq2Seq,
+    EarlyStoppingCallback,
+    Seq2SeqTrainer,
+    Seq2SeqTrainingArguments,
+)
+from transformers.trainer import Trainer
 
+from spot.data import (
+    CtxArgs,
+    TypeInfDataset,
+    chunk_masked_code,
+    output_ids_as_types,
+    patch_code_with_extra,
+    repos_to_dataset,
+)
+from spot.type_env import (
+    AnnotInfo,
+    AnnotPath,
+    MypyChecker,
+    MypyResult,
+    PythonType,
+    collect_annots_info,
+    collect_user_annotations,
+    parse_type_expr,
+)
 from spot.utils import *
 
-TokenizerSPOT = RobertaTokenizer
-ModelSPOT = T5ForConditionalGeneration
+
+@dataclass
+class DecodingArgs:
+    ctx_args: CtxArgs
+    sampling_batch_size: int
+    max_workers: int
+    generation_max_length: int = 128
+    top_p: float = 0.9
 
 
-class AugModel:
-    """A type inference model augmented with the feedback from the type checker"""
+@dataclass
+class ModelTrainingArgs:
+    train_batch_size: int
+    eval_batch_size: int
+    max_epochs: int
 
-    def __init__(self, model, tokenizer):
-        self.model: ModelSPOT = model
-        self.tokenizer: TokenizerSPOT = tokenizer
 
-    def predict(self, input_text: str, mask_type_annots: bool = True):
-        pass
+@dataclass
+class ModelWrapper:
+    model: ModelSPOT
+    tokenizer: TokenizerSPOT
+    args: DecodingArgs
+    monitor: TaskMonitor
+
+    def predict(
+        self, dataset: TypeInfDataset, tqdm_args: dict
+    ) -> list[list[PythonType]]:
+        """Run the  model on the given dataset and return the predicted types for each row."""
+        model = self.model
+        collator = DataCollatorForSeq2Seq(self.tokenizer, model)
+        loader = DataLoader(
+            dataset.data,  # type: ignore
+            shuffle=False,
+            batch_size=self.args.sampling_batch_size,
+            collate_fn=collator,
+        )
+        device = model.device
+        pred_types = list[list[PythonType]]()
+        tqdm_bar = tqdm(total=len(dataset.data), desc="predict", **tqdm_args)
+        chunk_id = 0
+        for batch in loader:
+            output_ids = model.generate(
+                inputs=batch["input_ids"].to(device),
+                do_sample=True,
+                top_p=self.args.top_p,
+                max_length=self.args.generation_max_length,
+            ).cpu()  # type: ignore
+            assert len(output_ids.shape) == 2
+
+            n_chunks = output_ids.shape[0]
+            for i in range(n_chunks):
+                n_annots = len(dataset.chunks_info[i + chunk_id].annots_info)
+                row = output_ids[i, :]
+                types = output_ids_as_types(row, self.tokenizer, n_annots)
+                pred_types.append(types)
+            chunk_id += n_chunks
+            tqdm_bar.update(output_ids.shape[0])
+        return pred_types
+
+    def generate_r1_inputs(
+        self,
+        repos: Sequence[Path],
+        r0_data: TypeInfDataset,
+        r0_preds: list[list[PythonType]],
+        tqdm_args: dict,
+        use_file_level_feedback: bool = True,
+    ) -> TypeInfDataset:
+        """Generate two datasets from the given repos. One for training with supervised learning,
+        the other for DAgger training, which combines feedback from the type checker."""
+        with self.monitor.log_task("get_type_checked_inputs"):
+            if use_file_level_feedback:
+                new_inputs = self.type_check_preds_per_file(
+                    r0_data, r0_preds, repos, tqdm_args=tqdm_args
+                )
+            else:
+                new_inputs = self.type_check_preds_per_repo(
+                    r0_data, r0_preds, repos, tqdm_args=tqdm_args
+                )
+            new_files = list(new_inputs.keys())
+        with self.monitor.log_task("chunk_masked_code"):
+            r1_dataset, r1_meta = chunk_masked_code(
+                list(new_inputs.values()),
+                self.tokenizer,
+                self.args.ctx_args,
+                max_workers=self.args.max_workers,
+                tqdm_args=tqdm_args,
+            )
+        r1_data = TypeInfDataset(r1_dataset, r1_meta, new_files, dict())
+        return r1_data
+
+    def build_trainer(
+        self,
+        output_dir: Path,
+        train_args: ModelTrainingArgs,
+        dataset: Dataset,
+        eval_dataset: Dataset,
+    ) -> Trainer:
+        trainer_args = Seq2SeqTrainingArguments(
+            str(output_dir),
+            evaluation_strategy="steps",  # type: ignore
+            eval_steps=500,
+            logging_steps=500,
+            prediction_loss_only=True,
+            save_strategy="steps",  # type: ignore
+            save_steps=500,
+            save_total_limit=3,
+            learning_rate=2e-5,
+            per_device_train_batch_size=train_args.train_batch_size,
+            per_device_eval_batch_size=train_args.eval_batch_size,
+            weight_decay=0.01,
+            num_train_epochs=train_args.max_epochs,
+            load_best_model_at_end=True,
+            fp16=True,
+            push_to_hub=False,
+            report_to="wandb",  # type: ignore
+        )
+        model = self.model
+        data_collator = DataCollatorForSeq2Seq(self.tokenizer, model)
+
+        trainer: Trainer = Seq2SeqTrainer(
+            model,
+            trainer_args,
+            train_dataset=dataset,  # type: ignore
+            eval_dataset=eval_dataset,  # type: ignore
+            data_collator=data_collator,  # type: ignore
+            tokenizer=self.tokenizer,
+            callbacks=[EarlyStoppingCallback(3)],
+        )
+
+        return trainer
+
+    def type_check_preds_per_file(
+        self,
+        dataset: TypeInfDataset,
+        pred_types: Sequence[Sequence[PythonType]],
+        repo_paths: Sequence[Path],
+        tqdm_args: dict,
+    ) -> dict[Path, dict]:
+        """Apply the predicted types to each file, collect the corresponding type checker
+        feedback (assuming other files have the correct types), then restore the file
+        to its original contents."""
+
+        max_workers = self.args.max_workers
+
+        def feedback_for_file(
+            file: Path, changes: list[tuple[CodeRange, str]], repo: Path
+        ) -> tuple[dict[CodePosition, str], str]:
+            with open(file, "r") as f:
+                origin_code = f.read()
+            if MypyChecker.Preamble in origin_code:
+                raise RuntimeError(f"{f} is already modified by SPOT.")
+            code_seen = dataset.srcs[file]
+            new_text = replace_strs_by_pos(code_seen, [(r, 1, v) for r, v in changes])
+            file.write_text(new_text)
+            try:
+                pass
+                check_r = MypyChecker.check_project(repo)
+                if isinstance(check_r, str):
+                    logging.warning(f"Mypy errored when checking '{dir}'.")
+                    errors = {}
+                else:
+                    errors = dict(check_r.error_dict.get(file.resolve(), []))
+            finally:
+                file.write_text(origin_code)
+            return errors, new_text
+
+        file2changes = dict[Path, list[tuple[CodeRange, str]]]()
+
+        assert len(repo_paths) == len(
+            set(p.resolve() for p in repo_paths)
+        ), "Repo paths must be unique"
+
+        label_info = dataset.chunks_info
+        for chunk_preds, chunk_info in zip(pred_types, label_info):
+            for ty, info, sid in zip(
+                chunk_preds, chunk_info.annots_info, chunk_info.src_ids
+            ):
+                file = dataset.files[sid]
+                if file not in file2changes:
+                    file2changes[file] = []
+                assert info.annot_range is not None
+                file2changes[file].append((info.annot_range, str(ty)))
+
+        repo2files = dict[Path, list[Path]]()
+        for repo in repo_paths:
+            files = [f for f in repo.glob("**/*.py") if f in file2changes]
+            repo2files[repo] = files
+
+        # todo: use incremental mode
+        def feedback_for_repo(
+            repo: Path,
+        ) -> dict[Path, tuple[dict[CodePosition, str], str]]:
+            files = repo2files[repo]
+            changes_list = [file2changes[f] for f in files]
+            file2errors_content = {}
+            for file, changes in zip(files, changes_list):
+                start = CodeRange(CodePosition(1, 1), CodePosition(1, 1))
+                changes.append((start, MypyChecker.Preamble))
+                file2errors_content[file.resolve()] = feedback_for_file(
+                    file, changes, repo
+                )
+            return file2errors_content
+
+        repo_paths = list(
+            sorted(repo_paths, key=lambda p: len(repo2files[p]), reverse=True)
+        )
+
+        with self.monitor.log_task("Collect type checker feedback"):
+            feedback_list = thread_map(
+                feedback_for_repo,
+                repo_paths,
+                desc="Collect type checker feedback",
+                max_workers=max_workers,
+                **tqdm_args,
+            )
+        file2errors = dict[Path, dict[CodePosition, str]]()
+        file2contents = dict[Path, str]()
+        for ls in feedback_list:
+            for k, v in ls.items():
+                file2errors[k] = v[0]
+                file2contents[k] = v[1]
+
+        # generate feedback-augmented inputs
+        with self.monitor.log_task("Augment inputs"):
+            changed_files = list(file2changes.keys())
+            file_errors = [file2errors.get(f.resolve(), {}) for f in changed_files]
+            new_contents = [file2contents[f.resolve()] for f in changed_files]
+            origin_contents = [f.read_text() for f in changed_files]
+            new_inputs = process_map(
+                _generate_augmented_inputs,
+                changed_files,
+                file_errors,
+                origin_contents,
+                new_contents,
+                chunksize=max(len(file2changes) // (8 * max_workers), 1),
+                max_workers=max_workers,
+                desc="generating augmented inputs",
+                **tqdm_args,
+            )
+        return dict(zip(changed_files, new_inputs))
+
+    def type_check_preds_per_repo(
+        self,
+        dataset: TypeInfDataset,
+        pred_types: Sequence[Sequence[PythonType]],
+        repo_paths: Sequence[Path],
+        tqdm_args: dict,
+    ) -> dict[Path, dict]:
+        """Apply the predicted types to the given files in each project first and then
+        collect the type checker feedback. Will always restore the files to
+        their original contents afterwards."""
+
+        max_workers = self.args.max_workers
+        file2changes = dict[Path, list[tuple[CodeRange, str]]]()
+
+        assert len(repo_paths) == len(
+            set(p.resolve() for p in repo_paths)
+        ), "Repo paths must be unique"
+
+        label_info = dataset.chunks_info
+        for chunk_preds, chunk_info in zip(pred_types, label_info):
+            for ty, info, sid in zip(
+                chunk_preds, chunk_info.annots_info, chunk_info.src_ids
+            ):
+                file = dataset.files[sid]
+                if file not in file2changes:
+                    file2changes[file] = []
+                assert info.annot_range is not None
+                file2changes[file].append((info.annot_range, str(ty)))
+
+        changed_files = list(file2changes.keys())
+        origin_contents = thread_map(
+            read_file,
+            changed_files,
+            desc="reading orginal srcs",
+            max_workers=max_workers,
+            **tqdm_args,
+        )
+        path_to_original = dict[Path, str]()
+        for f, text in zip(changed_files, origin_contents):
+            if MypyChecker.Preamble in text:
+                raise RuntimeError(f"{f} is already modified by SPOT.")
+            path_to_original[f] = text
+
+        try:
+            # apply the file changes and get type checker feedback
+            current_contents = list[str]()
+            for file, changes in file2changes.items():
+                start = CodeRange(CodePosition(1, 1), CodePosition(1, 1))
+                # need this in case libcst does not preserve the original file content
+                code_seen = dataset.srcs[file]
+                changes.insert(0, (start, MypyChecker.Preamble))
+                new_text = replace_strs_by_pos(
+                    code_seen, [(r, 1, v) for r, v in changes]
+                )
+                current_contents.append(new_text)
+                file.write_text(new_text)
+            file2errors = dict[Path, dict[CodePosition, str]]()
+            file_to_repo = dict[Path, Path]()
+
+            with self.monitor.log_task("Call mypy"):
+                check_results: list[MypyResult | str] = thread_map(
+                    MypyChecker.check_project,
+                    repo_paths,
+                    max_workers=max_workers,
+                    desc="calling mypy",
+                    **tqdm_args,
+                )
+            for dir, check_r in zip(repo_paths, check_results):
+                if isinstance(check_r, str):
+                    logging.warning(f"Mypy errored when checking '{dir}'.")
+                    continue
+                for file, errors in check_r.error_dict.items():
+                    assert (
+                        file not in file_to_repo
+                    ), f"{file} appears in multiple repos? repo1: {file_to_repo[file]}, repo2: {dir}"
+                    file2errors[file] = dict(errors)
+                    file_to_repo[file] = dir
+
+            # generate feedback-augmented inputs
+            file_errors = [file2errors.get(f.resolve(), {}) for f in changed_files]
+            new_inputs = process_map(
+                _generate_augmented_inputs,
+                changed_files,
+                file_errors,
+                origin_contents,
+                current_contents,
+                chunksize=max(len(file2changes) // (8 * max_workers), 1),
+                max_workers=max_workers,
+                desc="generating augmented inputs",
+                **tqdm_args,
+            )
+            return dict(zip(changed_files, new_inputs))
+        finally:
+            # restore the files to their original contents
+            for file, content in path_to_original.items():
+                file.write_text(content)
+
+
+def _generate_augmented_inputs(
+    file: Path,
+    file_errors: dict[CodePosition, str],
+    original_code: str,
+    current_code: str,
+) -> dict:
+    origin_mod = cst.parse_module(original_code)
+    origin_infos, label_types = collect_user_annotations(origin_mod)
+    path2types = dict[AnnotPath, PythonType]()
+    for info, ty in zip(origin_infos, label_types):
+        path2types[info.path] = ty
+
+    try:
+        m = cst.parse_module(current_code)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to parse file: '{file}' with content:\n{current_code}"
+        ) from e
+    m_code = m.code
+    assert m_code == current_code, "Code 1:\n<<{}>>\nCode 2:\n<<{}>>".format(
+        current_code, m_code
+    )
+    current_annots, _ = collect_user_annotations(m)
+    preds_map = dict[CodeRange, str]()
+    annots_info = list[AnnotInfo]()
+    types = list[PythonType]()
+    for a in current_annots:
+        if a.path in path2types:
+            assert (range := a.annot_range) is not None
+            assert (annot := a.annot) is not None
+            preds_map[range] = m.code_for_node(annot.annotation)
+            types.append(path2types[a.path])
+            annots_info.append(a)
+    new_code = patch_code_with_extra(current_code, preds_map, file_errors)
+    code_segs = new_code.split(SpecialNames.TypeMask)
+    assert len(code_segs) == len(types) + 1, f"{len(code_segs)} != {len(types)} + 1"
+
+    return {
+        "code_segs": code_segs,
+        "types": types,
+        "annots_info": annots_info,
+    }

@@ -4,6 +4,78 @@ from typing import Sequence
 
 import ipywidgets as widgets
 
+from spot.data import CtxArgs, PythonType, TypeInfDataset
+from spot.utils import TokenizerSPOT
+
+
+def visualize_batch(
+    dataset: TypeInfDataset,
+    i: int,
+    preds: list[list[PythonType]],
+    tokenizer: TokenizerSPOT,
+    ctx_args: CtxArgs,
+) -> str:
+    pred_types = preds[i]
+    typpes_enc = [
+        tokenizer.encode(str(t), add_special_tokens=False) for t in pred_types
+    ]
+
+    label_types = dataset.chunks_info[i].types
+    code_tks = inline_predictions(dataset.data["input_ids"][i], typpes_enc, tokenizer)
+    sep_1 = tokenizer.encode(
+        "\n---------⬆context⬆---------\n", add_special_tokens=False
+    )
+    sep_2 = tokenizer.encode(
+        "\n---------⬇context⬇---------\n", add_special_tokens=False
+    )
+    ctx_margin = ctx_args.ctx_margin
+    code_tks = (
+        code_tks[:ctx_margin]
+        + sep_1
+        + code_tks[ctx_margin:-ctx_margin]
+        + sep_2
+        + code_tks[-ctx_margin:]
+    )
+    code_dec = tokenizer.decode(code_tks, skip_special_tokens=False)
+    code_dec = code_inline_extra_ids(code_dec, label_types)
+    src_ids = sorted(list(set(dataset.chunks_info[i].src_ids)))
+    files = [dataset.files[i] for i in src_ids]
+    return "".join(
+        [
+            "labels: ",
+            str(label_types),
+            "\n",
+            "preds: ",
+            str(pred_types),
+            "\n",
+            "files: ",
+            str(files),
+            "\n",
+            "========================== Code =======================\n",
+            code_dec,
+            "\n",
+        ]
+    )
+
+
+def inline_predictions(
+    input_tks: Sequence[int],
+    predictions: Sequence[Sequence[int]],
+    tokenizer: TokenizerSPOT,
+) -> list[int]:
+    """Inline the model predictions into the input code and then decode"""
+    out_tks = list[int]()
+    extra_id = 0
+    next_special = tokenizer.additional_special_tokens_ids[99 - extra_id]
+    for tk in input_tks:
+        out_tks.append(tk)
+        if tk == next_special:
+            out_tks.extend(predictions[extra_id])
+            extra_id += 1
+            next_special = tokenizer.additional_special_tokens_ids[99 - extra_id]
+    assert extra_id == len(predictions), f"{extra_id} != {len(predictions)}"
+    return out_tks
+
 
 def display_code_sequence(texts: Sequence[str], titles=None):
     if titles is None:
