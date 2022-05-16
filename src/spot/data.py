@@ -666,15 +666,18 @@ def pretty_print_accuracies(
     level: int = 0,
     max_show_level: int = 1000,
 ):
-    if level > max_show_level:
-        return print("   " * level + "...")
     for k, v in accs.items():
         print("   " * level, end="")
         if isinstance(v, float):
             print(f"{k}: {v:.2%}")
         elif isinstance(v, dict):
-            print(f"{k}:")
-            pretty_print_accuracies(v, level=level + 1, max_show_level=max_show_level)
+            if level >= max_show_level:
+                print(f"{k}: ...")
+            else:
+                print(f"{k}:")
+                pretty_print_accuracies(
+                    v, level=level + 1, max_show_level=max_show_level
+                )
         else:
             print(f"{k}: {v}")
 

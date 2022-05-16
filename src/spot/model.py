@@ -1,5 +1,6 @@
 import logging
 from collections import Counter
+from copy import deepcopy
 
 import numpy as np
 from datasets import Dataset
@@ -20,7 +21,9 @@ from spot.data import (
     chunk_masked_code,
     output_ids_as_types,
     patch_code_with_extra,
+    preds_to_accuracies,
     repos_to_dataset,
+    type_accuracies,
 )
 from spot.type_env import (
     AnnotInfo,
@@ -94,6 +97,24 @@ class ModelWrapper:
             tqdm_bar.update(output_ids.shape[0])
         return pred_types
 
+    def repos_to_dataset(
+        self, repos: Sequence[Path], tqdm_args: dict
+    ) -> TypeInfDataset:
+        """Convinient method to preprocess the repos according to the model's ctx_args."""
+        return repos_to_dataset(
+            repos,
+            self.tokenizer,
+            self.args.ctx_args,
+            max_workers=self.args.max_workers,
+            tqdm_args=tqdm_args,
+        )
+
+    def eval_on_repos(self, repos: Sequence[Path], tqdm_args={}) -> dict[str, Any]:
+        """Convinient method to preprocess the repos according to the model's ctx_args and evaluate the (R0) accuracy."""
+        dataset = self.repos_to_dataset(repos, tqdm_args=tqdm_args)
+        preds = self.predict(dataset, tqdm_args=tqdm_args)
+        return preds_to_accuracies(preds, dataset)
+
     def generate_r1_inputs(
         self,
         repos: Sequence[Path],
@@ -166,6 +187,22 @@ class ModelWrapper:
         )
 
         return trainer
+
+    def scale_ctx_size(self, factor: float) -> "ModelWrapper":
+        """Scale the context size and margin of the model by the given factor, scale down the
+        sampling batch size accordingly."""
+        args = deepcopy(self.args)
+        args.ctx_args.ctx_size = round(args.ctx_args.ctx_size * factor)
+        args.ctx_args.ctx_margin = round(args.ctx_args.ctx_margin * factor)
+        # the cost increases O(N^3) since we have O(N^2) cost in self-attention and O(N) more labels per batch
+        args.sampling_batch_size = round(args.sampling_batch_size / factor**3)
+
+        return ModelWrapper(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            args=args,
+            monitor=self.monitor,
+        )
 
     def type_check_preds_per_file(
         self,
@@ -246,6 +283,7 @@ class ModelWrapper:
             + f"Time stats: (median={median_time:.1f}s, mean={mean_time:.1f}s, max={max_time:.1f})s"
         )
 
+        # todo: refactor this part out of the function
         # generate feedback-augmented inputs
         with self.monitor.log_task("Augment inputs"):
             changed_files = list(file2changes.keys())

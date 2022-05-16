@@ -271,7 +271,7 @@ def pushover_alert(title: str, message: str, print_to_console: bool = True) -> N
     conn = http.client.HTTPSConnection("api.pushover.net:443")
     config_file = proj_root() / "config/pushover.json"
     if print_to_console:
-        print(f"Alert: ({title}) {message}")
+        print(f"Pushover: ({title}) {message}")
     if not config_file.exists():
         print(
             f"No pushover config file found at {config_file}. Not able to push message."
@@ -301,7 +301,7 @@ def run_long_task(name: str):
         start = time.time()
         yield
     except Exception as e:
-        pushover_alert(f"{name} failed", str(e))
+        pushover_alert(f"Failed: {name}.", str(e))
         raise e
     time_taken = time.time() - start
-    pushover_alert(f"{name} finished", f"Time taken: {time_taken:.1f}s")
+    pushover_alert(f"Finished: {name}.", f"Time taken: {time_taken:.1f}s")
