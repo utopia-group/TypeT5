@@ -3,6 +3,7 @@ from collections import Counter
 
 import numpy as np
 from datasets import Dataset
+from mypy_extensions import mypyc_attr
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from transformers import (
@@ -29,6 +30,7 @@ from spot.type_env import (
     PythonType,
     collect_annots_info,
     collect_user_annotations,
+    mypy_checker,
     parse_type_expr,
 )
 from spot.utils import *
@@ -134,6 +136,7 @@ class ModelWrapper:
             str(output_dir),
             evaluation_strategy="steps",  # type: ignore
             eval_steps=500,
+            eval_accumulation_steps=5,
             logging_steps=500,
             prediction_loss_only=True,
             save_strategy="steps",  # type: ignore
@@ -177,89 +180,77 @@ class ModelWrapper:
 
         max_workers = self.args.max_workers
 
-        def feedback_for_file(
-            file: Path, changes: list[tuple[CodeRange, str]], repo: Path
-        ) -> tuple[dict[CodePosition, str], str]:
-            with open(file, "r") as f:
-                origin_code = f.read()
-            if MypyChecker.Preamble in origin_code:
-                raise RuntimeError(f"{f} is already modified by SPOT.")
-            code_seen = dataset.srcs[file]
-            new_text = replace_strs_by_pos(code_seen, [(r, 1, v) for r, v in changes])
-            file.write_text(new_text)
-            try:
-                pass
-                check_r = MypyChecker.check_project(repo)
-                if isinstance(check_r, str):
-                    logging.warning(f"Mypy errored when checking '{dir}'.")
-                    errors = {}
-                else:
-                    errors = dict(check_r.error_dict.get(file.resolve(), []))
-            finally:
-                file.write_text(origin_code)
-            return errors, new_text
-
-        file2changes = dict[Path, list[tuple[CodeRange, str]]]()
-
         assert len(repo_paths) == len(
             set(p.resolve() for p in repo_paths)
         ), "Repo paths must be unique"
 
+        file2changes = dict[Path, list[tuple[CodeRange, str]]]()
+        fiel2origin_code = dict[Path, str]()
         label_info = dataset.chunks_info
         for chunk_preds, chunk_info in zip(pred_types, label_info):
             for ty, info, sid in zip(
                 chunk_preds, chunk_info.annots_info, chunk_info.src_ids
             ):
                 file = dataset.files[sid]
+                code = dataset.srcs[file]
+                file = file.resolve()
                 if file not in file2changes:
                     file2changes[file] = []
                 assert info.annot_range is not None
                 file2changes[file].append((info.annot_range, str(ty)))
+                fiel2origin_code[file] = code
 
         repo2files = dict[Path, list[Path]]()
+        repos_to_check = list[Path]()
         for repo in repo_paths:
-            files = [f for f in repo.glob("**/*.py") if f in file2changes]
-            repo2files[repo] = files
+            files = [f.resolve() for f in repo.glob("**/*.py") if f in file2changes]
+            if bool(files):
+                repo2files[repo] = files
+                repos_to_check.append(repo)
+        repos_to_check.sort(key=lambda p: len(repo2files[p]), reverse=True)
 
-        # todo: use incremental mode
-        def feedback_for_repo(
-            repo: Path,
-        ) -> dict[Path, tuple[dict[CodePosition, str], str]]:
-            files = repo2files[repo]
-            changes_list = [file2changes[f] for f in files]
-            file2errors_content = {}
-            for file, changes in zip(files, changes_list):
-                start = CodeRange(CodePosition(1, 1), CodePosition(1, 1))
-                changes.append((start, MypyChecker.Preamble))
-                file2errors_content[file.resolve()] = feedback_for_file(
-                    file, changes, repo
-                )
-            return file2errors_content
+        helper = _TypeCheckingHelper(use_daemon=False)
+        command_name = "dmypy" if helper.use_daemon else "mypy"
+        change_lists = [
+            {f: file2changes[f] for f in repo2files[r]} for r in repos_to_check
+        ]
+        src_maps = [
+            {f: fiel2origin_code[f] for f in repo2files[r]} for r in repos_to_check
+        ]
 
-        repo_paths = list(
-            sorted(repo_paths, key=lambda p: len(repo2files[p]), reverse=True)
-        )
-
-        with self.monitor.log_task("Collect type checker feedback"):
-            feedback_list = thread_map(
-                feedback_for_repo,
-                repo_paths,
-                desc="Collect type checker feedback",
+        with self.monitor.log_task(f"Running {command_name}"):
+            feedback_list = process_map(
+                helper.feedback_for_repo,
+                repos_to_check,
+                change_lists,
+                src_maps,
+                desc=f"Running {command_name}",
                 max_workers=max_workers,
                 **tqdm_args,
             )
         file2errors = dict[Path, dict[CodePosition, str]]()
         file2contents = dict[Path, str]()
-        for ls in feedback_list:
+        checking_times = list[float]()
+        for ls, time in feedback_list:
+            checking_times.append(time)
             for k, v in ls.items():
                 file2errors[k] = v[0]
                 file2contents[k] = v[1]
 
+        # compute the min, median, and max of the checking times
+        mean_time = np.mean(checking_times)
+        median_time = np.median(checking_times)
+        max_time = max(checking_times)
+        logging.info(
+            f"Type checked {len(checking_times)} repos.\n"
+            + f"Time stats: (median={median_time:.1f}s, mean={mean_time:.1f}s, max={max_time:.1f})s"
+        )
+
         # generate feedback-augmented inputs
         with self.monitor.log_task("Augment inputs"):
             changed_files = list(file2changes.keys())
-            file_errors = [file2errors.get(f.resolve(), {}) for f in changed_files]
-            new_contents = [file2contents[f.resolve()] for f in changed_files]
+            file_errors = [file2errors.get(f, {}) for f in changed_files]
+            new_contents = [file2contents[f] for f in changed_files]
             origin_contents = [f.read_text() for f in changed_files]
             new_inputs = process_map(
                 _generate_augmented_inputs,
@@ -314,7 +305,7 @@ class ModelWrapper:
         path_to_original = dict[Path, str]()
         for f, text in zip(changed_files, origin_contents):
             if MypyChecker.Preamble in text:
-                raise RuntimeError(f"{f} is already modified by SPOT.")
+                raise RuntimeError(f"{f} is already modified by SPOT:\n{text}")
             path_to_original[f] = text
 
         try:
@@ -414,3 +405,82 @@ def _generate_augmented_inputs(
         "types": types,
         "annots_info": annots_info,
     }
+
+
+class _TypeCheckingHelper:
+    def __init__(self, use_daemon=True):
+        self.bad_repos: set = set()
+        self.use_daemon: bool = use_daemon
+
+    def feedback_for_file(
+        self,
+        file: Path,
+        cst_code: Optional[str],
+        changes: list[tuple[CodeRange, str]],
+        repo_checker: Path | MypyChecker,
+    ) -> tuple[dict[CodePosition, str], str]:
+        with open(file, "r") as f:
+            current_code = f.read()
+        if MypyChecker.Preamble in current_code:
+            raise RuntimeError(f"{f} is already modified by SPOT.")
+
+        start = CodeRange(CodePosition(1, 1), CodePosition(1, 1))
+        replaces = list[tuple[CodeRange, int, str]]()
+        replaces.append((start, 1, MypyChecker.Preamble))
+        for r, v in changes:
+            replaces.append((r, 1, v))
+
+        if cst_code is None:
+            cst_code = cst.parse_module(current_code).code
+        new_text = replace_strs_by_pos(cst_code, replaces)
+        file.write_text(new_text)
+
+        try:
+            if isinstance(repo_checker, MypyChecker):
+                repo = Path(repo_checker.code_dir)
+                check_r = repo_checker.recheck_project()
+            else:
+                repo = repo_checker
+                check_r = MypyChecker.check_project(repo)
+            if isinstance(check_r, str):
+                if repo not in self.bad_repos:
+                    logging.warning(f"Mypy errored when checking '{repo}': {check_r}")
+                    self.bad_repos.add(repo)
+                errors = {}
+            else:
+                errors = dict(check_r.error_dict.get(file.resolve(), []))
+        finally:
+            file.write_text(current_code)
+        return errors, new_text
+
+    def feedback_for_repo(
+        self,
+        repo: Path,
+        changes_list: dict[Path, list[tuple[CodeRange, str]]],
+        file2origin_code: dict[Path, str],
+    ) -> tuple[dict[Path, tuple[dict[CodePosition, str], str]], float]:
+        assert changes_list.keys() == file2origin_code.keys()
+        file2errors_content = {}
+        start = time.time()
+        if self.use_daemon:
+            with mypy_checker(repo, wait_before_check=1.0) as checker:
+                for file, changes in changes_list.items():
+                    code = file2origin_code[file]
+                    file2errors_content[file.resolve()] = self.feedback_for_file(
+                        file,
+                        code,
+                        changes,
+                        checker,
+                    )
+        else:
+            for file, changes in changes_list.items():
+                code = file2origin_code[file]
+                file2errors_content[file.resolve()] = self.feedback_for_file(
+                    file,
+                    code,
+                    changes,
+                    repo,
+                )
+        time_taken = time.time() - start
+
+        return file2errors_content, time_taken

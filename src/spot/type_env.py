@@ -96,7 +96,7 @@ def collect_annots_info(code: cst.Module | cst.MetadataWrapper) -> list[AnnotInf
 
 def collect_user_annotations(
     code: cst.Module | cst.MetadataWrapper,
-) -> tuple[list[AnnotInfo], list['PythonType']]:
+) -> tuple[list[AnnotInfo], list["PythonType"]]:
     """Collect all user-added type annotations in the given source code. Unlike `collect_annots_info`,
     The order of the returned annotations is gurated to follow the order of the source code."""
 
@@ -307,7 +307,7 @@ class StmtsAdder(cst.CSTTransformer):
 class MypyResult:
     # total number of errors in all files
     num_errors: int
-    # records the errors in each file and their locations
+    # records the errors in each file and their locations. Absolute paths are recorded.
     error_dict: dict[Path, list[tuple[CodePosition, str]]]
     # the original output by mypy
     output_str: str
@@ -326,6 +326,7 @@ class MypyChecker:
         "--show-error-codes",
         "--soft-error-limit=-1",
         "--config-file=",
+        # "--check-untyped-defs",  # turn off to improve performance
     ]
 
     Preamble = "from typing import Any # SPOT\n"
@@ -333,9 +334,9 @@ class MypyChecker:
     """Run Mypy daemon to (repeatedly) type check given files"""
 
     def __init__(self, dmypy_path, code_dir, wait_before_check=1.0) -> None:
-        self.code_dir = realpath(code_dir)
-        self.dmypy_path = realpath(dmypy_path)
-        self.wait_before_check = wait_before_check
+        self.code_dir: str = realpath(code_dir)
+        self.dmypy_path: str = realpath(dmypy_path)
+        self.wait_before_check: float = wait_before_check
         # subprocess.run(
         #     ["python", self.dmypy_path, "run", "--", "."],
         #     capture_output=True,
@@ -348,25 +349,26 @@ class MypyChecker:
                 self.dmypy_path,
                 "start",
                 "--",
-                # "--check-untyped-defs",  # turn off to improve performance
                 *MypyChecker.TypeCheckFlags,
             ],
             cwd=self.code_dir,
-        )
-        subprocess.run(
-            ["python", self.dmypy_path, "check", self.code_dir],
-            cwd=self.code_dir,
             capture_output=True,
         )
+        sout = subprocess.run(
+            ["python", self.dmypy_path, "check", "."],
+            cwd=self.code_dir,
+            capture_output=True,
+            text=True,
+        )
+        if sout.stderr:
+            logging.warn(f"Mypy failed on initial check: {sout.stderr}")
 
     def close(self):
         subprocess.run(
             ["python", self.dmypy_path, "stop"],
             cwd=self.code_dir,
+            capture_output=True,
         )
-
-    def check_code_dir(self) -> MypyResult | str:
-        return self._run_mypy(["python", self.dmypy_path, "check", self.code_dir])
 
     @staticmethod
     def check_project(proj: Path, mypy_path: Path = None) -> MypyResult | str:
@@ -419,7 +421,7 @@ class MypyChecker:
         # ), f"{num_errors} != {total_errors}. errors found: {error_dict.values()}\n mypy output: \n{output.stdout}"
         return MypyResult(num_errors, error_dict, output.stdout)
 
-    def recheck_files(self, *updated_files: str) -> MypyResult:
+    def recheck_files(self, *updated_files: Path) -> MypyResult | str:
         # TODO: remove this workaround once (https://github.com/python/mypy/issues/12697) is fixed.
         time.sleep(
             self.wait_before_check
@@ -433,33 +435,30 @@ class MypyChecker:
                 # "--perf-stats-file",
                 # "mypy_perf.json",
                 "--update",
-                *updated_files,
+                *map(str, updated_files),
             ]
         )
 
-        # TODO: remove below after fixing the issue
-        # subprocess.run(
-        #     ["cat", "mypy_perf.json"],
-        #     cwd=self.code_dir,
-        # )
-        # subprocess.run(
-        #     [
-        #         "python",
-        #         self.dmypy_path,
-        #         "status",
-        #         "--fswatcher-dump-file",
-        #         "mypy_fswatcher.json",
-        #     ],
-        #     cwd=self.code_dir,
-        # )
-        # subprocess.run(
-        #     ["cat", "mypy_fswatcher.json"],
-        #     cwd=self.code_dir,
-        # )
+        return out
+
+    def recheck_project(self) -> MypyResult | str:
+        # TODO: remove this workaround once (https://github.com/python/mypy/issues/12697) is fixed.
+        time.sleep(
+            self.wait_before_check
+        )  # wait to make sure the type checker sees the file changes
+
+        out = self._run_mypy(
+            [
+                "python",
+                self.dmypy_path,
+                "check",
+                ".",
+            ]
+        )
 
         return out
 
-    def _run_mypy(self, cmd: list[str]) -> MypyResult:
+    def _run_mypy(self, cmd: list[str]) -> MypyResult | str:
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -467,10 +466,7 @@ class MypyChecker:
             cwd=self.code_dir,
         )
 
-        out = MypyChecker.parse_mypy_output(result, cmd, cwd=self.code_dir)
-        if isinstance(out, str):
-            raise RuntimeError(str)
-        return out
+        return MypyChecker.parse_mypy_output(result, cmd, cwd=Path(self.code_dir))
 
 
 @contextmanager
@@ -603,6 +599,9 @@ class TypeInfEnv:
         # time.sleep(1.0)
         write_file(self.src_file, mod.code)
         out = self.checker.recheck_files(self.src_file)
+        if isinstance(out, str):
+            raise RuntimeError(out)
+
         if self.print_mypy_output:
             print("action: ", action)
             print("mypy output:", out.output_str)
@@ -615,6 +614,8 @@ class TypeInfEnv:
             write_file(self.src_file, mod.code)
             if self.check_any:
                 out = self.checker.recheck_files(self.src_file)
+                if isinstance(out, str):
+                    raise RuntimeError(out)
                 assert out.num_errors == state.num_errors, (
                     "Adding Any should not trigger more type errors.\n"
                     f"original errors: {state.num_errors}, new errors: {out.num_errors}\n"

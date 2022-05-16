@@ -1,3 +1,4 @@
+config
 *.egg-info
 code_output
 temp

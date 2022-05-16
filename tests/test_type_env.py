@@ -73,26 +73,26 @@ def test_annotation_applying():
         assert new_map[k].annotation.value == v.annotation.value
 
 
-@pytest.mark.skip(reason="Is considering to deprecate incremental type checking.")
 def test_mypy_checker_1():
-    with mypy_checker("data/code") as checker:
-        check_r = checker.check_code_dir()
-        assert "bad_code_1.py" in check_r.error_dict
-        assert "bad_code_2.py" in check_r.error_dict
+    with mypy_checker("data/code", wait_before_check=0.0) as checker:
+        check_r = checker.recheck_project()
+        assert Path("data/code/bad_code_1.py").resolve() in check_r.error_dict
+        assert Path("data/code/bad_code_2.py").resolve() in check_r.error_dict
 
 
-@pytest.mark.skip(reason="Is considering to deprecate incremental type checking.")
 def test_mypy_checker_2():
-    with mypy_checker("data/code_output") as checker:
-        oe = checker.recheck_files("bad_code_1.py").num_errors
+    with mypy_checker("data/code_output", wait_before_check=0.0) as checker:
+        if Path("data/code_output/bad_code_1.py").exists():
+            os.remove("data/code_output/bad_code_1.py")
+        oe = checker.recheck_project().num_errors
         write_file("data/code_output/bad_code_1.py", parsed.code)
-        assert checker.recheck_files("bad_code_1.py").num_errors > oe
+        assert checker.recheck_project().num_errors > oe
         new_code = apply_annotations(parsed, code_1_patch).code
         write_file(
             "data/code_output/bad_code_1.py",
             new_code,
         )
-        c_r = checker.recheck_files("bad_code_1.py")
+        c_r = checker.recheck_project()
         assert c_r.num_errors == oe, f"mypy_output: {c_r.output_str}\ncode: {new_code}"
 
 

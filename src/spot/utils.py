@@ -246,12 +246,62 @@ class TaskLoggingMonitor(TaskMonitor):
         task_name = " > ".join(self.current_task)
         # if self.current_tqdm is not None:
         #     self.current_tqdm.set_postfix_str(f"Current task: {task_name}")
-        print(f"[{self.monitor_name}] Current task: {task_name}")
+        print(f"[{self.monitor_name}] Starting task: '{task_name}'")
         try:
+            start = time.time()
             with self.timer.log_time(task_name):
                 yield
+            end = time.time()
+            print(
+                f"[{self.monitor_name}] '{task_name}' finished in {end - start} seconds"
+            )
         finally:
             self.current_task.pop()
             # if self.current_tqdm is not None:
             #     task_name = " > ".join(self.current_task)
             #     self.current_tqdm.set_postfix_str(f"Current task: {task_name}")
+
+
+import http.client
+import json
+import urllib
+
+
+def pushover_alert(title: str, message: str, print_to_console: bool = True) -> None:
+    conn = http.client.HTTPSConnection("api.pushover.net:443")
+    config_file = proj_root() / "config/pushover.json"
+    if print_to_console:
+        print(f"Alert: ({title}) {message}")
+    if not config_file.exists():
+        print(
+            f"No pushover config file found at {config_file}. Not able to push message."
+        )
+    else:
+        config = json.loads(config_file.read_text())
+        conn.request(
+            "POST",
+            "/1/messages.json",
+            urllib.parse.urlencode(
+                {
+                    "token": config["token"],
+                    "user": config["user"],
+                    "title": title,
+                    "message": message,
+                }
+            ),
+            {"Content-type": "application/x-www-form-urlencoded"},
+        )
+        # check if the request was successful
+        conn.getresponse()
+
+
+@contextmanager
+def run_long_task(name: str):
+    try:
+        start = time.time()
+        yield
+    except Exception as e:
+        pushover_alert(f"{name} failed", str(e))
+        raise e
+    time_taken = time.time() - start
+    pushover_alert(f"{name} finished", f"Time taken: {time_taken:.1f}s")
