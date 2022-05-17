@@ -17,6 +17,7 @@ from transformers.trainer import Trainer
 
 from spot.data import (
     CtxArgs,
+    SrcDataset,
     TypeInfDataset,
     chunk_masked_code,
     output_ids_as_types,
@@ -97,6 +98,38 @@ class ModelWrapper:
             tqdm_bar.update(output_ids.shape[0])
         return pred_types
 
+    def save_pretrained(self, path: Path):
+        """Save the model to the given path along with its tokenizer and args."""
+        self.model.save_pretrained(str(path))
+        self.tokenizer.save_pretrained(str(path))
+        with open(path / "args.pkl", "wb") as f:
+            pickle.dump(self.args, f)
+
+    @staticmethod
+    def load_pretrained(path: Path) -> "ModelWrapper":
+        """Load a pretrained model from the given path."""
+        model = ModelSPOT.from_pretrained(str(path))
+        tokenizer = TokenizerSPOT.from_pretrained(str(path))
+        with open(path / "args.pkl", "rb") as f:
+            args = pickle.load(f)
+        return ModelWrapper(
+            model=model,
+            tokenizer=tokenizer,
+            args=args,
+            monitor=TaskLoggingMonitor(path.name),
+        )
+
+    def eval_on_dataset(self, src_data: SrcDataset, tqdm_args={}) -> dict[str, Any]:
+        """Convinient method to preprocess the src according to the model's ctx_args and evaluate the (R0) accuracy."""
+        data = src_data.to_chunks(
+            self.tokenizer,
+            self.args.ctx_args,
+            max_workers=self.args.max_workers,
+            tqdm_args=tqdm_args,
+        )
+        preds = self.predict(data, tqdm_args=tqdm_args)
+        return preds_to_accuracies(preds, data)
+
     def repos_to_dataset(
         self, repos: Sequence[Path], tqdm_args: dict
     ) -> TypeInfDataset:
@@ -109,12 +142,14 @@ class ModelWrapper:
             tqdm_args=tqdm_args,
         )
 
+    # TODO: deprecate
     def eval_on_repos(self, repos: Sequence[Path], tqdm_args={}) -> dict[str, Any]:
         """Convinient method to preprocess the repos according to the model's ctx_args and evaluate the (R0) accuracy."""
         dataset = self.repos_to_dataset(repos, tqdm_args=tqdm_args)
         preds = self.predict(dataset, tqdm_args=tqdm_args)
         return preds_to_accuracies(preds, dataset)
 
+    # TODO: deprecate
     def generate_r1_inputs(
         self,
         repos: Sequence[Path],

@@ -267,7 +267,11 @@ import json
 import urllib
 
 
-def pushover_alert(title: str, message: str, print_to_console: bool = True) -> None:
+def pushover_alert(
+    title: str, message: str, print_to_console: bool = True, notify: bool = True
+) -> None:
+    "If notify=False, will only print to console."
+
     conn = http.client.HTTPSConnection("api.pushover.net:443")
     config_file = proj_root() / "config/pushover.json"
     if print_to_console:
@@ -276,7 +280,7 @@ def pushover_alert(title: str, message: str, print_to_console: bool = True) -> N
         print(
             f"No pushover config file found at {config_file}. Not able to push message."
         )
-    else:
+    elif notify:
         config = json.loads(config_file.read_text())
         conn.request(
             "POST",
@@ -296,7 +300,9 @@ def pushover_alert(title: str, message: str, print_to_console: bool = True) -> N
 
 
 @contextmanager
-def run_long_task(name: str):
+def run_long_task(name: str, notify: bool = True):
+    "When notify=False, will only push notifiations when encountering errors."
+
     try:
         start = time.time()
         yield
@@ -304,4 +310,8 @@ def run_long_task(name: str):
         pushover_alert(f"Failed: {name}.", str(e))
         raise e
     time_taken = time.time() - start
-    pushover_alert(f"Finished: {name}.", f"Time taken: {time_taken:.1f}s")
+    pushover_alert(
+        f"Finished: {name}.",
+        f"Time taken: {time_taken:.1f}s",
+        notify=notify,
+    )

@@ -4,6 +4,7 @@ import random
 import shutil
 import subprocess
 import warnings
+from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import *
@@ -146,6 +147,7 @@ class TokenizedSrc:
     file: Path
     repo: Path
     types: list[PythonType]
+    types_pos: list[int]  # the position of the types in tokenized_code.
     types_str: list[str]
     types_tks: list[list[int]]
     types_info: list[AnnotInfo]
@@ -164,6 +166,7 @@ class _TokenizedSrcHelper:
             origin_code=d["original_code"],
             tokenized_code=list[int](),
             types=list[PythonType](),
+            types_pos=list[int](),
             types_str=list[str](),
             types_info=list[AnnotInfo](),
             types_tks=list[list[int]](),
@@ -190,11 +193,12 @@ class _TokenizedSrcHelper:
         for i in range(len(types)):
             all_tks.extend(tkn.encode(segs[i], add_special_tokens=False))
             if is_label[i]:
-                all_tks.append(mask_id)
+                r.types_pos.append(len(all_tks))
                 r.types.append(types[i])
                 r.types_tks.append(tkn.encode(str(types[i]), add_special_tokens=False))
                 r.types_str.append(types_str[i])
                 r.types_info.append(annots_info[i])
+                all_tks.append(mask_id)
             else:
                 all_tks.extend(tkn.encode(types_str[i], add_special_tokens=False))
         all_tks.extend(tkn.encode(segs[-1], add_special_tokens=False))
@@ -214,18 +218,14 @@ def chunk_srcs(
     the middle parts of the batch are treated as predition labels."""
 
     all_tks = list[int | tuple]()
-    mask_id = not_none(tokenizer.mask_token_id)
 
-    # first, concat all src tokens
+    # first, concat all src tokens, replace masked tokens with tuples.
     for src_id, src in enumerate(srcs):
-        i = 0
-        for tk in src.tokenized_code:
-            if tk != mask_id:
-                all_tks.append(tk)
-                continue
-            all_tks.append((src.types[i], src.types_info[i], src.types_tks[i], src_id))
-            i += 1
-        assert len(src.types) == i, f"{len(src.types)} != {i}"
+        offset = len(all_tks)
+        all_tks.extend(src.tokenized_code)
+        for i in range(len(src.types)):
+            type_tuple = (src.types[i], src.types_info[i], src.types_tks[i], src_id)
+            all_tks[offset + src.types_pos[i]] = type_tuple
 
     # then, use a sliding window over `all_tks` with step size `stride` to turn them into masked chunks
     helper = _ChunkingHelper(tokenizer, ctx_args)
@@ -287,6 +287,9 @@ class SrcDataset:
             srcs, tokenizer, ctx_args, max_workers=max_workers, tqdm_args=tqdm_args
         )
 
+    def __repr__(self):
+        return f"SrcDataset(root='{self.repos_root}', n_repos={len(self.repos2srcs)}, n_labeled_files={len(self.srcs_with_labels())})"
+
     @staticmethod
     def from_repos(
         repos_root: Path,
@@ -317,24 +320,27 @@ class SrcDataset:
             chunksize=max(1, len(srcs) // (8 * max_workers)),
             **tqdm_args,
         )
-        masked_srcs = [x for x in masked_srcs if x is not None]
+        filtered_srcs = []
 
         rands = random.getstate()
         random.seed(seed)
         for i, x in enumerate(masked_srcs):
+            if x is None:
+                continue
             n = len(x["types"])
             x["is_label"] = [random.random() < label_ratio for _ in range(n)]
             x["file"] = srcs[i][0].relative_to(repos_root)
             x["repo"] = srcs[i][2].relative_to(repos_root)
+            filtered_srcs.append(x)
         random.setstate(rands)
 
         helper = _TokenizedSrcHelper(tokenizer)
         tk_srcs: list[TokenizedSrc] = process_map(
             helper.dict_to_tokenized_src,
-            masked_srcs,
+            filtered_srcs,
             max_workers=max_workers,
             desc="dict_to_tokenized_src",
-            chunksize=max(1, len(masked_srcs) // (8 * max_workers)),
+            chunksize=max(1, len(filtered_srcs) // (8 * max_workers)),
             **tqdm_args,
         )
 
