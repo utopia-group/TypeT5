@@ -214,7 +214,7 @@ def chunk_srcs(
     ctx_args: "CtxArgs",
     max_workers: int,
     tqdm_args: dict,
-) -> "TypeInfDataset":
+) -> "ChunkedDataset":
     """Chunk srcs into batches of size ctx_size. Only types in
     the middle parts of the batch are treated as predition labels."""
 
@@ -257,7 +257,7 @@ def chunk_srcs(
         meta = chunk["meta"]
         chunks_info.append(meta)
 
-    return TypeInfDataset(
+    return ChunkedDataset(
         data=Dataset.from_dict(chunks),
         chunks_info=chunks_info,
         files=[repos_root / s.file for s in srcs],
@@ -283,7 +283,7 @@ class SrcDataset:
         ctx_args: "CtxArgs",
         max_workers: int,
         tqdm_args: dict = {},
-    ) -> "TypeInfDataset":
+    ) -> "ChunkedDataset":
         srcs = self.srcs_with_labels()
         return chunk_srcs(
             self.repos_root,
@@ -612,7 +612,7 @@ def chunk_masked_code(
 
 
 @dataclass
-class TypeInfDataset:
+class ChunkedDataset:
     data: Dataset
     chunks_info: list[SrcChunkInfo]
     # The source files of this data set
@@ -620,13 +620,13 @@ class TypeInfDataset:
     file2src: dict[Path, str]
     file2repo: dict[Path, Path]
 
-    def __getitem__(self, key: slice) -> "TypeInfDataset":
+    def __getitem__(self, key: slice) -> "ChunkedDataset":
         assert isinstance(key, slice)
 
         new_data = {n: self.data[n][key] for n in self.data.column_names}
         new_info = self.chunks_info[key]
 
-        return TypeInfDataset(
+        return ChunkedDataset(
             Dataset.from_dict(new_data),
             chunks_info=new_info,
             files=self.files,
@@ -635,7 +635,7 @@ class TypeInfDataset:
         )
 
     def __repr__(self):
-        return f"TypeInfDataset(num_chunks={len(self.chunks_info)}, num_srcs={len(self.files)})"
+        return f"ChunkedDataset(num_chunks={len(self.chunks_info)}, num_srcs={len(self.files)})"
 
 
 def repos_to_dataset(
@@ -644,7 +644,7 @@ def repos_to_dataset(
     ctx_args: CtxArgs,
     max_workers: int,
     tqdm_args: dict = {},
-) -> TypeInfDataset:
+) -> ChunkedDataset:
     tokenizer.deprecation_warnings[
         "sequence-length-is-longer-than-the-specified-maximum"
     ] = True
@@ -683,7 +683,7 @@ def repos_to_dataset(
     )
 
     raise NotImplementedError()
-    return TypeInfDataset(dataset, chunks_info, parsed_files, file_to_src)
+    return ChunkedDataset(dataset, chunks_info, parsed_files, file_to_src)
 
 
 def load_or_process_datasets(
@@ -721,7 +721,7 @@ def load_or_process_datasets(
 
 
 def save_datasets(
-    datasets: dict[str, TypeInfDataset],
+    datasets: dict[str, ChunkedDataset],
     repos_split: dict[str, list[GitRepo]],
     datasets_dir: Path,
 ):
@@ -747,12 +747,12 @@ def load_datasets(datasets_dir: Path):
     set_names = ["train", "valid", "test"]
     with open(datasets_dir / "repos_split.pkl", "rb") as f:
         repos_split: dict[str, list[GitRepo]] = pickle.load(f)
-    datasets = dict[str, TypeInfDataset]()
+    datasets = dict[str, ChunkedDataset]()
     for name in set_names:
         with open(datasets_dir / f"{name}-extra.pkl", "rb") as f:
             extra = pickle.load(f)
         dataset = Dataset.load_from_disk(str(datasets_dir / name))
-        datasets[name] = TypeInfDataset(dataset, *extra)
+        datasets[name] = ChunkedDataset(dataset, *extra)
 
     return datasets, repos_split
 
@@ -919,7 +919,7 @@ def pretty_print_accuracies(
             print(f"{k}: {v}")
 
 
-def preds_to_accuracies(preds: Sequence[Sequence[PythonType]], dataset: TypeInfDataset):
+def preds_to_accuracies(preds: Sequence[Sequence[PythonType]], dataset: ChunkedDataset):
     cats = [an.cat for info in dataset.chunks_info for an in info.annots_info]
     labels = [ty for info in dataset.chunks_info for ty in info.types]
     return type_accuracies(list(seq_flatten(preds)), labels, cats)

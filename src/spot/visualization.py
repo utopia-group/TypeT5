@@ -4,12 +4,12 @@ from typing import Sequence
 
 import ipywidgets as widgets
 
-from spot.data import CtxArgs, PythonType, TypeInfDataset
+from spot.data import ChunkedDataset, CtxArgs, PythonType
 from spot.utils import TokenizerSPOT
 
 
 def visualize_batch(
-    dataset: TypeInfDataset,
+    dataset: ChunkedDataset,
     i: int,
     preds: list[list[PythonType]],
     tokenizer: TokenizerSPOT,

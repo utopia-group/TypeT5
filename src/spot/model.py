@@ -17,10 +17,10 @@ from transformers import (
 from transformers.trainer import Trainer
 
 from spot.data import (
+    ChunkedDataset,
     CtxArgs,
     SrcDataset,
     TokenizedSrc,
-    TypeInfDataset,
     chunk_masked_code,
     output_ids_as_types,
     patch_code_with_extra,
@@ -66,7 +66,7 @@ class ModelWrapper:
     monitor: TaskMonitor
 
     def predict(
-        self, dataset: TypeInfDataset, tqdm_args: dict
+        self, dataset: ChunkedDataset, tqdm_args: dict
     ) -> list[list[PythonType]]:
         """Run the  model on the given dataset and return the predicted types for each row."""
         model = self.model
@@ -134,7 +134,7 @@ class ModelWrapper:
 
     def repos_to_dataset(
         self, repos: Sequence[Path], tqdm_args: dict
-    ) -> TypeInfDataset:
+    ) -> ChunkedDataset:
         """Convinient method to preprocess the repos according to the model's ctx_args."""
         return repos_to_dataset(
             repos,
@@ -154,11 +154,11 @@ class ModelWrapper:
     # TODO: deprecate
     def generate_r1_inputs(
         self,
-        r0_data: TypeInfDataset,
+        r0_data: ChunkedDataset,
         r0_preds: list[list[PythonType]],
         tqdm_args: dict,
         use_file_level_feedback: bool = True,
-    ) -> TypeInfDataset:
+    ) -> ChunkedDataset:
         """Generate two datasets from the given repos. One for training with supervised learning,
         the other for DAgger training, which combines feedback from the type checker."""
 
@@ -182,7 +182,7 @@ class ModelWrapper:
                 tqdm_args=tqdm_args,
             )
         # TODO: track new sources
-        r1_data = TypeInfDataset(r1_dataset, r1_meta, new_files, dict(), file2repo)
+        r1_data = ChunkedDataset(r1_dataset, r1_meta, new_files, dict(), file2repo)
         return r1_data
 
     def build_trainer(
@@ -245,7 +245,7 @@ class ModelWrapper:
 
     def type_check_preds_per_file(
         self,
-        dataset: TypeInfDataset,
+        dataset: ChunkedDataset,
         pred_types: Sequence[Sequence[PythonType]],
         tqdm_args: dict,
     ) -> dict[Path, dict]:
@@ -341,7 +341,7 @@ class ModelWrapper:
 
     def type_check_preds_per_repo(
         self,
-        dataset: TypeInfDataset,
+        dataset: ChunkedDataset,
         pred_types: Sequence[Sequence[PythonType]],
         tqdm_args: dict,
     ) -> dict[Path, dict]:
