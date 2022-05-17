@@ -208,6 +208,7 @@ class _TokenizedSrcHelper:
 
 
 def chunk_srcs(
+    repos_root: Path,
     srcs: Sequence[TokenizedSrc],
     tokenizer: TokenizerSPOT,
     ctx_args: "CtxArgs",
@@ -259,8 +260,9 @@ def chunk_srcs(
     return TypeInfDataset(
         data=Dataset.from_dict(chunks),
         chunks_info=chunks_info,
-        files=[s.file for s in srcs],
-        srcs={s.file: s.origin_code for s in srcs},
+        files=[repos_root / s.file for s in srcs],
+        file2src={(repos_root / s.file): s.origin_code for s in srcs},
+        file2repo={(repos_root / s.file): (repos_root / s.repo) for s in srcs},
     )
 
 
@@ -284,7 +286,12 @@ class SrcDataset:
     ) -> "TypeInfDataset":
         srcs = self.srcs_with_labels()
         return chunk_srcs(
-            srcs, tokenizer, ctx_args, max_workers=max_workers, tqdm_args=tqdm_args
+            self.repos_root,
+            srcs,
+            tokenizer,
+            ctx_args,
+            max_workers=max_workers,
+            tqdm_args=tqdm_args,
         )
 
     def __repr__(self):
@@ -433,13 +440,13 @@ def _tokenize_masked_code(
     for i in range(len(types_labels)):
         all_tks.extend(tokenizer.encode(segs[i], add_special_tokens=False))
         ty = types_labels[i]
-        all_tks.append((ty, types_info[i], src_id))
+        ty_tks = tokenizer.encode(str(ty), add_special_tokens=False)
+        all_tks.append((ty, types_info[i], ty_tks, src_id))
     all_tks.extend(tokenizer.encode(segs[-1], add_special_tokens=False))
     all_tks.append(eos_id)
     return all_tks
 
 
-# TODO: deprecate
 def _process_chunk(
     tks: list[int | tuple],
     tokenizer: TokenizerSPOT,
@@ -610,20 +617,21 @@ class TypeInfDataset:
     chunks_info: list[SrcChunkInfo]
     # The source files of this data set
     files: list[Path]
-    # The source contents seen by the parser. All code locations refer to
-    # locations in these contents, which can be different from the original source files.
-    srcs: dict[Path, str]
+    file2src: dict[Path, str]
+    file2repo: dict[Path, Path]
 
     def __getitem__(self, key: slice) -> "TypeInfDataset":
         assert isinstance(key, slice)
 
         new_data = {n: self.data[n][key] for n in self.data.column_names}
         new_info = self.chunks_info[key]
+
         return TypeInfDataset(
             Dataset.from_dict(new_data),
             chunks_info=new_info,
             files=self.files,
-            srcs=self.srcs,
+            file2src=self.file2src,
+            file2repo=self.file2repo,
         )
 
     def __repr__(self):
@@ -674,6 +682,7 @@ def repos_to_dataset(
         tqdm_args=tqdm_args,
     )
 
+    raise NotImplementedError()
     return TypeInfDataset(dataset, chunks_info, parsed_files, file_to_src)
 
 
@@ -726,7 +735,7 @@ def save_datasets(
 
     for name, dataset in datasets.items():
         dataset.data.save_to_disk(str(datasets_dir / name))
-        extra = dataset.chunks_info, dataset.files, dataset.srcs
+        extra = dataset.chunks_info, dataset.files, dataset.file2src, dataset.file2repo
         with open(datasets_dir / f"{name}-extra.pkl", "wb") as f:
             pickle.dump(extra, f)
     import subprocess

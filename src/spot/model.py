@@ -1,3 +1,4 @@
+import enum
 import logging
 from collections import Counter
 from copy import deepcopy
@@ -18,6 +19,7 @@ from transformers.trainer import Trainer
 from spot.data import (
     CtxArgs,
     SrcDataset,
+    TokenizedSrc,
     TypeInfDataset,
     chunk_masked_code,
     output_ids_as_types,
@@ -152,7 +154,6 @@ class ModelWrapper:
     # TODO: deprecate
     def generate_r1_inputs(
         self,
-        repos: Sequence[Path],
         r0_data: TypeInfDataset,
         r0_preds: list[list[PythonType]],
         tqdm_args: dict,
@@ -160,16 +161,18 @@ class ModelWrapper:
     ) -> TypeInfDataset:
         """Generate two datasets from the given repos. One for training with supervised learning,
         the other for DAgger training, which combines feedback from the type checker."""
+
         with self.monitor.log_task("get_type_checked_inputs"):
             if use_file_level_feedback:
                 new_inputs = self.type_check_preds_per_file(
-                    r0_data, r0_preds, repos, tqdm_args=tqdm_args
+                    r0_data, r0_preds, tqdm_args=tqdm_args
                 )
             else:
                 new_inputs = self.type_check_preds_per_repo(
-                    r0_data, r0_preds, repos, tqdm_args=tqdm_args
+                    r0_data, r0_preds, tqdm_args=tqdm_args
                 )
             new_files = list(new_inputs.keys())
+        file2repo = {f: r0_data.file2repo[f] for f in new_files}
         with self.monitor.log_task("chunk_masked_code"):
             r1_dataset, r1_meta = chunk_masked_code(
                 list(new_inputs.values()),
@@ -178,7 +181,8 @@ class ModelWrapper:
                 max_workers=self.args.max_workers,
                 tqdm_args=tqdm_args,
             )
-        r1_data = TypeInfDataset(r1_dataset, r1_meta, new_files, dict())
+        # TODO: track new sources
+        r1_data = TypeInfDataset(r1_dataset, r1_meta, new_files, dict(), file2repo)
         return r1_data
 
     def build_trainer(
@@ -243,7 +247,6 @@ class ModelWrapper:
         self,
         dataset: TypeInfDataset,
         pred_types: Sequence[Sequence[PythonType]],
-        repo_paths: Sequence[Path],
         tqdm_args: dict,
     ) -> dict[Path, dict]:
         """Apply the predicted types to each file, collect the corresponding type checker
@@ -252,33 +255,30 @@ class ModelWrapper:
 
         max_workers = self.args.max_workers
 
-        assert len(repo_paths) == len(
-            set(p.resolve() for p in repo_paths)
-        ), "Repo paths must be unique"
-
+        file2labels = dict[Path, dict[AnnotPath, PythonType]]()
         file2changes = dict[Path, list[tuple[CodeRange, str]]]()
-        fiel2origin_code = dict[Path, str]()
+        repo_paths = set[Path]()
+
+        file2origin_code = dict[Path, str]()
         label_info = dataset.chunks_info
         for chunk_preds, chunk_info in zip(pred_types, label_info):
             for ty, info, sid in zip(
                 chunk_preds, chunk_info.annots_info, chunk_info.src_ids
             ):
                 file = dataset.files[sid]
-                code = dataset.srcs[file]
+                code = dataset.file2src[file]
                 file = file.resolve()
                 if file not in file2changes:
                     file2changes[file] = []
-                assert info.annot_range is not None
-                file2changes[file].append((info.annot_range, str(ty)))
-                fiel2origin_code[file] = code
+                if file not in file2labels:
+                    file2labels[file] = {}
+                file2labels[file][info.path] = ty
+                file2changes[file].append((not_none(info.annot_range), str(ty)))
+                file2origin_code[file] = code
+                repo_paths.add(dataset.file2repo[file])
 
         repo2files = dict[Path, list[Path]]()
-        repos_to_check = list[Path]()
-        for repo in repo_paths:
-            files = [f.resolve() for f in repo.glob("**/*.py") if f in file2changes]
-            if bool(files):
-                repo2files[repo] = files
-                repos_to_check.append(repo)
+        repos_to_check = list(repo_paths)
         repos_to_check.sort(key=lambda p: len(repo2files[p]), reverse=True)
 
         helper = _TypeCheckingHelper(use_daemon=False)
@@ -287,7 +287,7 @@ class ModelWrapper:
             {f: file2changes[f] for f in repo2files[r]} for r in repos_to_check
         ]
         src_maps = [
-            {f: fiel2origin_code[f] for f in repo2files[r]} for r in repos_to_check
+            {f: file2origin_code[f] for f in repo2files[r]} for r in repos_to_check
         ]
 
         with self.monitor.log_task(f"Running {command_name}"):
@@ -322,14 +322,15 @@ class ModelWrapper:
         # generate feedback-augmented inputs
         with self.monitor.log_task("Augment inputs"):
             changed_files = list(file2changes.keys())
+
+            labels_list = [file2labels[f] for f in changed_files]
             file_errors = [file2errors.get(f, {}) for f in changed_files]
             new_contents = [file2contents[f] for f in changed_files]
-            origin_contents = [f.read_text() for f in changed_files]
             new_inputs = process_map(
                 _generate_augmented_inputs,
                 changed_files,
                 file_errors,
-                origin_contents,
+                labels_list,
                 new_contents,
                 chunksize=max(len(file2changes) // (8 * max_workers), 1),
                 max_workers=max_workers,
@@ -342,7 +343,6 @@ class ModelWrapper:
         self,
         dataset: TypeInfDataset,
         pred_types: Sequence[Sequence[PythonType]],
-        repo_paths: Sequence[Path],
         tqdm_args: dict,
     ) -> dict[Path, dict]:
         """Apply the predicted types to the given files in each project first and then
@@ -351,10 +351,8 @@ class ModelWrapper:
 
         max_workers = self.args.max_workers
         file2changes = dict[Path, list[tuple[CodeRange, str]]]()
-
-        assert len(repo_paths) == len(
-            set(p.resolve() for p in repo_paths)
-        ), "Repo paths must be unique"
+        file2labels = dict[Path, dict[AnnotPath, PythonType]]()
+        repo_paths = set[Path]()
 
         label_info = dataset.chunks_info
         for chunk_preds, chunk_info in zip(pred_types, label_info):
@@ -364,8 +362,12 @@ class ModelWrapper:
                 file = dataset.files[sid]
                 if file not in file2changes:
                     file2changes[file] = []
-                assert info.annot_range is not None
-                file2changes[file].append((info.annot_range, str(ty)))
+                file2changes[file].append((not_none(info.annot_range), str(ty)))
+                if file not in file2labels:
+                    file2labels[file] = {}
+                file2labels[file][info.path] = ty
+                repo_paths.add(dataset.file2repo[file])
+        repos_to_check = list(repo_paths)
 
         changed_files = list(file2changes.keys())
         origin_contents = thread_map(
@@ -387,7 +389,7 @@ class ModelWrapper:
             for file, changes in file2changes.items():
                 start = CodeRange(CodePosition(1, 1), CodePosition(1, 1))
                 # need this in case libcst does not preserve the original file content
-                code_seen = dataset.srcs[file]
+                code_seen = dataset.file2src[file]
                 changes.insert(0, (start, MypyChecker.Preamble))
                 new_text = replace_strs_by_pos(
                     code_seen, [(r, 1, v) for r, v in changes]
@@ -395,34 +397,30 @@ class ModelWrapper:
                 current_contents.append(new_text)
                 file.write_text(new_text)
             file2errors = dict[Path, dict[CodePosition, str]]()
-            file_to_repo = dict[Path, Path]()
 
             with self.monitor.log_task("Call mypy"):
                 check_results: list[MypyResult | str] = thread_map(
                     MypyChecker.check_project,
-                    repo_paths,
+                    repos_to_check,
                     max_workers=max_workers,
                     desc="calling mypy",
                     **tqdm_args,
                 )
-            for dir, check_r in zip(repo_paths, check_results):
+            for dir, check_r in zip(repos_to_check, check_results):
                 if isinstance(check_r, str):
                     logging.warning(f"Mypy errored when checking '{dir}'.")
                     continue
                 for file, errors in check_r.error_dict.items():
-                    assert (
-                        file not in file_to_repo
-                    ), f"{file} appears in multiple repos? repo1: {file_to_repo[file]}, repo2: {dir}"
                     file2errors[file] = dict(errors)
-                    file_to_repo[file] = dir
 
             # generate feedback-augmented inputs
             file_errors = [file2errors.get(f.resolve(), {}) for f in changed_files]
+            labels_list = [file2labels[f] for f in changed_files]
             new_inputs = process_map(
                 _generate_augmented_inputs,
                 changed_files,
                 file_errors,
-                origin_contents,
+                labels_list,
                 current_contents,
                 chunksize=max(len(file2changes) // (8 * max_workers), 1),
                 max_workers=max_workers,
@@ -439,15 +437,9 @@ class ModelWrapper:
 def _generate_augmented_inputs(
     file: Path,
     file_errors: dict[CodePosition, str],
-    original_code: str,
+    path2types: dict[AnnotPath, PythonType],
     current_code: str,
 ) -> dict:
-    origin_mod = cst.parse_module(original_code)
-    origin_infos, label_types = collect_user_annotations(origin_mod)
-    path2types = dict[AnnotPath, PythonType]()
-    for info, ty in zip(origin_infos, label_types):
-        path2types[info.path] = ty
-
     try:
         m = cst.parse_module(current_code)
     except Exception as e:
@@ -480,10 +472,39 @@ def _generate_augmented_inputs(
     }
 
 
+@dataclass
+class PredictionSrcMap:
+    src: TokenizedSrc
+    predictions: dict[int, PythonType]
+
+
+@enum.unique
+class CheckerFeedbackKind(enum.Enum):
+    per_repo = enum.auto()
+    per_file = enum.auto()
+    per_iso_file = enum.auto()
+    per_group = enum.auto()
+
+
 class _TypeCheckingHelper:
     def __init__(self, use_daemon=True):
         self.bad_repos: set = set()
         self.use_daemon: bool = use_daemon
+
+    def feedback_for_src(
+        self,
+        repos_root: Path,
+        pred_map: PredictionSrcMap,
+        repo_checker: Path | MypyChecker,
+    ) -> tuple[dict[CodePosition, str], str]:
+        src = pred_map.src
+        file = repos_root / src.file
+        changes = list[tuple[CodeRange, str]]()
+        for i, t in pred_map.predictions.items():
+            r = not_none(src.types_info[i].annot_range)
+            changes.append((r, str(t)))
+        cst_code = src.origin_code
+        return self.feedback_for_file(file, cst_code, changes, repo_checker)
 
     def feedback_for_file(
         self,

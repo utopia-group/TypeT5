@@ -102,15 +102,18 @@ def display_code_sequence(texts: Sequence[str], titles=None):
 def colorize_code_html(code: str) -> str:
     "Highligh the special comments in the type checker-augmented python code."
     output = list[str]()
+    in_comment = False
     for i in range(len(code)):
         c = code[i]
         prev = code[i - 1] if i > 0 else None
         next = code[i + 1] if i < len(code) - 1 else None
-        if c == "/" and next == "*":
+        if not in_comment and c == "/" and next == "*":
             output.append("<span style='color: rgb(106, 153, 85)'>")
+            in_comment = True
         output.append(c)
-        if prev == "*" and c == "/":
+        if in_comment and prev == "*" and c == "/":
             output.append("</span>")
+            in_comment = False
     new_code = "".join(output)
 
     def replace(m: re.Match[str]):
