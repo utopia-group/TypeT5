@@ -22,12 +22,9 @@ from spot.data import (
     SrcChunkInfo,
     SrcDataset,
     TokenizedSrc,
-    chunk_masked_code,
     output_ids_as_types,
     patch_code_with_extra,
     preds_to_accuracies,
-    repos_to_dataset,
-    type_accuracies,
 )
 from spot.type_env import (
     AnnotInfo,
@@ -136,18 +133,6 @@ class ModelWrapper:
         accs = preds_to_accuracies(preds, data)
         return (accs, data, preds)
 
-    def repos_to_dataset(
-        self, repos: Sequence[Path], tqdm_args: dict
-    ) -> ChunkedDataset:
-        """Convinient method to preprocess the repos according to the model's ctx_args."""
-        return repos_to_dataset(
-            repos,
-            self.tokenizer,
-            self.args.ctx_args,
-            max_workers=self.args.max_workers,
-            tqdm_args=tqdm_args,
-        )
-
     def generate_r1_srcs(
         self,
         r0_src: SrcDataset,
@@ -184,47 +169,6 @@ class ModelWrapper:
             max_workers=self.args.max_workers,
             tqdm_args=tqdm_args,
         )
-
-    # TODO: deprecate
-    def eval_on_repos(self, repos: Sequence[Path], tqdm_args={}) -> dict[str, Any]:
-        """Convinient method to preprocess the repos according to the model's ctx_args and evaluate the (R0) accuracy."""
-        dataset = self.repos_to_dataset(repos, tqdm_args=tqdm_args)
-        preds = self.predict(dataset, tqdm_args=tqdm_args)
-        return preds_to_accuracies(preds, dataset)
-
-    # TODO: deprecate
-    def generate_r1_inputs(
-        self,
-        r0_data: ChunkedDataset,
-        r0_preds: list[list[PythonType]],
-        tqdm_args: dict,
-        use_file_level_feedback: bool = True,
-    ) -> ChunkedDataset:
-        """Generate two datasets from the given repos. One for training with supervised learning,
-        the other for DAgger training, which combines feedback from the type checker."""
-
-        with self.monitor.log_task("get_type_checked_inputs"):
-            if use_file_level_feedback:
-                new_inputs = self.type_check_preds_per_file(
-                    r0_data, r0_preds, tqdm_args=tqdm_args
-                )
-            else:
-                new_inputs = self.type_check_preds_per_repo(
-                    r0_data, r0_preds, tqdm_args=tqdm_args
-                )
-            new_files = list(new_inputs.keys())
-        file2repo = {f: r0_data.file2repo[f] for f in new_files}
-        with self.monitor.log_task("chunk_masked_code"):
-            r1_dataset, r1_meta = chunk_masked_code(
-                list(new_inputs.values()),
-                self.tokenizer,
-                self.args.ctx_args,
-                max_workers=self.args.max_workers,
-                tqdm_args=tqdm_args,
-            )
-        # TODO: track new sources
-        r1_data = ChunkedDataset(r1_dataset, r1_meta, new_files, dict(), file2repo)
-        return r1_data
 
     def build_trainer(
         self,

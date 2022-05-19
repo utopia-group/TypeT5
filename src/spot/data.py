@@ -1,5 +1,4 @@
 import logging
-import multiprocessing
 import pickle
 import random
 import shutil
@@ -12,7 +11,6 @@ from typing import *
 
 import dateparser
 from datasets import Dataset
-from sklearn.utils import check_array
 
 from spot.type_env import (
     AnnotCat,
@@ -158,9 +156,12 @@ class TokenizedSrc:
     tokenized_code: list[int]  # with certain types masked out
 
 
-@dataclass
 class _TokenizedSrcHelper:
     tokenizer: TokenizerSPOT
+
+    def __init__(self, tokenizer: TokenizerSPOT):
+        _turn_off_tokenizer_warning(tokenizer)
+        self.tokenizer = tokenizer
 
     def dict_to_tokenized_src(self, d: dict) -> TokenizedSrc:
         r = TokenizedSrc(
@@ -358,7 +359,7 @@ class SrcDataset:
     def file2src(self):
         return {(self.repos_root / s.file).resolve(): s for s in self.all_srcs}
 
-    def stats(self) -> dict[str, int]:
+    def stats(self) -> dict[str, Any]:
         num_repos = len(set(s.repo for s in self.all_srcs))
         useful_srcs = self.srcs_with_labels()
         num_files = len(useful_srcs)
@@ -417,7 +418,6 @@ class SrcDataset:
         )
 
         # then, patch the srcs with the feedbacks and predictions to from new srcs
-        _turn_off_tokenizer_warning(tokenizer)
         helper = _TokenizedSrcHelper(tokenizer)
         new_srcs = process_map(
             helper.feedbacks_to_tokenized_src,
@@ -446,7 +446,6 @@ class SrcDataset:
         seed: int = 42,
     ) -> "SrcDataset":
         "Generate the dataset by randomly mask out a fraction of the type annotations as labels."
-        _turn_off_tokenizer_warning(tokenizer)
 
         # file_path, code, repo_path
         srcs: dict[Path, tuple[str, Path]] = {
@@ -717,74 +716,6 @@ class SrcChunkInfo:
         return f"SrcChunkInfo(num_types={len(self.types)}, unique_src_ids={set(self.src_ids)})"
 
 
-# TODO: deprecate
-def chunk_masked_code(
-    srcs: Sequence[dict],
-    tokenizer: TokenizerSPOT,
-    ctx_args: CtxArgs,
-    max_workers: int,
-    *,
-    tqdm_args: dict = {},
-) -> tuple[Dataset, list[SrcChunkInfo]]:
-    """
-    Concatenate all the code segments into a single long sequence, then break it down
-    into even-sized chunks. Each source code is assumed to have already been processed by
-    `mask_type_annots`.
-
-    Args:
-        ctx_margin: the number of tokens on each end of the chunk that are not masked. Only
-        the `chunk_size - 2 * ctx_margin` middle tokens in the chunk are masked.
-    """
-
-    def pmap(f, xs: Sequence, desc: str):
-        chunksize = max(len(xs) // (8 * max_workers), 1)
-        return process_map(
-            f,
-            xs,
-            max_workers=max_workers,
-            chunksize=chunksize,
-            desc=desc,
-            **tqdm_args,
-        )
-
-    chunk_size, ctx_margin = ctx_args.ctx_size, ctx_args.ctx_margin
-
-    _turn_off_tokenizer_warning(tokenizer)
-    helper = _ChunkingHelper(tokenizer, ctx_args)
-
-    # first, tokenize and concat all files into a single long sequence
-    file_tks: list[list[int | tuple]] = pmap(
-        helper.tokenize,
-        list(enumerate(srcs)),
-        desc="tokenizing sources",
-    )
-    all_tks: list[int | tuple] = list(seq_flatten(file_tks))
-
-    # then, use a sliding window over `all_tks` with step size `stride` to turn them into masked chunks
-    stride = chunk_size - 2 * ctx_margin
-    chunk_outputs = pmap(
-        helper.process_chunk,
-        [all_tks[i : i + chunk_size] for i in range(0, len(all_tks), stride)],
-        desc="processing chunks",
-    )
-
-    chunks: dict[str, list] = {
-        "input_ids": [],
-        "labels": [],
-    }
-    chunks_info: list[SrcChunkInfo] = []
-
-    for chunk in chunk_outputs:
-        if chunk is None:
-            continue
-        chunks["input_ids"].append(chunk["input_ids"])
-        chunks["labels"].append(chunk["labels"])
-        meta = chunk["meta"]
-        chunks_info.append(meta)
-
-    return Dataset.from_dict(chunks), chunks_info
-
-
 @dataclass
 class ChunkedDataset:
     data: Dataset
@@ -830,85 +761,6 @@ class ChunkedDataset:
                     info.path in src_path_map[file]
                 ), f"{info.path} should not be a label in {file}. Chunk code:\n{tokenizer.decode(input)}"
                 assert_eq(src_path_map[file][info.path], ty)
-
-
-def repos_to_dataset(
-    repos_paths: Iterable[Path],
-    tokenizer: TokenizerSPOT,
-    ctx_args: CtxArgs,
-    max_workers: int,
-    tqdm_args: dict = {},
-) -> ChunkedDataset:
-    srcs: list[tuple[Path, str]] = [
-        (f, f.read_text()) for p in repos_paths for f in sorted(p.glob("**/*.py"))
-    ]
-    if max_workers <= 1:
-        map_r = map(mask_type_annots, srcs)
-    else:
-        chunksize = max(1, len(srcs) // (10 * max_workers))
-        map_r = process_map(
-            mask_type_annots,
-            srcs,
-            max_workers=max_workers,
-            desc="parsing and masking sources",
-            chunksize=chunksize,
-            **tqdm_args,
-        )
-    # filter out srcs that failed to parse
-    parsed_files = list[Path]()
-    file_to_src = dict[Path, str]()
-    masked_srcs = list[dict]()
-    for f, src in zip(srcs, map_r):
-        if src is not None:
-            parsed_files.append(f[0])
-            file_to_src[f[0]] = src.pop("original_code")
-            masked_srcs.append(src)
-    if not tqdm_args.get("disable", False):
-        logging.info(f"{len(masked_srcs)} / {len(srcs)} srcs succesfully parsed.")
-    dataset, chunks_info = chunk_masked_code(
-        masked_srcs,
-        tokenizer,
-        ctx_args,
-        max_workers=max_workers,
-        tqdm_args=tqdm_args,
-    )
-
-    raise NotImplementedError()
-    return ChunkedDataset(dataset, chunks_info, parsed_files, file_to_src)
-
-
-def load_or_process_datasets(
-    datasets_dir: Path,
-    tokenizer: TokenizerSPOT,
-    ctx_args: CtxArgs,
-    repos_dir,
-    repos_train: list[GitRepo],
-    repos_valid: list[GitRepo],
-    repos_test: list[GitRepo],
-    max_workers: int = 12,
-    regenerate: bool = False,
-):
-    if datasets_dir.exists() and not regenerate:
-        print("Loading datasets from:", datasets_dir)
-        return load_datasets(datasets_dir)
-
-    repos_split = {"train": repos_train, "valid": repos_valid, "test": repos_test}
-
-    datasets = dict()
-    for name, repos in repos_split.items():
-        print(f"Processing dataset: {name}")
-        repo_paths = [repo.repo_dir(repos_dir) for repo in repos]
-        tdata = repos_to_dataset(
-            repo_paths,
-            tokenizer,
-            ctx_args,
-            max_workers=max_workers,
-        )
-        datasets[name] = tdata
-
-    save_datasets(datasets, repos_split, datasets_dir)
-
-    return datasets, repos_split
 
 
 def save_datasets(
