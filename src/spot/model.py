@@ -138,7 +138,7 @@ class ModelWrapper:
         r0_src: SrcDataset,
         r0_data: ChunkedDataset,
         r0_preds: list[list[PythonType]],
-        tqdm_args: dict,
+        tqdm_args: dict = {},
     ) -> SrcDataset:
         file2preds = dict[Path, dict[AnnotPath, str]]()
         assert_eq(len(r0_preds), len(r0_data.chunks_info))

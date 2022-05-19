@@ -358,3 +358,24 @@ class PickleCache(Generic[T1]):
 def assert_eq(left: T1, right: T1) -> None:
     if left != right:
         raise AssertionError(f"{left} != {right}")
+
+
+def scalar_stats(xs) -> dict[str, float]:
+    x = np.array(xs)
+    return {
+        "mean": x.mean(),
+        "median": np.median(x),
+        "min": x.min(),
+        "max": x.max(),
+    }
+
+
+def cumulative_counts(elems: Sequence[int]) -> tuple[list[int], list[int]]:
+    counts = Counter(elems)
+    keys = sorted(counts.keys())
+    n = 0
+    ys = []
+    for k in keys:
+        n += counts[k]
+        ys.append(n)
+    return keys, ys

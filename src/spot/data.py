@@ -167,7 +167,7 @@ class _TokenizedSrcHelper:
         r = TokenizedSrc(
             file=d["file"],
             repo=d["repo"],
-            origin_code=d["original_code"],
+            origin_code=d["cst_code"],
             tokenized_code=list[int](),
             types=list[PythonType](),
             types_pos=list[int](),
@@ -249,7 +249,7 @@ class _TokenizedSrcHelper:
         d = {
             "file": src.file,
             "repo": src.repo,
-            "original_code": new_code,
+            "cst_code": new_code,
             "code_segs": code_segs,
             "types": types,
             "types_str": types_str,
@@ -324,8 +324,9 @@ def chunk_srcs(
 
 @dataclass
 class SrcDataset:
-    all_srcs: list[TokenizedSrc]
     repos_root: Path
+    all_srcs: list[TokenizedSrc] = field(default_factory=list)
+    extra_stats: dict = field(default_factory=dict)
 
     def repos2srcs(self):
         r = groupby(self.all_srcs, lambda s: s.repo)
@@ -336,6 +337,11 @@ class SrcDataset:
     def srcs_with_labels(self):
         "Returns all srcs with at least one label type in it."
         return [s for s in self.all_srcs if len(s.types) > 0]
+
+    def add_stats(self, stats: dict, should_print=True):
+        if should_print:
+            pretty_print_dict(stats)
+        self.extra_stats.update(stats)
 
     def to_chunks(
         self,
@@ -364,17 +370,22 @@ class SrcDataset:
         useful_srcs = self.srcs_with_labels()
         num_files = len(useful_srcs)
         num_lines = sum(len(s.origin_code.split("\n")) for s in useful_srcs)
-        num_tokens = sum(len(s.tokenized_code) for s in useful_srcs)
-        avg_tokens_per_file = num_tokens / num_files
-        median_tokens_per_file = np.median([len(s.tokenized_code) for s in useful_srcs])
-        return {
+        tokens_per_file = [len(s.tokenized_code) for s in useful_srcs]
+        target_tks_per_file = [
+            sum(len(tks) + 1 for tks in s.types_tks) for s in useful_srcs
+        ]
+        basic_stats = {
             "num_repos": num_repos,
             "num_files": num_files,
             "num_lines": num_lines,
-            "num_tokens": num_tokens,
-            "tokens_per_file_avg": avg_tokens_per_file,
-            "tokens_per_file_median": median_tokens_per_file,
+            "tokens_per_file": scalar_stats(tokens_per_file),
+            "target_tks_per_file": scalar_stats(target_tks_per_file),
         }
+        basic_stats.update(self.extra_stats)
+        return basic_stats
+
+    def print_stats(self):
+        pretty_print_dict(self.stats())
 
     def add_type_checker_feedback(
         self,
@@ -408,13 +419,26 @@ class SrcDataset:
         finally:
             MypyChecker.clear_temp_cache()
         n_checked = 0
+        code_list = list[str]()
+        feedback_list = list[dict]()
+        n_error_list = list[int]()
         for i in range(len(src_list)):
-            if isinstance(check_rs[i], str):
-                check_rs[i] = dict()
+            errors, new_code = check_rs[i]
+            if isinstance(errors, str):
+                errors = dict()
             else:
                 n_checked += 1
-        logging.info(
-            f"{len(check_rs)} /{len(src_list)} files succesfully checked by mypy."
+            code_list.append(new_code)
+            feedback_list.append(errors)
+            n_error_list.append(len(errors))
+        result = SrcDataset(self.repos_root)
+        silent = tqdm_args.get("disable", False)
+        result.add_stats(
+            {
+                "num_type_checked": n_checked,
+                "errors_per_file": scalar_stats(n_error_list),
+            },
+            not silent,
         )
 
         # then, patch the srcs with the feedbacks and predictions to from new srcs
@@ -422,14 +446,15 @@ class SrcDataset:
         new_srcs = process_map(
             helper.feedbacks_to_tokenized_src,
             src_list,
-            [code for _, code in check_rs],
-            [feedback for feedback, _ in check_rs],
+            code_list,
+            feedback_list,
             max_workers=max_workers,
             desc="feedbacks_to_tokenized_src",
             chunksize=chunksize,
             **tqdm_args,
         )
-        return SrcDataset(new_srcs, self.repos_root)
+        result.all_srcs = new_srcs
+        return result
 
     def __repr__(self):
         return f"SrcDataset(root='{self.repos_root}', n_repos={len(self.repos2srcs())}, n_labeled_files={len(self.srcs_with_labels())})"
@@ -439,13 +464,16 @@ class SrcDataset:
         repos_root: Path,
         repos_paths: Iterable[Path],
         tokenizer: TokenizerSPOT,
+        drop_comments: bool,
         max_workers: int,
         label_ratio: float = 0.5,
         tqdm_args: dict = {},
         max_line_width: int = 200,
         seed: int = 42,
     ) -> "SrcDataset":
-        "Generate the dataset by randomly mask out a fraction of the type annotations as labels."
+        """Generate the dataset by randomly mask out a fraction of the type annotations as labels.
+        If keep_comments if False, will also remove all comments and docstrings.
+        """
 
         # file_path, code, repo_path
         srcs: dict[Path, tuple[str, Path]] = {
@@ -464,13 +492,18 @@ class SrcDataset:
             for f, (code, r) in srcs.items()
             if file_width(code) <= max_line_width
         }
-        print(
-            f"{len(srcs)} / {num_all_srcs} files are within the {max_line_width} characters width limit."
+        result = SrcDataset(repos_root)
+        result.add_stats(
+            {
+                "n_files_too_wide": num_all_srcs - len(srcs),
+                "too_wide_ratio": (1 - len(srcs) / num_all_srcs),
+                "drop_comments": drop_comments,
+            }
         )
-
         masked_srcs: list[dict] = process_map(
             mask_type_annots,
             [(f, code[0]) for f, code in srcs.items()],
+            [drop_comments] * len(srcs),
             max_workers=max_workers,
             desc="mask_type_annots",
             chunksize=max(1, len(srcs) // (8 * max_workers)),
@@ -505,10 +538,8 @@ class SrcDataset:
         for f, g in groupby(tk_srcs, lambda s: s.file).items():
             assert len(g) == 1, f"{f} appears {len(g)} times."
 
-        return SrcDataset(
-            tk_srcs,
-            repos_root,
-        )
+        result.all_srcs = tk_srcs
+        return result
 
 
 def type_check_src(
@@ -536,8 +567,48 @@ def type_check_src(
     return feedback, new_code
 
 
+class CommentRemover(cst.CSTTransformer):
+    """Removes comments and docstrings."""
+
+    def leave_IndentedBlock(
+        self, node: cst.IndentedBlock, updated: cst.IndentedBlock
+    ) -> cst.IndentedBlock:
+        new_body = type(updated.body)(  # type: ignore
+            filter(lambda n: not CommentRemover.is_doc_string(n), updated.body)
+        )
+        if len(new_body) != len(updated.body):
+            return updated.with_changes(body=new_body)
+        else:
+            return updated
+
+    def leave_EmptyLine(self, node: cst.EmptyLine, updated: cst.EmptyLine):
+        if updated.comment is not None:
+            return cst.RemoveFromParent()
+        else:
+            return updated
+
+    def leave_TrailingWhitespace(self, node, updated: cst.TrailingWhitespace):
+        if updated.comment is not None:
+            return updated.with_changes(comment=None)
+        else:
+            return updated
+
+    @staticmethod
+    def is_doc_string(node: cst.BaseStatement) -> bool:
+        match node:
+            case cst.SimpleStatementLine(body=[cst.Expr(value=cst.SimpleString())]):
+                return True
+            case _:
+                return False
+
+
+def remove_comments(m: cst.Module) -> cst.Module:
+    """Removes all comments and docstrings."""
+    return m.visit(CommentRemover())
+
+
 def mask_type_annots(
-    file_code: Union[str, tuple[Path, str]], silent: bool = True
+    file_code: Union[str, tuple[Path, str]], drop_comments: bool, silent: bool = True
 ) -> Optional[dict]:
     """Preprocess the Python code to carve out all the type annotations. The original
     code is split into sequences at the type annotations."""
@@ -550,13 +621,15 @@ def mask_type_annots(
         code = file_code
     try:
         m = cst.parse_module(code)
+        if drop_comments:
+            m = remove_comments(m)
     except cst.ParserSyntaxError as e:
         if not silent:
             logging.warning(f"Failed to parse src file: `{src_path}`")
         return None
 
     annots_info, types = collect_user_annotations(m)
-    origin_code = m.code
+    cst_code = m.code
     types_str = [
         m.code_for_node(not_none(info.annot).annotation) for info in annots_info
     ]
@@ -575,7 +648,7 @@ def mask_type_annots(
         "types": types,
         "types_str": types_str,
         "annots_info": annots_info,
-        "original_code": origin_code,
+        "cst_code": cst_code,
     }
 
 
@@ -941,25 +1014,38 @@ def type_accuracies(
     }
 
 
-def pretty_print_accuracies(
-    accs: dict[str, Any],
+def pretty_print_dict(
+    d: dict,
     level: int = 0,
     max_show_level: int = 1000,
+    float_precision: int = 5,
 ):
-    for k, v in accs.items():
+    for k, v in d.items():
         print("   " * level, end="")
         if isinstance(v, float):
-            print(f"{k}: {v:.2%}")
-        elif isinstance(v, dict):
+            print(f"{k}: %.{float_precision}g" % v)
+        elif isinstance(v, dict) or isinstance(v, list):
             if level >= max_show_level:
                 print(f"{k}: ...")
             else:
                 print(f"{k}:")
+                if isinstance(v, list):
+                    v = {f"[{i}]": e for i, e in enumerate(v)}
                 pretty_print_accuracies(
                     v, level=level + 1, max_show_level=max_show_level
                 )
         else:
             print(f"{k}: {v}")
+
+
+def pretty_print_accuracies(
+    accs: dict[str, Any],
+    level: int = 0,
+    max_show_level: int = 1000,
+):
+    pretty_print_dict(
+        accs, level=level, max_show_level=max_show_level, float_precision=4
+    )
 
 
 def preds_to_accuracies(preds: Sequence[Sequence[PythonType]], dataset: ChunkedDataset):
@@ -972,3 +1058,10 @@ def _turn_off_tokenizer_warning(tokenizer: TokenizerSPOT):
     tokenizer.deprecation_warnings[
         "sequence-length-is-longer-than-the-specified-maximum"
     ] = True
+
+
+def dataset_name(drop_comments: bool, round: int = 0, quicktest: bool = False):
+    test_tag = "quicktest/" if quicktest else ""
+    drop_tag = "-drop_comments" if drop_comments else ""
+    round_tag = f"-R{round}" if round > 0 else ""
+    return f"{test_tag}src_datasets{round_tag}{drop_tag}"
