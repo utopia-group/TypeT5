@@ -18,6 +18,7 @@ mypyc/doc/_build
 /out/
 .venv
 venv/
+mypy_temp
 .mypy_cache/
 .incremental_checker_cache.json
 .cache

@@ -19,6 +19,7 @@ from transformers.trainer import Trainer
 from spot.data import (
     ChunkedDataset,
     CtxArgs,
+    SrcChunkInfo,
     SrcDataset,
     TokenizedSrc,
     chunk_masked_code,
@@ -108,7 +109,7 @@ class ModelWrapper:
             pickle.dump(self.args, f)
 
     @staticmethod
-    def load_pretrained(path: Path) -> "ModelWrapper":
+    def from_pretrained(path: Path) -> "ModelWrapper":
         """Load a pretrained model from the given path."""
         model = ModelSPOT.from_pretrained(str(path))
         tokenizer = TokenizerSPOT.from_pretrained(str(path))
@@ -121,7 +122,9 @@ class ModelWrapper:
             monitor=TaskLoggingMonitor(path.name),
         )
 
-    def eval_on_dataset(self, src_data: SrcDataset, tqdm_args={}) -> dict[str, Any]:
+    def eval_on_dataset(
+        self, src_data: SrcDataset, tqdm_args={}
+    ) -> tuple[dict, ChunkedDataset, list[list[PythonType]]]:
         """Convinient method to preprocess the src according to the model's ctx_args and evaluate the (R0) accuracy."""
         data = src_data.to_chunks(
             self.tokenizer,
@@ -130,7 +133,8 @@ class ModelWrapper:
             tqdm_args=tqdm_args,
         )
         preds = self.predict(data, tqdm_args=tqdm_args)
-        return preds_to_accuracies(preds, data)
+        accs = preds_to_accuracies(preds, data)
+        return (accs, data, preds)
 
     def repos_to_dataset(
         self, repos: Sequence[Path], tqdm_args: dict
@@ -140,6 +144,43 @@ class ModelWrapper:
             repos,
             self.tokenizer,
             self.args.ctx_args,
+            max_workers=self.args.max_workers,
+            tqdm_args=tqdm_args,
+        )
+
+    def generate_r1_srcs(
+        self,
+        r0_src: SrcDataset,
+        r0_data: ChunkedDataset,
+        r0_preds: list[list[PythonType]],
+        tqdm_args: dict,
+    ) -> SrcDataset:
+        file2preds = dict[Path, dict[AnnotPath, str]]()
+        assert_eq(len(r0_preds), len(r0_data.chunks_info))
+        for preds, chunk_info in zip(r0_preds, r0_data.chunks_info):
+            assert_eq(len(preds), len(chunk_info.types))
+            for i, pred in enumerate(preds):
+                sid = chunk_info.src_ids[i]
+                file = r0_data.files[sid]
+                if file not in file2preds:
+                    file2preds[file] = dict()
+                label_path = chunk_info.annots_info[i].path
+                file2preds[file][label_path] = str(pred)
+
+        file2src = r0_src.file2src()
+        file2preds1 = dict[Path, dict[int, str]]()
+
+        for f, ls in file2preds.items():
+            src = file2src[f]
+            path2id = {info.path: i for i, info in enumerate(src.types_info)}
+            try:
+                file2preds1[f] = {path2id[path]: label for path, label in ls.items()}
+            except Exception as e:
+                raise RuntimeError(f"In file {f}. path2id={path2id}") from e
+
+        return r0_src.add_type_checker_feedback(
+            self.tokenizer,
+            file2preds1,
             max_workers=self.args.max_workers,
             tqdm_args=tqdm_args,
         )
@@ -228,13 +269,14 @@ class ModelWrapper:
         return trainer
 
     def scale_ctx_size(self, factor: float) -> "ModelWrapper":
-        """Scale the context size and margin of the model by the given factor, scale down the
-        sampling batch size accordingly."""
+        """Scale the context size of the model by the given factor, while keeping the window size the same.
+        Also scale down the sampling batch size accordingly."""
         args = deepcopy(self.args)
-        args.ctx_args.ctx_size = round(args.ctx_args.ctx_size * factor)
-        args.ctx_args.ctx_margin = round(args.ctx_args.ctx_margin * factor)
-        # the cost increases O(N^3) since we have O(N^2) cost in self-attention and O(N) more labels per batch
-        args.sampling_batch_size = round(args.sampling_batch_size / factor**3)
+        ctx_size = round(args.ctx_args.ctx_size * factor)
+        ctx_margin = round((ctx_size - args.ctx_args.window_size) / 2)
+        args.ctx_args.ctx_size = ctx_size
+        args.ctx_args.ctx_margin = ctx_margin
+        args.sampling_batch_size = round(args.sampling_batch_size / factor**2)
 
         return ModelWrapper(
             model=self.model,
@@ -262,8 +304,11 @@ class ModelWrapper:
         file2origin_code = dict[Path, str]()
         label_info = dataset.chunks_info
         for chunk_preds, chunk_info in zip(pred_types, label_info):
-            for ty, info, sid in zip(
-                chunk_preds, chunk_info.annots_info, chunk_info.src_ids
+            for ty, label, info, sid in zip(
+                chunk_preds,
+                chunk_info.types,
+                chunk_info.annots_info,
+                chunk_info.src_ids,
             ):
                 file = dataset.files[sid]
                 code = dataset.file2src[file]
@@ -272,7 +317,7 @@ class ModelWrapper:
                     file2changes[file] = []
                 if file not in file2labels:
                     file2labels[file] = {}
-                file2labels[file][info.path] = ty
+                file2labels[file][info.path] = label
                 file2changes[file].append((not_none(info.annot_range), str(ty)))
                 file2origin_code[file] = code
                 repo_paths.add(dataset.file2repo[file])
@@ -356,8 +401,11 @@ class ModelWrapper:
 
         label_info = dataset.chunks_info
         for chunk_preds, chunk_info in zip(pred_types, label_info):
-            for ty, info, sid in zip(
-                chunk_preds, chunk_info.annots_info, chunk_info.src_ids
+            for ty, label, info, sid in zip(
+                chunk_preds,
+                chunk_info.types,
+                chunk_info.annots_info,
+                chunk_info.src_ids,
             ):
                 file = dataset.files[sid]
                 if file not in file2changes:
@@ -365,7 +413,7 @@ class ModelWrapper:
                 file2changes[file].append((not_none(info.annot_range), str(ty)))
                 if file not in file2labels:
                     file2labels[file] = {}
-                file2labels[file][info.path] = ty
+                file2labels[file][info.path] = label
                 repo_paths.add(dataset.file2repo[file])
         repos_to_check = list(repo_paths)
 
@@ -434,6 +482,7 @@ class ModelWrapper:
                 file.write_text(content)
 
 
+# TODO: deprecate
 def _generate_augmented_inputs(
     file: Path,
     file_errors: dict[CodePosition, str],
@@ -472,12 +521,6 @@ def _generate_augmented_inputs(
     }
 
 
-@dataclass
-class PredictionSrcMap:
-    src: TokenizedSrc
-    predictions: dict[int, PythonType]
-
-
 @enum.unique
 class CheckerFeedbackKind(enum.Enum):
     per_repo = enum.auto()
@@ -487,24 +530,10 @@ class CheckerFeedbackKind(enum.Enum):
 
 
 class _TypeCheckingHelper:
-    def __init__(self, use_daemon=True):
+    def __init__(self, use_daemon=True, mypy_path: Optional[Path] = None):
         self.bad_repos: set = set()
         self.use_daemon: bool = use_daemon
-
-    def feedback_for_src(
-        self,
-        repos_root: Path,
-        pred_map: PredictionSrcMap,
-        repo_checker: Path | MypyChecker,
-    ) -> tuple[dict[CodePosition, str], str]:
-        src = pred_map.src
-        file = repos_root / src.file
-        changes = list[tuple[CodeRange, str]]()
-        for i, t in pred_map.predictions.items():
-            r = not_none(src.types_info[i].annot_range)
-            changes.append((r, str(t)))
-        cst_code = src.origin_code
-        return self.feedback_for_file(file, cst_code, changes, repo_checker)
+        self.mypy_path: Optional[Path] = mypy_path
 
     def feedback_for_file(
         self,

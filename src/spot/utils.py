@@ -2,6 +2,7 @@ import ast
 import logging
 import os
 import pickle
+import shutil
 import time
 from abc import ABC, abstractmethod
 from asyncio import current_task
@@ -14,6 +15,7 @@ from typing import (
     Any,
     Callable,
     Generator,
+    Generic,
     Iterable,
     Optional,
     Sequence,
@@ -315,3 +317,44 @@ def run_long_task(name: str, notify: bool = True):
         f"Time taken: {time_taken:.1f}s",
         notify=notify,
     )
+
+
+class PickleCache(Generic[T1]):
+    def __init__(self, cache_dir: Path):
+        self.cache_dir = cache_dir
+
+    def cached(self, rel_path: Path | str, func: Callable[[], T1]) -> T1:
+        path = self.cache_dir / rel_path
+        if not path.exists():
+            value = func()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            logging.info("Saving to cache: %s", path)
+            with path.open("wb") as f:
+                pickle.dump(value, f)
+            return value
+        else:
+            logging.info("Loading from cache: %s", path)
+            with path.open("rb") as f:
+                return pickle.load(f)
+
+    def set(self, rel_path: Path | str, value: T1):
+        path = self.cache_dir / rel_path
+        with path.open("wb") as f:
+            pickle.dump(value, f)
+
+    def remove(self, rel_path: Path | str):
+        path = self.cache_dir / rel_path
+        if path.exists():
+            path.unlink()
+
+    def clear(self):
+        if self.cache_dir.exists():
+            logging.info(f"Clearing cache: at: {self.cache_dir}")
+            shutil.rmtree(self.cache_dir)
+        else:
+            logging.warning(f"No cache found at: {self.cache_dir}")
+
+
+def assert_eq(left: T1, right: T1) -> None:
+    if left != right:
+        raise AssertionError(f"{left} != {right}")

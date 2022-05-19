@@ -1,6 +1,8 @@
 import ast
 import enum
+import multiprocessing
 import re
+import shutil
 import subprocess
 import time
 from argparse import ArgumentError
@@ -389,6 +391,42 @@ class MypyChecker:
         return MypyChecker.parse_mypy_output(out, cmd, cwd=proj)
 
     @staticmethod
+    def check_code(
+        code: str, cwd: Optional[Path] = None, mypy_path: Path = None
+    ) -> MypyResult | str:
+        if mypy_path is None:
+            mypy_path = proj_root() / ".venv/bin/mypy"
+        if cwd is None:
+            proc = multiprocessing.current_process()
+            cwd = proj_root() / "mypy_temp" / proc.name
+        cwd.mkdir(parents=True, exist_ok=True)
+
+        (cwd / "code.py").write_text(code)
+        try:
+            cmd = [
+                "python",
+                str(mypy_path),
+                "code.py",
+                *MypyChecker.TypeCheckFlags,
+            ]
+            out = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+            )
+        finally:
+            os.remove(cwd / "code.py")
+        return MypyChecker.parse_mypy_output(out, cmd, cwd)
+
+    @staticmethod
+    def clear_temp_cache():
+        cwd = proj_root() / "mypy_temp"
+        if cwd.exists():
+            shutil.rmtree(cwd)
+
+
+    @staticmethod
     def parse_mypy_output(
         output: subprocess.CompletedProcess[str],
         cmd: list[str],
@@ -399,7 +437,7 @@ class MypyChecker:
             return f"mypy failed. Command: `{' '.join(cmd)}` in cwd='{cwd}'\nError: {output.stderr}"
         error_dict: dict[Path, list[tuple[CodePosition, str]]] = {}
         for l in lines:
-            m = re.match(r"(.*\.py):(\d+:\d+): error: (.+) \[[a-z\-]+\]", l)
+            m = re.match(r"(.*\.py|<string>):(\d+:\d+): error: (.+) \[[a-z\-]+\]", l)
             if m is not None:
                 file = Path(cwd / m.group(1)).resolve()
                 line, col = map(int, m.group(2).split(":"))

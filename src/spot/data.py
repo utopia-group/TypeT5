@@ -1,4 +1,5 @@
 import logging
+import multiprocessing
 import pickle
 import random
 import shutil
@@ -11,11 +12,13 @@ from typing import *
 
 import dateparser
 from datasets import Dataset
+from sklearn.utils import check_array
 
 from spot.type_env import (
     AnnotCat,
     AnnotInfo,
     AnnotPath,
+    MypyChecker,
     PythonType,
     apply_annotations,
     collect_annots_info,
@@ -192,7 +195,7 @@ class _TokenizedSrcHelper:
         all_tks.append(bos_id)
         for i in range(len(types)):
             all_tks.extend(tkn.encode(segs[i], add_special_tokens=False))
-            if is_label[i]:
+            if is_label is None or is_label[i]:
                 r.types_pos.append(len(all_tks))
                 r.types.append(types[i])
                 r.types_tks.append(tkn.encode(str(types[i]), add_special_tokens=False))
@@ -205,6 +208,54 @@ class _TokenizedSrcHelper:
         all_tks.append(eos_id)
 
         return r
+
+    def feedbacks_to_tokenized_src(
+        self,
+        src: TokenizedSrc,
+        current_code: str,
+        feedbacks: dict[CodePosition, str],
+    ) -> TokenizedSrc:
+        try:
+            m = cst.parse_module(current_code)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to parse file: '{src.file}' with content:\n{current_code}"
+            ) from e
+        m_code = m.code
+        assert m_code == current_code, "Code 1:\n<<{}>>\nCode 2:\n<<{}>>".format(
+            current_code, m_code
+        )
+        current_annots, _ = collect_user_annotations(m)
+        preds_map = dict[CodeRange, str]()
+        types = list[PythonType]()
+        types_str = list[str]()
+        annots_info = list[AnnotInfo]()
+        path2label_id = {info.path: i for i, info in enumerate(src.types_info)}
+
+        for a in current_annots:
+            if a.path in path2label_id:
+                assert (range := a.annot_range) is not None
+                assert (annot := a.annot) is not None
+                preds_map[range] = m.code_for_node(annot.annotation)
+                li = path2label_id[a.path]
+                types.append(src.types[li])
+                types_str.append(src.types_str[li])
+                annots_info.append(a)
+        new_code = patch_code_with_extra(current_code, preds_map, feedbacks)
+        code_segs = new_code.split(SpecialNames.TypeMask)
+        assert len(code_segs) == len(types) + 1, f"{len(code_segs)} != {len(types)} + 1"
+
+        d = {
+            "file": src.file,
+            "repo": src.repo,
+            "original_code": new_code,
+            "code_segs": code_segs,
+            "types": types,
+            "types_str": types_str,
+            "annots_info": annots_info,
+            "is_label": None,
+        }
+        return self.dict_to_tokenized_src(d)
 
 
 def chunk_srcs(
@@ -219,6 +270,7 @@ def chunk_srcs(
     the middle parts of the batch are treated as predition labels."""
 
     all_tks = list[int | tuple]()
+    # mask_id = not_none(tokenizer.mask_token_id)
 
     # first, concat all src tokens, replace masked tokens with tuples.
     for src_id, src in enumerate(srcs):
@@ -226,7 +278,9 @@ def chunk_srcs(
         all_tks.extend(src.tokenized_code)
         for i in range(len(src.types)):
             type_tuple = (src.types[i], src.types_info[i], src.types_tks[i], src_id)
-            all_tks[offset + src.types_pos[i]] = type_tuple
+            label_pos = offset + src.types_pos[i]
+            # assert_eq(all_tks[label_pos], mask_id)
+            all_tks[label_pos] = type_tuple
 
     # then, use a sliding window over `all_tks` with step size `stride` to turn them into masked chunks
     helper = _ChunkingHelper(tokenizer, ctx_args)
@@ -257,25 +311,30 @@ def chunk_srcs(
         meta = chunk["meta"]
         chunks_info.append(meta)
 
+    files = [(repos_root / s.file).resolve() for s in srcs]
     return ChunkedDataset(
         data=Dataset.from_dict(chunks),
         chunks_info=chunks_info,
-        files=[repos_root / s.file for s in srcs],
-        file2src={(repos_root / s.file): s.origin_code for s in srcs},
-        file2repo={(repos_root / s.file): (repos_root / s.repo) for s in srcs},
+        files=files,
+        file2src={f: s.origin_code for f, s in zip(files, srcs)},
+        file2repo={f: (repos_root / s.repo).resolve() for f, s in zip(files, srcs)},
     )
 
 
 @dataclass
 class SrcDataset:
-    repos2srcs: dict[Path, list[TokenizedSrc]]
+    all_srcs: list[TokenizedSrc]
     repos_root: Path
+
+    def repos2srcs(self):
+        r = groupby(self.all_srcs, lambda s: s.repo)
+        for srcs in r.values():
+            srcs.sort(key=lambda s: s.file)
+        return r
 
     def srcs_with_labels(self):
         "Returns all srcs with at least one label type in it."
-        return [
-            s for srcs in self.repos2srcs.values() for s in srcs if len(s.types) > 0
-        ]
+        return [s for s in self.all_srcs if len(s.types) > 0]
 
     def to_chunks(
         self,
@@ -285,7 +344,7 @@ class SrcDataset:
         tqdm_args: dict = {},
     ) -> "ChunkedDataset":
         srcs = self.srcs_with_labels()
-        return chunk_srcs(
+        chunks = chunk_srcs(
             self.repos_root,
             srcs,
             tokenizer,
@@ -293,9 +352,87 @@ class SrcDataset:
             max_workers=max_workers,
             tqdm_args=tqdm_args,
         )
+        chunks.verify_labels(self, tokenizer)
+        return chunks
+
+    def file2src(self):
+        return {(self.repos_root / s.file).resolve(): s for s in self.all_srcs}
+
+    def stats(self) -> dict[str, int]:
+        num_repos = len(set(s.repo for s in self.all_srcs))
+        useful_srcs = self.srcs_with_labels()
+        num_files = len(useful_srcs)
+        num_lines = sum(len(s.origin_code.split("\n")) for s in useful_srcs)
+        num_tokens = sum(len(s.tokenized_code) for s in useful_srcs)
+        avg_tokens_per_file = num_tokens / num_files
+        median_tokens_per_file = np.median([len(s.tokenized_code) for s in useful_srcs])
+        return {
+            "num_repos": num_repos,
+            "num_files": num_files,
+            "num_lines": num_lines,
+            "num_tokens": num_tokens,
+            "tokens_per_file_avg": avg_tokens_per_file,
+            "tokens_per_file_median": median_tokens_per_file,
+        }
+
+    def add_type_checker_feedback(
+        self,
+        tokenizer: TokenizerSPOT,
+        file2preds: dict[Path, dict[int, str]],
+        max_workers: int,
+        tqdm_args: dict,
+        mypy_path: Optional[Path] = None,
+    ) -> "SrcDataset":
+        """Add the predictions to the corresponding files, call the type checker to
+        collect the feedbacks (in isolation), and then patch the feedbacks as well as the original
+        predictions to form the new inputs."""
+
+        file2src = self.file2src()
+
+        src_list = [file2src[f.resolve()] for f in file2preds]
+        chunksize = max(1, len(src_list) // (8 * max_workers))
+
+        # first, collec type checker feedbacks
+        try:
+            check_rs = process_map(
+                type_check_src,
+                src_list,
+                list(file2preds.values()),
+                [mypy_path for _ in src_list],
+                max_workers=max_workers,
+                desc="type_check_src",
+                chunksize=chunksize,
+                **tqdm_args,
+            )
+        finally:
+            MypyChecker.clear_temp_cache()
+        n_checked = 0
+        for i in range(len(src_list)):
+            if isinstance(check_rs[i], str):
+                check_rs[i] = dict()
+            else:
+                n_checked += 1
+        logging.info(
+            f"{len(check_rs)} /{len(src_list)} files succesfully checked by mypy."
+        )
+
+        # then, patch the srcs with the feedbacks and predictions to from new srcs
+        _turn_off_tokenizer_warning(tokenizer)
+        helper = _TokenizedSrcHelper(tokenizer)
+        new_srcs = process_map(
+            helper.feedbacks_to_tokenized_src,
+            src_list,
+            [code for _, code in check_rs],
+            [feedback for feedback, _ in check_rs],
+            max_workers=max_workers,
+            desc="feedbacks_to_tokenized_src",
+            chunksize=chunksize,
+            **tqdm_args,
+        )
+        return SrcDataset(new_srcs, self.repos_root)
 
     def __repr__(self):
-        return f"SrcDataset(root='{self.repos_root}', n_repos={len(self.repos2srcs)}, n_labeled_files={len(self.srcs_with_labels())})"
+        return f"SrcDataset(root='{self.repos_root}', n_repos={len(self.repos2srcs())}, n_labeled_files={len(self.srcs_with_labels())})"
 
     @staticmethod
     def from_repos(
@@ -305,29 +442,44 @@ class SrcDataset:
         max_workers: int,
         label_ratio: float = 0.5,
         tqdm_args: dict = {},
+        max_line_width: int = 200,
         seed: int = 42,
     ) -> "SrcDataset":
         "Generate the dataset by randomly mask out a fraction of the type annotations as labels."
-        tokenizer.deprecation_warnings[
-            "sequence-length-is-longer-than-the-specified-maximum"
-        ] = True
+        _turn_off_tokenizer_warning(tokenizer)
 
         # file_path, code, repo_path
-        srcs: list[tuple[Path, str, Path]] = [
-            (f, f.read_text(), r)
+        srcs: dict[Path, tuple[str, Path]] = {
+            f: (f.read_text(), r)
             for r in repos_paths
             for f in sorted(r.glob("**/*.py"))
-        ]
+            if not f.is_symlink()
+        }
+        num_all_srcs = len(srcs)
+
+        def file_width(text):
+            return max(len(l) for l in text.split("\n"))
+
+        srcs = {
+            f: (code, r)
+            for f, (code, r) in srcs.items()
+            if file_width(code) <= max_line_width
+        }
+        print(
+            f"{len(srcs)} / {num_all_srcs} files are within the {max_line_width} characters width limit."
+        )
 
         masked_srcs: list[dict] = process_map(
             mask_type_annots,
-            [x[:2] for x in srcs],
+            [(f, code[0]) for f, code in srcs.items()],
             max_workers=max_workers,
             desc="mask_type_annots",
             chunksize=max(1, len(srcs) // (8 * max_workers)),
             **tqdm_args,
         )
         filtered_srcs = []
+
+        srcs_list = list(srcs.items())
 
         rands = random.getstate()
         random.seed(seed)
@@ -336,8 +488,8 @@ class SrcDataset:
                 continue
             n = len(x["types"])
             x["is_label"] = [random.random() < label_ratio for _ in range(n)]
-            x["file"] = srcs[i][0].relative_to(repos_root)
-            x["repo"] = srcs[i][2].relative_to(repos_root)
+            x["file"] = srcs_list[i][0].relative_to(repos_root)
+            x["repo"] = srcs_list[i][1][1].relative_to(repos_root)
             filtered_srcs.append(x)
         random.setstate(rands)
 
@@ -351,11 +503,38 @@ class SrcDataset:
             **tqdm_args,
         )
 
-        repos2srcs = groupby(tk_srcs, lambda x: x.repo)
+        for f, g in groupby(tk_srcs, lambda s: s.file).items():
+            assert len(g) == 1, f"{f} appears {len(g)} times."
+
         return SrcDataset(
-            repos2srcs,
+            tk_srcs,
             repos_root,
         )
+
+
+def type_check_src(
+    src: TokenizedSrc,
+    preds: dict[int, str],
+    mypy_path: Optional[Path] = None,
+    cwd: Optional[Path] = None,
+) -> tuple[dict[CodePosition, str] | str, str]:
+
+    code = src.origin_code
+    changes = list[tuple[CodeRange, int, str]]()
+    for i, pred in preds.items():
+        range = not_none(src.types_info[i].annot_range)
+        changes.append((range, 1, pred))
+    new_code = replace_strs_by_pos(code, changes)
+    check_r = MypyChecker.check_code(new_code, cwd=cwd, mypy_path=mypy_path)
+    feedback: dict[CodePosition, str] | str
+    if isinstance(check_r, str):
+        feedback = check_r
+    elif len(check_r.error_dict) == 0:
+        feedback = dict()
+    else:
+        assert len(check_r.error_dict) == 1
+        feedback = dict(list(check_r.error_dict.values())[0])
+    return feedback, new_code
 
 
 def mask_type_annots(
@@ -407,8 +586,11 @@ class CtxArgs:
     ctx_margin: int
     types_in_ctx: bool = False  # whether to expand the label types in the context. If not, will replace them with <mask>.
 
+    @property
+    def window_size(self) -> int:
+        return self.ctx_size - self.ctx_margin * 2
 
-# TODO: deprecate
+
 def _tokenize_masked_code(
     src: dict, src_id: int, tokenizer: TokenizerSPOT
 ) -> list[int | tuple]:
@@ -447,72 +629,6 @@ def _tokenize_masked_code(
     return all_tks
 
 
-def _process_chunk(
-    tks: list[int | tuple],
-    tokenizer: TokenizerSPOT,
-    args: CtxArgs,
-) -> Optional[dict]:
-    def expand_types_as_tks(mixed_tks: list):
-        result = list[int]()
-        mask_id = not_none(tokenizer.mask_token_id)
-        for e in mixed_tks:
-            if isinstance(e, int):
-                result.append(e)
-            else:
-                if args.types_in_ctx:
-                    assert isinstance(e[2], list)
-                    result.extend(e[2])
-                else:
-                    result.append(mask_id)
-        return result
-
-    chunk_size, ctx_margin = args.ctx_size, args.ctx_margin
-    stride = chunk_size - 2 * ctx_margin
-    if len(tks) != chunk_size:
-        # add padding
-        tks.extend([not_none(tokenizer.pad_token_id)] * (chunk_size - len(tks)))
-    extra_id = 0
-    middle = []
-    types = list[PythonType]()
-    types_tks = list[list[int]]()
-    annots_info = list[AnnotInfo]()
-    src_ids = list[int]()
-
-    for tk in tks[ctx_margin : ctx_margin + stride]:
-        if isinstance(tk, int):
-            middle.append(tk)
-        else:
-            ty, info, type_tks, src_id = tk
-            assert extra_id <= 99, "> 99 annotations in a single sequence"
-            middle.append(tokenizer.additional_special_tokens_ids[99 - extra_id])
-            types.append(ty)
-            types_tks.append(type_tks)
-            annots_info.append(info)
-            src_ids.append(src_id)
-            extra_id += 1
-    if extra_id == 0:
-        return None  # no types to predict in this chunk, discard
-    left_ctx = expand_types_as_tks(tks[:ctx_margin])[-ctx_margin:]
-    assert len(left_ctx) == ctx_margin, f"{len(left_ctx)} != {ctx_margin}"
-    right_ctx = expand_types_as_tks(tks[-ctx_margin:])[:ctx_margin]
-    assert len(right_ctx) == ctx_margin, f"{len(right_ctx)} != {ctx_margin}"
-    input_ids = left_ctx + middle + right_ctx
-    assert len(input_ids) == chunk_size
-
-    label_ids = [tokenizer.bos_token_id]
-    for i, type_tks in enumerate(types_tks):
-        label_ids.append(tokenizer.additional_special_tokens_ids[99 - i])
-        label_ids.extend(type_tks)
-    label_ids.append(tokenizer.eos_token_id)
-    meta = SrcChunkInfo(types, annots_info, src_ids)
-
-    return {
-        "input_ids": input_ids,
-        "labels": label_ids,
-        "meta": meta,
-    }
-
-
 @dataclass
 class _ChunkingHelper:
     """Multi-process helper for `chunk_masked_code`."""
@@ -524,7 +640,68 @@ class _ChunkingHelper:
         return _tokenize_masked_code(src[1], src[0], self.tokenizer)
 
     def process_chunk(self, tks: list[int | tuple]):
-        return _process_chunk(tks, self.tokenizer, self.ctx_args)
+        args = self.ctx_args
+        tokenizer = self.tokenizer
+
+        def expand_types_as_tks(mixed_tks: list):
+            result = list[int]()
+            mask_id = not_none(tokenizer.mask_token_id)
+            for e in mixed_tks:
+                if isinstance(e, int):
+                    result.append(e)
+                else:
+                    if args.types_in_ctx:
+                        assert isinstance(e[2], list)
+                        result.extend(e[2])
+                    else:
+                        result.append(mask_id)
+            return result
+
+        chunk_size, ctx_margin = args.ctx_size, args.ctx_margin
+        stride = chunk_size - 2 * ctx_margin
+        if len(tks) != chunk_size:
+            # add padding
+            tks.extend([not_none(tokenizer.pad_token_id)] * (chunk_size - len(tks)))
+        extra_id = 0
+        middle = []
+        types = list[PythonType]()
+        types_tks = list[list[int]]()
+        annots_info = list[AnnotInfo]()
+        src_ids = list[int]()
+
+        for tk in tks[ctx_margin : ctx_margin + stride]:
+            if isinstance(tk, int):
+                middle.append(tk)
+            else:
+                ty, info, type_tks, src_id = tk
+                assert extra_id <= 99, "> 99 annotations in a single sequence"
+                middle.append(tokenizer.additional_special_tokens_ids[99 - extra_id])
+                types.append(ty)
+                types_tks.append(type_tks)
+                annots_info.append(info)
+                src_ids.append(src_id)
+                extra_id += 1
+        if extra_id == 0:
+            return None  # no types to predict in this chunk, discard
+        left_ctx = expand_types_as_tks(tks[:ctx_margin])[-ctx_margin:]
+        assert len(left_ctx) == ctx_margin, f"{len(left_ctx)} != {ctx_margin}"
+        right_ctx = expand_types_as_tks(tks[-ctx_margin:])[:ctx_margin]
+        assert len(right_ctx) == ctx_margin, f"{len(right_ctx)} != {ctx_margin}"
+        input_ids = left_ctx + middle + right_ctx
+        assert len(input_ids) == chunk_size
+
+        label_ids = [tokenizer.bos_token_id]
+        for i, type_tks in enumerate(types_tks):
+            label_ids.append(tokenizer.additional_special_tokens_ids[99 - i])
+            label_ids.extend(type_tks)
+        label_ids.append(tokenizer.eos_token_id)
+        meta = SrcChunkInfo(types, annots_info, src_ids)
+
+        return {
+            "input_ids": input_ids,
+            "labels": label_ids,
+            "meta": meta,
+        }
 
 
 @dataclass
@@ -559,10 +736,6 @@ def chunk_masked_code(
         the `chunk_size - 2 * ctx_margin` middle tokens in the chunk are masked.
     """
 
-    tokenizer.deprecation_warnings[
-        "sequence-length-is-longer-than-the-specified-maximum"
-    ] = True
-
     def pmap(f, xs: Sequence, desc: str):
         chunksize = max(len(xs) // (8 * max_workers), 1)
         return process_map(
@@ -576,6 +749,7 @@ def chunk_masked_code(
 
     chunk_size, ctx_margin = ctx_args.ctx_size, ctx_args.ctx_margin
 
+    _turn_off_tokenizer_warning(tokenizer)
     helper = _ChunkingHelper(tokenizer, ctx_args)
 
     # first, tokenize and concat all files into a single long sequence
@@ -637,6 +811,26 @@ class ChunkedDataset:
     def __repr__(self):
         return f"ChunkedDataset(num_chunks={len(self.chunks_info)}, num_srcs={len(self.files)})"
 
+    def verify_labels(self, srcs: SrcDataset, tokenizer: TokenizerSPOT):
+        """
+        Verify that the labels in the dataset match the source code.
+        """
+
+        src_path_map = dict[Path, dict[AnnotPath, PythonType]]()
+        for f, src in srcs.file2src().items():
+            src_path_map[f] = {
+                info.path: ty for ty, info in zip(src.types, src.types_info)
+            }
+            assert_eq(len(src_path_map[f]), len(src.types))
+        for input, chunk in zip(self.data["input_ids"], self.chunks_info):
+            for info, ty, sid in zip(chunk.annots_info, chunk.types, chunk.src_ids):
+                file = self.files[sid]
+                assert file in src_path_map, f"{file} not in file2src."
+                assert (
+                    info.path in src_path_map[file]
+                ), f"{info.path} should not be a label in {file}. Chunk code:\n{tokenizer.decode(input)}"
+                assert_eq(src_path_map[file][info.path], ty)
+
 
 def repos_to_dataset(
     repos_paths: Iterable[Path],
@@ -645,9 +839,6 @@ def repos_to_dataset(
     max_workers: int,
     tqdm_args: dict = {},
 ) -> ChunkedDataset:
-    tokenizer.deprecation_warnings[
-        "sequence-length-is-longer-than-the-specified-maximum"
-    ] = True
     srcs: list[tuple[Path, str]] = [
         (f, f.read_text()) for p in repos_paths for f in sorted(p.glob("**/*.py"))
     ]
@@ -923,3 +1114,9 @@ def preds_to_accuracies(preds: Sequence[Sequence[PythonType]], dataset: ChunkedD
     cats = [an.cat for info in dataset.chunks_info for an in info.annots_info]
     labels = [ty for info in dataset.chunks_info for ty in info.types]
     return type_accuracies(list(seq_flatten(preds)), labels, cats)
+
+
+def _turn_off_tokenizer_warning(tokenizer: TokenizerSPOT):
+    tokenizer.deprecation_warnings[
+        "sequence-length-is-longer-than-the-specified-maximum"
+    ] = True
