@@ -28,13 +28,13 @@ def visualize_batch(
     sep_2 = tokenizer.encode(
         "\n---------⬇context⬇---------\n", add_special_tokens=False
     )
-    ctx_margin = ctx_args.ctx_margin
+    margin_left, _, margin_right = ctx_args.as_tuple()
     code_tks = (
-        code_tks[:ctx_margin]
+        code_tks[:margin_left]
         + sep_1
-        + code_tks[ctx_margin:-ctx_margin]
+        + code_tks[margin_left:-margin_right]
         + sep_2
-        + code_tks[-ctx_margin:]
+        + code_tks[-margin_right:]
     )
     code_dec = tokenizer.decode(code_tks, skip_special_tokens=False)
     code_dec = code_inline_extra_ids(code_dec, label_types)

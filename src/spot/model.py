@@ -46,6 +46,7 @@ class DecodingArgs:
     sampling_batch_size: int
     max_workers: int
     generation_max_length: int = 128
+    do_sample: bool = False
     top_p: float = 0.9
 
 
@@ -82,7 +83,7 @@ class ModelWrapper:
         for batch in loader:
             output_ids = model.generate(
                 inputs=batch["input_ids"].to(device),
-                do_sample=True,
+                do_sample=self.args.do_sample,
                 top_p=self.args.top_p,
                 max_length=self.args.generation_max_length,
             ).cpu()  # type: ignore
@@ -217,9 +218,11 @@ class ModelWrapper:
         Also scale down the sampling batch size accordingly."""
         args = deepcopy(self.args)
         ctx_size = round(args.ctx_args.ctx_size * factor)
-        ctx_margin = round((ctx_size - args.ctx_args.window_size) / 2)
+        right_margin = round(args.ctx_args.right_margin * factor)
+        left_margin = ctx_size - right_margin - args.ctx_args.window_size
         args.ctx_args.ctx_size = ctx_size
-        args.ctx_args.ctx_margin = ctx_margin
+        args.ctx_args.left_margin = left_margin
+        args.ctx_args.right_margin = right_margin
         args.sampling_batch_size = round(args.sampling_batch_size / factor**2)
 
         return ModelWrapper(

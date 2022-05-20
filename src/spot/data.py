@@ -285,8 +285,8 @@ def chunk_srcs(
 
     # then, use a sliding window over `all_tks` with step size `stride` to turn them into masked chunks
     helper = _ChunkingHelper(tokenizer, ctx_args)
-    ctx_size, ctx_margin = ctx_args.ctx_size, ctx_args.ctx_margin
-    stride = ctx_size - 2 * ctx_margin
+    ctx_size = ctx_args.ctx_size
+    stride = ctx_args.window_size
 
     chunk_tks = [all_tks[i : i + ctx_size] for i in range(0, len(all_tks), stride)]
     chunk_outputs = process_map(
@@ -342,6 +342,9 @@ class SrcDataset:
         if should_print:
             pretty_print_dict(stats)
         self.extra_stats.update(stats)
+
+    def __getitem__(self, ids: slice):
+        return SrcDataset(self.repos_root, self.all_srcs[ids], {"subset_ids": ids})
 
     def to_chunks(
         self,
@@ -655,12 +658,20 @@ def mask_type_annots(
 @dataclass
 class CtxArgs:
     ctx_size: int
-    ctx_margin: int
+    left_margin: int
+    right_margin: int
     types_in_ctx: bool = False  # whether to expand the label types in the context. If not, will replace them with <mask>.
 
     @property
     def window_size(self) -> int:
-        return self.ctx_size - self.ctx_margin * 2
+        return self.ctx_size - self.left_margin - self.right_margin
+
+    def as_tuple(self):
+        "Returns (left_margin, window_size, right_margin)."
+        return self.left_margin, self.window_size, self.right_margin
+
+    def __repr__(self):
+        return f"CtxArgs(left={self.left_margin}, window={self.window_size}, right={self.right_margin})"
 
 
 def _tokenize_masked_code(
@@ -729,8 +740,9 @@ class _ChunkingHelper:
                         result.append(mask_id)
             return result
 
-        chunk_size, ctx_margin = args.ctx_size, args.ctx_margin
-        stride = chunk_size - 2 * ctx_margin
+        left_margin, window_size, right_margin = args.as_tuple()
+        chunk_size = args.ctx_size
+
         if len(tks) != chunk_size:
             # add padding
             tks.extend([not_none(tokenizer.pad_token_id)] * (chunk_size - len(tks)))
@@ -741,7 +753,7 @@ class _ChunkingHelper:
         annots_info = list[AnnotInfo]()
         src_ids = list[int]()
 
-        for tk in tks[ctx_margin : ctx_margin + stride]:
+        for tk in tks[left_margin : left_margin + window_size]:
             if isinstance(tk, int):
                 middle.append(tk)
             else:
@@ -755,12 +767,12 @@ class _ChunkingHelper:
                 extra_id += 1
         if extra_id == 0:
             return None  # no types to predict in this chunk, discard
-        left_ctx = expand_types_as_tks(tks[:ctx_margin])[-ctx_margin:]
-        assert len(left_ctx) == ctx_margin, f"{len(left_ctx)} != {ctx_margin}"
-        right_ctx = expand_types_as_tks(tks[-ctx_margin:])[:ctx_margin]
-        assert len(right_ctx) == ctx_margin, f"{len(right_ctx)} != {ctx_margin}"
+        left_ctx = expand_types_as_tks(tks[:left_margin])[-left_margin:]
+        assert_eq(len(left_ctx), left_margin)
+        right_ctx = expand_types_as_tks(tks[-right_margin:])[:right_margin]
+        assert_eq(len(right_ctx), right_margin)
         input_ids = left_ctx + middle + right_ctx
-        assert len(input_ids) == chunk_size
+        assert_eq(len(input_ids), chunk_size)
 
         label_ids = [tokenizer.bos_token_id]
         for i, type_tks in enumerate(types_tks):
@@ -1060,8 +1072,23 @@ def _turn_off_tokenizer_warning(tokenizer: TokenizerSPOT):
     ] = True
 
 
-def dataset_name(drop_comments: bool, round: int = 0, quicktest: bool = False):
+def get_dataset_name(drop_comments: bool, round: int = 0, quicktest: bool = False):
     test_tag = "quicktest/" if quicktest else ""
     drop_tag = "-drop_comments" if drop_comments else ""
     round_tag = f"-R{round}" if round > 0 else ""
     return f"{test_tag}src_datasets{round_tag}{drop_tag}"
+
+
+def get_model_name(
+    drop_comments: bool,
+    ctx_args: CtxArgs,
+    data_reduction: int = 1,
+    round: int = 0,
+    quicktest: bool = False,
+):
+    ctx_sizes = ctx_args.as_tuple()
+    test_tag = "quicktest/" if quicktest else ""
+    drop_tag = "-drop_comments" if drop_comments else ""
+    data_tag = "" if data_reduction == 1 else f"-data_reduction_{data_reduction}"
+    round_tag = f"-R{round}"
+    return f"{test_tag}SPOT-model{round_tag}-{ctx_sizes}{drop_tag}{data_tag}"
