@@ -236,6 +236,11 @@ class TaskMonitor(ABC):
         pass
 
 
+class EmptyLoggingMonitor(TaskMonitor):
+    def log_task(self, name: str):
+        pass
+
+
 @dataclass
 class TaskLoggingMonitor(TaskMonitor):
     monitor_name: str
@@ -379,3 +384,14 @@ def cumulative_counts(elems: Sequence[int]) -> tuple[list[int], list[int]]:
         n += counts[k]
         ys.append(n)
     return keys, ys
+
+
+def pickle_dump(file: Path, obj):
+    file.parent.mkdir(parents=True, exist_ok=True)
+    with file.open("wb") as f:
+        pickle.dump(obj, f)
+
+
+def pickle_load(file: Path):
+    with file.open("rb") as f:
+        return pickle.load(f)

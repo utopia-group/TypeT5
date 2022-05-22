@@ -301,15 +301,19 @@ def chunk_srcs(
     chunks: dict[str, list] = {
         "input_ids": [],
         "labels": [],
+        "n_labels": [],
+        "chunk_id": [],
     }
     chunks_info: list[SrcChunkInfo] = []
 
-    for chunk in chunk_outputs:
+    for i, chunk in enumerate(chunk_outputs):
         if chunk is None:
             continue
+        meta: SrcChunkInfo = chunk["meta"]
         chunks["input_ids"].append(chunk["input_ids"])
         chunks["labels"].append(chunk["labels"])
-        meta = chunk["meta"]
+        chunks["n_labels"].append(len(meta.types))
+        chunks["chunk_id"].append(i)
         chunks_info.append(meta)
 
     files = [(repos_root / s.file).resolve() for s in srcs]
@@ -1072,10 +1076,10 @@ def _turn_off_tokenizer_warning(tokenizer: TokenizerSPOT):
     ] = True
 
 
-def get_dataset_name(drop_comments: bool, round: int = 0, quicktest: bool = False):
-    test_tag = "quicktest/" if quicktest else ""
+def get_dataset_name(drop_comments: bool, spot_round: int = 0, quicktest: bool = False):
+    test_tag = "quicktest-" if quicktest else ""
     drop_tag = "-drop_comments" if drop_comments else ""
-    round_tag = f"-R{round}" if round > 0 else ""
+    round_tag = f"-R{spot_round}" if spot_round > 0 else ""
     return f"{test_tag}src_datasets{round_tag}{drop_tag}"
 
 
@@ -1083,12 +1087,12 @@ def get_model_name(
     drop_comments: bool,
     ctx_args: CtxArgs,
     data_reduction: int = 1,
-    round: int = 0,
+    spot_round: int = 0,
     quicktest: bool = False,
 ):
     ctx_sizes = ctx_args.as_tuple()
-    test_tag = "quicktest/" if quicktest else ""
+    test_tag = "quicktest-" if quicktest else ""
     drop_tag = "-drop_comments" if drop_comments else ""
     data_tag = "" if data_reduction == 1 else f"-data_reduction_{data_reduction}"
-    round_tag = f"-R{round}"
+    round_tag = f"-R{spot_round}"
     return f"{test_tag}SPOT-model{round_tag}-{ctx_sizes}{drop_tag}{data_tag}"

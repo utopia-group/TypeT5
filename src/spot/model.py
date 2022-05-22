@@ -4,9 +4,9 @@ from collections import Counter
 from copy import deepcopy
 
 import numpy as np
+import torch
 from datasets import Dataset
 from mypy_extensions import mypyc_attr
-from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from transformers import (
     DataCollatorForSeq2Seq,
@@ -49,12 +49,27 @@ class DecodingArgs:
     do_sample: bool = False
     top_p: float = 0.9
 
+    def scale_ctx_size(self, factor: float) -> "DecodingArgs":
+        """Scale the context size of the model by the given factor, while keeping the window size the same.
+        Also scale down the sampling batch size accordingly."""
+        ctx_size = round(self.ctx_args.ctx_size * factor)
+        right_margin = round(self.ctx_args.right_margin * factor)
+        left_margin = ctx_size - right_margin - self.ctx_args.window_size
+        result = deepcopy(self)
+        result.ctx_args.ctx_size = ctx_size
+        result.ctx_args.left_margin = left_margin
+        result.ctx_args.right_margin = right_margin
+        result.sampling_batch_size = round(self.sampling_batch_size / factor**2)
+
+        return result
+
 
 @dataclass
 class ModelTrainingArgs:
     train_batch_size: int
     eval_batch_size: int
     max_epochs: int
+    accumulate_grad_batches: int | dict | None = None
 
 
 @dataclass
@@ -63,6 +78,30 @@ class ModelWrapper:
     tokenizer: TokenizerSPOT
     args: DecodingArgs
     monitor: TaskMonitor
+
+    def predict_on_batch(
+        self,
+        batch: dict,
+        do_sample=None,
+    ) -> list[list[PythonType]]:
+        """Run the model on the given batch and return the predicted types for each row."""
+        model = self.model
+        output_ids = model.generate(
+            inputs=batch["input_ids"],
+            do_sample=self.args.do_sample if do_sample is None else do_sample,
+            top_p=self.args.top_p,
+            max_length=self.args.generation_max_length,
+        ).cpu()  # type: ignore
+        assert len(output_ids.shape) == 2
+
+        n_chunks = output_ids.shape[0]
+        preds = list[list[PythonType]]()
+        n_labels = batch["n_labels"]
+        for i in range(n_chunks):
+            row = output_ids[i, :]
+            types = output_ids_as_types(row, self.tokenizer, n_labels[i])
+            preds.append(types)
+        return preds
 
     def predict(
         self, dataset: ChunkedDataset, tqdm_args: dict
@@ -81,22 +120,12 @@ class ModelWrapper:
         tqdm_bar = tqdm(total=len(dataset.data), desc="predict", **tqdm_args)
         chunk_id = 0
         for batch in loader:
-            output_ids = model.generate(
-                inputs=batch["input_ids"].to(device),
-                do_sample=self.args.do_sample,
-                top_p=self.args.top_p,
-                max_length=self.args.generation_max_length,
-            ).cpu()  # type: ignore
-            assert len(output_ids.shape) == 2
-
-            n_chunks = output_ids.shape[0]
-            for i in range(n_chunks):
-                n_annots = len(dataset.chunks_info[i + chunk_id].annots_info)
-                row = output_ids[i, :]
-                types = output_ids_as_types(row, self.tokenizer, n_annots)
-                pred_types.append(types)
+            n_chunks = batch["input_ids"].shape[0]
+            batch["input_ids"] = batch["input_ids"].to(device)
+            preds = self.predict_on_batch(batch)
+            pred_types.extend(preds)
             chunk_id += n_chunks
-            tqdm_bar.update(output_ids.shape[0])
+            tqdm_bar.update(n_chunks)
         return pred_types
 
     def save_pretrained(self, path: Path):
@@ -212,25 +241,6 @@ class ModelWrapper:
         )
 
         return trainer
-
-    def scale_ctx_size(self, factor: float) -> "ModelWrapper":
-        """Scale the context size of the model by the given factor, while keeping the window size the same.
-        Also scale down the sampling batch size accordingly."""
-        args = deepcopy(self.args)
-        ctx_size = round(args.ctx_args.ctx_size * factor)
-        right_margin = round(args.ctx_args.right_margin * factor)
-        left_margin = ctx_size - right_margin - args.ctx_args.window_size
-        args.ctx_args.ctx_size = ctx_size
-        args.ctx_args.left_margin = left_margin
-        args.ctx_args.right_margin = right_margin
-        args.sampling_batch_size = round(args.sampling_batch_size / factor**2)
-
-        return ModelWrapper(
-            model=self.model,
-            tokenizer=self.tokenizer,
-            args=args,
-            monitor=self.monitor,
-        )
 
     def type_check_preds_per_file(
         self,
