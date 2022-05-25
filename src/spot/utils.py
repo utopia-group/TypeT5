@@ -318,7 +318,7 @@ def run_long_task(name: str, notify: bool = True):
         raise e
     time_taken = time.time() - start
     pushover_alert(
-        f"Finished: {name}.",
+        f"Finished: '{name}'.",
         f"Time taken: {time_taken:.1f}s",
         notify=notify,
     )
@@ -333,12 +333,12 @@ class PickleCache(Generic[T1]):
         if not path.exists():
             value = func()
             path.parent.mkdir(parents=True, exist_ok=True)
-            logging.info("Saving to cache: %s", path)
+            print("[PickleCache] Saving to cache: %s", path)
             with path.open("wb") as f:
                 pickle.dump(value, f)
             return value
         else:
-            logging.info("Loading from cache: %s", path)
+            print("[PickleCache] Loading from cache: %s", path)
             with path.open("rb") as f:
                 return pickle.load(f)
 
@@ -395,3 +395,10 @@ def pickle_dump(file: Path, obj):
 def pickle_load(file: Path):
     with file.open("rb") as f:
         return pickle.load(f)
+
+
+def get_subset(data, key: slice | Iterable):
+    if isinstance(key, slice):
+        return data[key]
+    else:
+        return [data[i] for i in key]

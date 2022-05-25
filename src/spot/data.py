@@ -347,8 +347,10 @@ class SrcDataset:
             pretty_print_dict(stats)
         self.extra_stats.update(stats)
 
-    def __getitem__(self, ids: slice):
-        return SrcDataset(self.repos_root, self.all_srcs[ids], {"subset_ids": ids})
+    def __getitem__(self, ids: slice | Iterable):
+        return SrcDataset(
+            self.repos_root, get_subset(self.all_srcs, ids), {"subset_ids": ids}
+        )
 
     def to_chunks(
         self,
@@ -547,6 +549,37 @@ class SrcDataset:
 
         result.all_srcs = tk_srcs
         return result
+
+
+def load_src_datasets(
+    datadir: Path,
+    drop_comments: bool = False,
+    spot_round: int = 0,
+    data_reduction: int = 1,
+    quicktest: bool = False,
+    repos_root: Optional[Path] = None,
+    sets_to_load=["train", "valid", "test"],
+) -> dict[str, SrcDataset]:
+    src_datasets_path = (
+        datadir
+        / f"SPOT-data"
+        / get_dataset_name(drop_comments=drop_comments, spot_round=spot_round)
+    )
+    src_datasets = dict[str, SrcDataset]()
+    for n in sets_to_load:
+        with open(src_datasets_path / f"{n}.pkl", "rb") as f:
+            src: SrcDataset = pickle.load(f)
+            src = SrcDataset(src.repos_root, src.srcs_with_labels())
+            if repos_root is not None:
+                src.repos_root = repos_root
+            if n == "train":
+                n_train = len(src.all_srcs) // data_reduction
+                src = src[:n_train]
+            if quicktest:
+                ids = range(0, len(src.all_srcs), max(1, len(src.all_srcs) // 20))
+                src = src[ids]
+            src_datasets[n] = src
+    return src_datasets
 
 
 def type_check_src(
@@ -814,11 +847,15 @@ class ChunkedDataset:
     file2src: dict[Path, str]
     file2repo: dict[Path, Path]
 
-    def __getitem__(self, key: slice) -> "ChunkedDataset":
-        assert isinstance(key, slice)
+    def __post_init__(self):
+        assert_eq(len(self.data), len(self.chunks_info))
 
-        new_data = {n: self.data[n][key] for n in self.data.column_names}
-        new_info = self.chunks_info[key]
+    def __getitem__(self, chunk_ids: Iterable[int]) -> "ChunkedDataset":
+        cid2id = {bid: i for i, bid in enumerate(self.data["chunk_id"])}
+        ids = [cid2id[bid] for bid in chunk_ids]
+
+        new_data = {n: get_subset(self.data[n], ids) for n in self.data.column_names}
+        new_info = get_subset(self.chunks_info, ids)
 
         return ChunkedDataset(
             Dataset.from_dict(new_data),
@@ -827,6 +864,10 @@ class ChunkedDataset:
             file2src=self.file2src,
             file2repo=self.file2repo,
         )
+
+    def __len__(self):
+        assert_eq(len(self.data), len(self.chunks_info))
+        return len(self.data)
 
     def __repr__(self):
         return f"ChunkedDataset(num_chunks={len(self.chunks_info)}, num_srcs={len(self.files)})"
@@ -949,6 +990,46 @@ def patch_code_with_extra(
         replaces.append((CodeRange(p, p), 3, f"/* error: {e} */"))
 
     return replace_strs_by_pos(code, replaces)
+
+
+def R1_srcs_from_preds(
+    tokenizer: TokenizerSPOT,
+    r0_src: SrcDataset,
+    chunks_info: list[SrcChunkInfo],
+    src_files: list[Path],
+    r0_preds: list[list[PythonType]],
+    max_workers: int,
+    tqdm_args: dict = {},
+) -> SrcDataset:
+    file2preds = dict[Path, dict[AnnotPath, str]]()
+    assert_eq(len(r0_preds), len(chunks_info))
+    for preds, chunk_info in zip(r0_preds, chunks_info):
+        assert_eq(len(preds), len(chunk_info.types))
+        for i, pred in enumerate(preds):
+            sid = chunk_info.src_ids[i]
+            file = src_files[sid]
+            if file not in file2preds:
+                file2preds[file] = dict()
+            label_path = chunk_info.annots_info[i].path
+            file2preds[file][label_path] = str(pred)
+
+    file2src = r0_src.file2src()
+    file2preds1 = dict[Path, dict[int, str]]()
+
+    for f, ls in file2preds.items():
+        src = file2src[f]
+        path2id = {info.path: i for i, info in enumerate(src.types_info)}
+        try:
+            file2preds1[f] = {path2id[path]: label for path, label in ls.items()}
+        except Exception as e:
+            raise RuntimeError(f"In file {f}. path2id={path2id}") from e
+
+    return r0_src.add_type_checker_feedback(
+        tokenizer,
+        file2preds1,
+        max_workers=max_workers,
+        tqdm_args=tqdm_args,
+    )
 
 
 def compute_metrics(

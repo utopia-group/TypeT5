@@ -17,7 +17,15 @@ from transformers import DataCollatorForSeq2Seq, get_linear_schedule_with_warmup
 from transformers.trainer_pt_utils import get_parameter_names
 
 import wandb
-from spot.data import ChunkedDataset, SrcDataset, get_dataset_name, get_model_name
+from spot.data import (
+    ChunkedDataset,
+    R1_srcs_from_preds,
+    SrcChunkInfo,
+    SrcDataset,
+    get_dataset_name,
+    get_model_name,
+    load_src_datasets,
+)
 from spot.model import (
     CtxArgs,
     DecodingArgs,
@@ -31,81 +39,59 @@ from spot.utils import *
 
 
 def train_spot_model(
-    spot_round: int,
-    drop_comments: bool,
-    ctx_args: CtxArgs,
+    src_datasets: dict[str, SrcDataset],
+    model_name: str,
+    dec_args: DecodingArgs,
     train_args: ModelTrainingArgs,
-    data_reduction: int = 1,
+    record_batches: bool,
     gpus: list[int] = [0],
-    collect_init_preds: bool = None,
     quicktest=False,
 ) -> Tuple[ModelWrapper, dict]:
     os.chdir(proj_root())
 
     datadir = Path(os.getenv("datadir", "data"))
-    repos_dir = datadir / "SPOT-data/repos"
-
-    src_datasets_path = (
-        datadir
-        / f"SPOT-data"
-        / get_dataset_name(drop_comments=drop_comments, spot_round=spot_round)
-    )
-    src_datasets = dict[str, SrcDataset]()
-    for n in ["train", "valid", "test"]:
-        with open(src_datasets_path / f"{n}.pkl", "rb") as f:
-            src_datasets[n] = pickle.load(f)
-            src_datasets[n].repos_root = repos_dir
 
     tokenizer: TokenizerSPOT = TokenizerSPOT.from_pretrained("Salesforce/codet5-base")
 
-    model_name = get_model_name(
-        spot_round=spot_round,
-        drop_comments=drop_comments,
-        ctx_args=ctx_args,
-        data_reduction=data_reduction,
-        quicktest=quicktest,
-    )
-    print("Model name: ", model_name)
-
     model_path = "Salesforce/codet5-base"
-
-    dec_args = DecodingArgs(
-        sampling_batch_size=128,
-        ctx_args=ctx_args,
-        max_workers=20,
-    )
-
-    if collect_init_preds is None:
-        collect_init_preds = spot_round == 0
-    lit_model = TrainModelWrapper(
-        model_path, dec_args, collect_init_preds=collect_init_preds
-    )
+    lit_model = TrainModelWrapper(model_path, dec_args, record_batches=record_batches)
     wrapper = lit_model.wrapper
 
     chunks: dict[str, ChunkedDataset] = {}
     with run_long_task("Preparing chunked datasets", notify=False):
-        for n in ["valid", "train"]:
-            src = src_datasets[n][:35] if quicktest else src_datasets[n]
-            chunks[n] = src.to_chunks(tokenizer, ctx_args, max_workers=20)
-
-    n_train = len(chunks["train"].data) // data_reduction
-    chunks["train"] = chunks["train"][:n_train]
+        for n in ["valid", "test", "train"]:
+            src = src_datasets[n]
+            chunks[n] = src.to_chunks(tokenizer, dec_args.ctx_args, max_workers=20)
 
     wandb_logger = WandbLogger(
         project=model_name,
         save_dir=str(datadir),
     )
-    wandb_logger.log_hyperparams(
-        {"r0_decoding_args": dec_args, "r0_train_args": train_args}
-    )
+    wandb_logger.log_hyperparams({"decoding_args": dec_args, "train_args": train_args})
 
     val_interval = 1 if quicktest else 500
 
-    save_dir = datadir / "checkpoints/lit-running" / model_name
-    save_dir.mkdir(parents=True, exist_ok=True)
+    running_dir = datadir / "checkpoints/lit-running" / model_name
+    if running_dir.exists():
+        shutil.rmtree(running_dir)
+    running_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_interval = 1 if quicktest else 350
+
+    extra_callbacks = []
+    if record_batches:
+        extra_callbacks.append(
+            ModelCheckpoint(
+                dirpath=running_dir / "models",
+                save_top_k=-1,
+                filename="{step}",
+                verbose=True,
+                every_n_train_steps=ckpt_interval,
+                save_weights_only=True,
+            )
+        )
 
     checkpoint_cb = ModelCheckpoint(
-        dirpath=save_dir,
+        dirpath=running_dir,
         save_top_k=2,
         monitor="valid/loss",
         mode="min",
@@ -114,7 +100,7 @@ def train_spot_model(
     )
 
     trainer = pl.Trainer(
-        default_root_dir=save_dir,
+        default_root_dir=str(running_dir),
         # fast_dev_run=6 if quicktest else False,
         # log_every_n_steps=500,
         accelerator="gpu" if gpus else "cpu",
@@ -124,6 +110,7 @@ def train_spot_model(
         logger=wandb_logger,
         val_check_interval=val_interval,
         callbacks=[
+            *extra_callbacks,
             checkpoint_cb,
             EarlyStopping("valid/loss", mode="min", verbose=quicktest),
         ],
@@ -153,15 +140,11 @@ def train_spot_model(
             val_dataloaders=valid_dataloader,
         )
 
-    extra = dict()
-    if collect_init_preds:
-        extra["init_preds"] = lit_model.init_preds
-        pickle_dump(
-            datadir / "checkpoints/lit-saved" / model_name / "init_preds.pkl",
-            lit_model.init_preds,
-        )
+    extra = dict[str, Any]()
+    save_dir = datadir / "checkpoints/lit-saved" / model_name
 
     final_eval = trainer.validate(model=lit_model, dataloaders=valid_dataloader)[0]
+    wandb_logger.finalize("Finished.")
 
     try:
         if (
@@ -172,15 +155,87 @@ def train_spot_model(
             wrapper = TrainModelWrapper.load_from_checkpoint(
                 checkpoint_cb.best_model_path
             ).wrapper
-
-        wandb_logger.finalize("Finished.")
-        wrapper.save_pretrained(datadir / "checkpoints/lit-saved" / model_name)
-        if quicktest:
+        if save_dir.exists():
             shutil.rmtree(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        wrapper.save_pretrained(save_dir)
+        if record_batches:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            extra["batch_ids"] = lit_model.batch_ids
+            with run_long_task("Generating R1 datasets", notify=False):
+                print(f"Generating R1 dataset: train")
+                R1_src_datasets = dict[str, SrcDataset]()
+                R1_src_datasets["train"] = R1_srcs_from_ckpts(
+                    tokenizer,
+                    src_datasets["train"],
+                    chunks["train"],
+                    lit_model.batch_ids,
+                    ckpt_dir=running_dir / "models",
+                    ckpt_interval=ckpt_interval,
+                    max_workers=wrapper.args.max_workers,
+                    device=device,
+                )
+                for n in ["valid", "test"]:
+                    print(f"Generating R1 dataset: {n}")
+                    preds = wrapper.to(device).predict(chunks[n].data, {})
+                    R1_src_datasets[n] = R1_srcs_from_preds(
+                        tokenizer,
+                        src_datasets[n],
+                        chunks[n].chunks_info,
+                        chunks[n].files,
+                        preds,
+                        max_workers=wrapper.args.max_workers,
+                    )
+            extra["R1-src_datasets"] = R1_src_datasets
+            pickle_dump(save_dir / "extra.pkl", extra)
+
+            shutil.rmtree(running_dir)
     except Exception as e:
-        logging.error("Error encountered during final stages: ", e)
+        logging.error(
+            "Error encountered after training, returning partial results... Error:\n", e
+        )
 
     return wrapper, extra
+
+
+def R1_srcs_from_ckpts(
+    tokenizer: TokenizerSPOT,
+    r0_src: SrcDataset,
+    cdata: ChunkedDataset,
+    chunk_ids: list[list[int]],
+    ckpt_dir: Path,
+    ckpt_interval: int,
+    max_workers: int,
+    device,
+    tqdm_args={},
+) -> SrcDataset:
+    chunks_info = list[SrcChunkInfo]()
+    model_preds = list[list[PythonType]]()
+    for i in tqdm(range(ckpt_interval, len(chunk_ids), ckpt_interval), **tqdm_args):
+        ids = list(seq_flatten(chunk_ids[i : i + ckpt_interval]))
+        wrapper = TrainModelWrapper.load_from_checkpoint(
+            str(ckpt_dir / "step={}.ckpt".format(i))
+        ).wrapper
+        wrapper.to(device)
+        try:
+            data_sub = cdata[ids]
+        except IndexError as e:
+            raise IndexError(
+                f"ids: {ids},\nchunk_ids: {cdata.data['chunk_id']}\ncdata: {cdata}"
+            ) from e
+        chunks_info.extend(data_sub.chunks_info)
+        preds = wrapper.predict(data_sub.data, tqdm_args=tqdm_args)
+        model_preds.extend(preds)
+    return R1_srcs_from_preds(
+        tokenizer,
+        r0_src,
+        chunks_info,
+        cdata.files,
+        model_preds,
+        max_workers=max_workers,
+        tqdm_args=tqdm_args,
+    )
 
 
 class TrainModelWrapper(pl.LightningModule):
@@ -191,7 +246,7 @@ class TrainModelWrapper(pl.LightningModule):
         model_checkpoint: str | Path,
         args: DecodingArgs,
         *,
-        collect_init_preds: bool,
+        record_batches: bool,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -201,19 +256,13 @@ class TrainModelWrapper(pl.LightningModule):
         self.wrapper = ModelWrapper(
             self.model, self.tokenizer, args, EmptyLoggingMonitor()
         )
-        self.collect_init_preds = collect_init_preds
+        self.record_batches = record_batches
 
     def on_fit_start(self):
         # maps chunk id to the initial predictions made for that chunk immediately
         # before the model was trained on it
-        if self.collect_init_preds:
-            self.init_preds: dict[int, list[PythonType]] = {}
-            self.train_batch_buffer: list[dict] = []
-            self.train_batch_buffer_size: int = 0
-
-    def on_train_epoch_end(self):
-        if self.collect_init_preds:
-            self._process_buffer()
+        if self.record_batches:
+            self.batch_ids: list[list[int]] = []
 
     def configure_optimizers(self):
         no_decay = ["bias", "LayerNorm.weight"]
@@ -236,30 +285,12 @@ class TrainModelWrapper(pl.LightningModule):
             },
         ]
         optimizer = AdamW(grouped_params, lr=2e-5)
-        # scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=self.total_train_steps)
-        # scheduler_dict = {"scheduler": scheduler, "interval": "step", "frequency": 1}
         lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1, gamma=0.2)
         return [optimizer], [lr_scheduler]
 
-    def _process_buffer(self):
-        if self.train_batch_buffer_size == 0:
-            return
-        shadow_batch = concat_batches(
-            self.train_batch_buffer, keys=["input_ids", "chunk_id", "n_labels"]
-        )
-        self.train_batch_buffer = []
-        self.train_batch_buffer_size = 0
-        preds = self.wrapper.predict_on_batch(shadow_batch, do_sample=True)
-        for id, ps in zip(shadow_batch["chunk_id"].tolist(), preds):
-            assert id not in self.init_preds, f"Repeating chunk id: {id}"
-            self.init_preds[id] = ps
-
     def training_step(self, batch, batch_idx):
-        if self.collect_init_preds and self.current_epoch == 0:
-            preds = self.wrapper.predict_on_batch(batch)
-            for id, ps in zip(batch["chunk_id"].tolist(), preds):
-                assert id not in self.init_preds, f"Repeating chunk id: {id}"
-                self.init_preds[id] = ps
+        if self.record_batches and self.current_epoch == 0:
+            self.batch_ids.append(batch["chunk_id"].tolist())
 
         outputs = self.model(
             input_ids=batch["input_ids"],

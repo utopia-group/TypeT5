@@ -103,21 +103,19 @@ class ModelWrapper:
             preds.append(types)
         return preds
 
-    def predict(
-        self, dataset: ChunkedDataset, tqdm_args: dict
-    ) -> list[list[PythonType]]:
+    def predict(self, dataset: Dataset, tqdm_args: dict) -> list[list[PythonType]]:
         """Run the  model on the given dataset and return the predicted types for each row."""
         model = self.model
         collator = DataCollatorForSeq2Seq(self.tokenizer, model)
         loader = DataLoader(
-            dataset.data,  # type: ignore
+            dataset,  # type: ignore
             shuffle=False,
             batch_size=self.args.sampling_batch_size,
             collate_fn=collator,
         )
         device = model.device
         pred_types = list[list[PythonType]]()
-        tqdm_bar = tqdm(total=len(dataset.data), desc="predict", **tqdm_args)
+        tqdm_bar = tqdm(total=len(dataset), desc="predict", **tqdm_args)
         chunk_id = 0
         for batch in loader:
             n_chunks = batch["input_ids"].shape[0]
@@ -134,6 +132,10 @@ class ModelWrapper:
         self.tokenizer.save_pretrained(str(path))
         with open(path / "args.pkl", "wb") as f:
             pickle.dump(self.args, f)
+
+    def to(self, device) -> "ModelWrapper":
+        self.model = self.model.to(device)
+        return self
 
     @staticmethod
     def from_pretrained(path: Path) -> "ModelWrapper":
@@ -153,52 +155,15 @@ class ModelWrapper:
         self, src_data: SrcDataset, tqdm_args={}
     ) -> tuple[dict, ChunkedDataset, list[list[PythonType]]]:
         """Convinient method to preprocess the src according to the model's ctx_args and evaluate the (R0) accuracy."""
-        data = src_data.to_chunks(
+        chunks = src_data.to_chunks(
             self.tokenizer,
             self.args.ctx_args,
             max_workers=self.args.max_workers,
             tqdm_args=tqdm_args,
         )
-        preds = self.predict(data, tqdm_args=tqdm_args)
-        accs = preds_to_accuracies(preds, data)
-        return (accs, data, preds)
-
-    def generate_r1_srcs(
-        self,
-        r0_src: SrcDataset,
-        r0_data: ChunkedDataset,
-        r0_preds: list[list[PythonType]],
-        tqdm_args: dict = {},
-    ) -> SrcDataset:
-        file2preds = dict[Path, dict[AnnotPath, str]]()
-        assert_eq(len(r0_preds), len(r0_data.chunks_info))
-        for preds, chunk_info in zip(r0_preds, r0_data.chunks_info):
-            assert_eq(len(preds), len(chunk_info.types))
-            for i, pred in enumerate(preds):
-                sid = chunk_info.src_ids[i]
-                file = r0_data.files[sid]
-                if file not in file2preds:
-                    file2preds[file] = dict()
-                label_path = chunk_info.annots_info[i].path
-                file2preds[file][label_path] = str(pred)
-
-        file2src = r0_src.file2src()
-        file2preds1 = dict[Path, dict[int, str]]()
-
-        for f, ls in file2preds.items():
-            src = file2src[f]
-            path2id = {info.path: i for i, info in enumerate(src.types_info)}
-            try:
-                file2preds1[f] = {path2id[path]: label for path, label in ls.items()}
-            except Exception as e:
-                raise RuntimeError(f"In file {f}. path2id={path2id}") from e
-
-        return r0_src.add_type_checker_feedback(
-            self.tokenizer,
-            file2preds1,
-            max_workers=self.args.max_workers,
-            tqdm_args=tqdm_args,
-        )
+        preds = self.predict(chunks.data, tqdm_args=tqdm_args)
+        accs = preds_to_accuracies(preds, chunks)
+        return (accs, chunks, preds)
 
     def build_trainer(
         self,
