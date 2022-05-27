@@ -17,6 +17,7 @@ from spot.type_env import (
     AnnotInfo,
     AnnotPath,
     MypyChecker,
+    MypyFeedback,
     PythonType,
     apply_annotations,
     collect_annots_info,
@@ -214,7 +215,7 @@ class _TokenizedSrcHelper:
         self,
         src: TokenizedSrc,
         current_code: str,
-        feedbacks: dict[CodePosition, str],
+        feedbacks: list[MypyFeedback],
     ) -> TokenizedSrc:
         try:
             m = cst.parse_module(current_code)
@@ -242,7 +243,8 @@ class _TokenizedSrcHelper:
                 types.append(src.types[li])
                 types_str.append(src.types_str[li])
                 annots_info.append(a)
-        new_code = patch_code_with_extra(current_code, preds_map, feedbacks)
+        pos_to_msg = {f.position: f.message for f in feedbacks}
+        new_code = patch_code_with_extra(current_code, preds_map, pos_to_msg)
         code_segs = new_code.split(SpecialNames.TypeMask)
         assert len(code_segs) == len(types) + 1, f"{len(code_segs)} != {len(types)} + 1"
 
@@ -374,7 +376,7 @@ class SrcDataset:
     def file2src(self):
         return {(self.repos_root / s.file).resolve(): s for s in self.all_srcs}
 
-    def stats(self) -> dict[str, Any]:
+    def stats_to_show(self) -> dict[str, Any]:
         num_repos = len(set(s.repo for s in self.all_srcs))
         useful_srcs = self.srcs_with_labels()
         num_files = len(useful_srcs)
@@ -391,10 +393,11 @@ class SrcDataset:
             "target_tks_per_file": scalar_stats(target_tks_per_file),
         }
         basic_stats.update(self.extra_stats)
+        basic_stats.pop("mypy_feedbacks", None)
         return basic_stats
 
     def print_stats(self):
-        pretty_print_dict(self.stats())
+        pretty_print_dict(self.stats_to_show())
 
     def add_type_checker_feedback(
         self,
@@ -429,12 +432,12 @@ class SrcDataset:
             MypyChecker.clear_temp_cache()
         n_checked = 0
         code_list = list[str]()
-        feedback_list = list[dict]()
+        feedback_list = list[list[MypyFeedback]]()
         n_error_list = list[int]()
         for i in range(len(src_list)):
             errors, new_code = check_rs[i]
             if isinstance(errors, str):
-                errors = dict()
+                errors = []
             else:
                 n_checked += 1
             code_list.append(new_code)
@@ -444,8 +447,8 @@ class SrcDataset:
         silent = tqdm_args.get("disable", False)
         result.add_stats(
             {
-                "num_type_checked": n_checked,
-                "errors_per_file": scalar_stats(n_error_list),
+                "type_check_success_ratio": n_checked / len(src_list),
+                "feedbacks_per_file": scalar_stats(n_error_list),
             },
             not silent,
         )
@@ -463,6 +466,7 @@ class SrcDataset:
             **tqdm_args,
         )
         result.all_srcs = new_srcs
+        result.add_stats({"mypy_feedbacks": feedback_list}, should_print=False)
         return result
 
     def __repr__(self):
@@ -587,24 +591,34 @@ def type_check_src(
     preds: dict[int, str],
     mypy_path: Optional[Path] = None,
     cwd: Optional[Path] = None,
-) -> tuple[dict[CodePosition, str] | str, str]:
-
+) -> tuple[list[MypyFeedback] | str, str]:
     code = src.origin_code
-    changes = list[tuple[CodeRange, int, str]]()
-    for i, pred in preds.items():
-        range = not_none(src.types_info[i].annot_range)
-        changes.append((range, 1, pred))
-    new_code = replace_strs_by_pos(code, changes)
-    check_r = MypyChecker.check_code(new_code, cwd=cwd, mypy_path=mypy_path)
-    feedback: dict[CodePosition, str] | str
-    if isinstance(check_r, str):
-        feedback = check_r
-    elif len(check_r.error_dict) == 0:
-        feedback = dict()
+
+    def from_preds(preds: dict[int, str]):
+        changes = list[tuple[CodeRange, int, str]]()
+        for i, pred in preds.items():
+            range = not_none(src.types_info[i].annot_range)
+            changes.append((range, 1, pred))
+        new_code = replace_strs_by_pos(code, changes)
+        check_r = MypyChecker.check_code(new_code, cwd=cwd, mypy_path=mypy_path)
+        feedback: list[MypyFeedback] | str
+        if isinstance(check_r, str):
+            feedback = check_r
+        elif len(check_r.error_dict) == 0:
+            feedback = []
+        else:
+            assert len(check_r.error_dict) == 1
+            feedback = list(check_r.error_dict.values())[0]
+        return feedback, new_code
+
+    fdbk0, _ = from_preds({i: "Any" for i, _ in preds.items()})
+    fdbk1, new_code = from_preds(preds)
+    if isinstance(fdbk1, list) and isinstance(fdbk0, list):
+        preexisting = {(f.position.line, f.message) for f in fdbk0}
+        new_fdbk = [f for f in fdbk1 if (f.position.line, f.message) not in preexisting]
+        return new_fdbk, new_code
     else:
-        assert len(check_r.error_dict) == 1
-        feedback = dict(list(check_r.error_dict.values())[0])
-    return feedback, new_code
+        return fdbk1, new_code
 
 
 class CommentRemover(cst.CSTTransformer):
@@ -1111,44 +1125,14 @@ def type_accuracies(
     }
 
 
-def pretty_print_dict(
-    d: dict,
-    level: int = 0,
-    max_show_level: int = 1000,
-    float_precision: int = 5,
+def preds_to_accuracies(
+    preds: Sequence[Sequence[PythonType]], dataset: ChunkedDataset, normalize_types=True
 ):
-    for k, v in d.items():
-        print("   " * level, end="")
-        if isinstance(v, float):
-            print(f"{k}: %.{float_precision}g" % v)
-        elif isinstance(v, dict) or isinstance(v, list):
-            if level >= max_show_level:
-                print(f"{k}: ...")
-            else:
-                print(f"{k}:")
-                if isinstance(v, list):
-                    v = {f"[{i}]": e for i, e in enumerate(v)}
-                pretty_print_accuracies(
-                    v, level=level + 1, max_show_level=max_show_level
-                )
-        else:
-            print(f"{k}: {v}")
-
-
-def pretty_print_accuracies(
-    accs: dict[str, Any],
-    level: int = 0,
-    max_show_level: int = 1000,
-):
-    pretty_print_dict(
-        accs, level=level, max_show_level=max_show_level, float_precision=4
-    )
-
-
-def preds_to_accuracies(preds: Sequence[Sequence[PythonType]], dataset: ChunkedDataset):
     cats = [an.cat for info in dataset.chunks_info for an in info.annots_info]
     labels = [ty for info in dataset.chunks_info for ty in info.types]
-    return type_accuracies(list(seq_flatten(preds)), labels, cats)
+    return type_accuracies(
+        list(seq_flatten(preds)), labels, cats, normalize_types=normalize_types
+    )
 
 
 def _turn_off_tokenizer_warning(tokenizer: TokenizerSPOT):

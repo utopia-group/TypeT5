@@ -149,8 +149,10 @@ def test_type_normalization():
     equiv_pairs: list[tuple[str, str]] = [
         ("list[int]", "List[int]"),
         ("dict[str, list]", "Dict[str, List]"),
+        ("'Foo[int]'", "Foo[int]"),
         ("typing.Union[str, List]", "typing.Union[list, str]"),
         ("typing.Union[str, typing.Union[str, int]]", "str | int"),
+        ("typing.Union[str, float, typing.Union[str, int]]", "str | int | float"),
     ]
 
     for a, b in equiv_pairs:

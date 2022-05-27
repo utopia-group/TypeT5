@@ -145,13 +145,15 @@ def train_spot_model(
 
     final_eval = trainer.validate(model=lit_model, dataloaders=valid_dataloader)[0]
     wandb_logger.finalize("Finished.")
+    wandb.finish()
 
     try:
         if (
-            checkpoint_cb.best_model_score is not None
-            and checkpoint_cb.best_model_score < final_eval["valid/loss"]
-        ):
-            print("Loading best model from: ", checkpoint_cb.best_model_path)
+            best_loss := checkpoint_cb.best_model_score
+        ) is not None and best_loss < final_eval["valid/loss"]:
+            print(
+                f"Loading best model with score {best_loss} from: {checkpoint_cb.best_model_path}"
+            )
             wrapper = TrainModelWrapper.load_from_checkpoint(
                 checkpoint_cb.best_model_path
             ).wrapper
@@ -212,7 +214,11 @@ def R1_srcs_from_ckpts(
 ) -> SrcDataset:
     chunks_info = list[SrcChunkInfo]()
     model_preds = list[list[PythonType]]()
-    for i in tqdm(range(ckpt_interval, len(chunk_ids), ckpt_interval), **tqdm_args):
+    for i in tqdm(
+        range(ckpt_interval, len(chunk_ids), ckpt_interval),
+        desc="R1_srcs_from_ckpts",
+        **tqdm_args,
+    ):
         ids = list(seq_flatten(chunk_ids[i : i + ckpt_interval]))
         wrapper = TrainModelWrapper.load_from_checkpoint(
             str(ckpt_dir / "step={}.ckpt".format(i))

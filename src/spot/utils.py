@@ -27,6 +27,7 @@ from typing import (
 import libcst as cst
 import numpy as np
 import pandas as pd
+from IPython.display import display
 from libcst.metadata import CodePosition, CodeRange
 from sklearn.metrics import confusion_matrix
 from tqdm.auto import tqdm
@@ -402,3 +403,37 @@ def get_subset(data, key: slice | Iterable):
         return data[key]
     else:
         return [data[i] for i in key]
+
+
+def pretty_print_dict(
+    d: dict,
+    level: int = 0,
+    max_show_level: int = 1000,
+    float_precision: int = 5,
+):
+    for k, v in d.items():
+        print("   " * level, end="")
+        if isinstance(v, float):
+            print(f"{k}: %.{float_precision}g" % v)
+        elif isinstance(v, dict) or isinstance(v, list):
+            if level >= max_show_level:
+                print(f"{k}: ...")
+            else:
+                print(f"{k}:")
+                if isinstance(v, list):
+                    v = {f"[{i}]": e for i, e in enumerate(v)}
+                pretty_print_accuracies(
+                    v, level=level + 1, max_show_level=max_show_level
+                )
+        else:
+            print(f"{k}: {v}")
+
+
+def pretty_print_accuracies(
+    accs: dict[str, Any],
+    level: int = 0,
+    max_show_level: int = 1000,
+):
+    pretty_print_dict(
+        accs, level=level, max_show_level=max_show_level, float_precision=4
+    )

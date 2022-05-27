@@ -5,7 +5,7 @@ from typing import Sequence
 import ipywidgets as widgets
 
 from spot.data import ChunkedDataset, CtxArgs, PythonType
-from spot.utils import TokenizerSPOT
+from spot.utils import *
 
 
 def visualize_batch(
@@ -77,26 +77,62 @@ def inline_predictions(
     return out_tks
 
 
-def display_code_sequence(texts: Sequence[str], titles=None):
-    if titles is None:
-        titles = range(len(texts))
+# def visualize_texts(contents: Sequence[str]):
+#     assert len(contents) > 0
 
-    def code_to_html(code):
-        return colorize_code_html(html.escape(code))
+#     slider = widgets.IntSlider(min=0, max=len(contents) - 1, value=0)
+#     panel = widgets.Output()
 
-    outputs = [
-        widgets.HTML(
-            value="<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30); }'>"
-            + code_to_html(s)
+#     def update_panel(i: int):
+#         panel.clear_output(wait=True)
+#         with panel:
+#             print(contents[i])
+
+#     slider.observe(names="value", handler=lambda x: update_panel(x["new"]))
+#     update_panel(0)
+
+#     box_layout = widgets.Layout(overflow="scroll")
+#     return widgets.VBox([slider, widgets.Box([panel], layout=box_layout)])
+
+
+def visualize_texts(contents: Sequence[str]):
+    assert len(contents) > 0
+
+    slider = widgets.IntSlider(min=0, max=len(contents) - 1, value=0)
+    slider_label = widgets.Label(value=f"({len(contents)} total)")
+
+    def select(i: int):
+        print(contents[i])
+
+    out = widgets.interactive_output(select, {"i": slider})
+    out.layout.height = "500px"
+    box_layout = widgets.Layout(overflow="scroll")
+    return widgets.VBox(
+        [
+            widgets.HBox([slider, slider_label]),
+            widgets.Box([out], layout=box_layout),
+        ]
+    )
+
+
+def visualize_code_sequence(contents: Sequence[str]):
+    assert len(contents) > 0
+
+    slider = widgets.IntSlider(min=0, max=len(contents) - 1, value=0)
+    out = widgets.HTML()
+    out.layout.height = "500px"
+
+    def update_panel(i: int):
+        out.value = (
+            "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30); }'>"
+            + colorize_code_html(html.escape(contents[i]))
             + "</pre>"
         )
-        for s in texts
-    ]
 
-    tab = widgets.Tab(outputs)
-    for i, t in enumerate(titles):
-        tab.set_title(i, str(t))
-    return tab
+    slider.observe(names="value", handler=lambda x: update_panel(x["new"]))
+    update_panel(0)
+
+    return widgets.VBox([slider, out])
 
 
 def colorize_code_html(code: str) -> str:
