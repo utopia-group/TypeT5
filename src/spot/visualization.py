@@ -95,17 +95,21 @@ def inline_predictions(
 #     return widgets.VBox([slider, widgets.Box([panel], layout=box_layout)])
 
 
-def visualize_texts(contents: Sequence[str]):
+def visualize_sequence(contents: Sequence[str | widgets.Widget], max_height="500px"):
     assert len(contents) > 0
 
     slider = widgets.IntSlider(min=0, max=len(contents) - 1, value=0)
     slider_label = widgets.Label(value=f"({len(contents)} total)")
 
     def select(i: int):
-        print(contents[i])
+        el = contents[i]
+        if isinstance(el, str):
+            print(el)
+        else:
+            display(el)
 
     out = widgets.interactive_output(select, {"i": slider})
-    out.layout.height = "500px"
+    out.layout.height = max_height
     box_layout = widgets.Layout(overflow="scroll")
     return widgets.VBox(
         [
@@ -116,23 +120,16 @@ def visualize_texts(contents: Sequence[str]):
 
 
 def visualize_code_sequence(contents: Sequence[str]):
-    assert len(contents) > 0
-
-    slider = widgets.IntSlider(min=0, max=len(contents) - 1, value=0)
-    out = widgets.HTML()
-    out.layout.height = "500px"
-
-    def update_panel(i: int):
-        out.value = (
+    els = [
+        widgets.HTML(
             "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30); }'>"
             + colorize_code_html(html.escape(contents[i]))
             + "</pre>"
         )
+        for i in range(len(contents))
+    ]
 
-    slider.observe(names="value", handler=lambda x: update_panel(x["new"]))
-    update_panel(0)
-
-    return widgets.VBox([slider, out])
+    return visualize_sequence(els)
 
 
 def colorize_code_html(code: str) -> str:

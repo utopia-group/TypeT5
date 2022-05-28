@@ -325,7 +325,7 @@ def run_long_task(name: str, notify: bool = True):
     )
 
 
-class PickleCache(Generic[T1]):
+class PickleCache:
     def __init__(self, cache_dir: Path):
         self.cache_dir = cache_dir
 
@@ -334,12 +334,12 @@ class PickleCache(Generic[T1]):
         if not path.exists():
             value = func()
             path.parent.mkdir(parents=True, exist_ok=True)
-            print("[PickleCache] Saving to cache: %s", path)
+            print(f"[PickleCache] Saving to cache: '{path}'")
             with path.open("wb") as f:
                 pickle.dump(value, f)
             return value
         else:
-            print("[PickleCache] Loading from cache: %s", path)
+            print(f"[PickleCache] Loading from cache: '{path}'")
             with path.open("rb") as f:
                 return pickle.load(f)
 
@@ -358,7 +358,7 @@ class PickleCache(Generic[T1]):
             logging.info(f"Clearing cache: at: {self.cache_dir}")
             shutil.rmtree(self.cache_dir)
         else:
-            logging.warning(f"No cache found at: {self.cache_dir}")
+            logging.warning(f"No cache found at: {self.cache_dir}, skip clearing.")
 
 
 def assert_eq(left: T1, right: T1) -> None:
