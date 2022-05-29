@@ -7,15 +7,10 @@ import subprocess
 import time
 from argparse import ArgumentError
 from dataclasses import dataclass, field
-from distutils.log import error
-from logging import warn
-from os import PathLike
 from posixpath import dirname, realpath
 from typing import *
-from unittest import case
 
 from libcst.metadata import CodeRange, PositionProvider
-from numpy import isin
 from pyrsistent import plist
 from pyrsistent.typing import PList
 from tqdm import tqdm
@@ -32,18 +27,6 @@ class AnnotCat(enum.Enum):
     ClassAtribute = enum.auto()
     GlobalVar = enum.auto()
     LocalVar = enum.auto()
-
-
-# @dataclass(order=True, unsafe_hash=True)
-# class AnnotSegment:
-#     """A segment of an annotation path. The id records how many segments of the same name
-#     has occurred before this segment."""
-
-#     name: str
-#     id: int
-
-#     def __str__(self):
-#         return self.name if self.id == 0 else f"{self.name}[{self.id}]"
 
 
 @dataclass(order=True, unsafe_hash=True)

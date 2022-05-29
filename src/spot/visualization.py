@@ -77,25 +77,9 @@ def inline_predictions(
     return out_tks
 
 
-# def visualize_texts(contents: Sequence[str]):
-#     assert len(contents) > 0
-
-#     slider = widgets.IntSlider(min=0, max=len(contents) - 1, value=0)
-#     panel = widgets.Output()
-
-#     def update_panel(i: int):
-#         panel.clear_output(wait=True)
-#         with panel:
-#             print(contents[i])
-
-#     slider.observe(names="value", handler=lambda x: update_panel(x["new"]))
-#     update_panel(0)
-
-#     box_layout = widgets.Layout(overflow="scroll")
-#     return widgets.VBox([slider, widgets.Box([panel], layout=box_layout)])
-
-
-def visualize_sequence(contents: Sequence[str | widgets.Widget], max_height="500px"):
+def visualize_sequence(
+    contents: Sequence[str | widgets.Widget], height: Optional[str] = "500px"
+) -> widgets.VBox:
     assert len(contents) > 0
 
     slider = widgets.IntSlider(min=0, max=len(contents) - 1, value=0)
@@ -109,7 +93,8 @@ def visualize_sequence(contents: Sequence[str | widgets.Widget], max_height="500
             display(el)
 
     out = widgets.interactive_output(select, {"i": slider})
-    out.layout.height = max_height
+    if height is not None:
+        out.layout.height = height
     box_layout = widgets.Layout(overflow="scroll")
     return widgets.VBox(
         [
