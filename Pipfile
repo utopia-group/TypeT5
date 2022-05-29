@@ -19,6 +19,7 @@ wandb = "*"
 libcst = "0.4.1"
 sklearn = "*"
 matplotlib = "*"
+pytorch-lightning = "*"
 
 [dev-packages]
 ipykernel = "*"

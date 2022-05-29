@@ -4,12 +4,12 @@ from typing import Sequence
 
 import ipywidgets as widgets
 
-from spot.data import CtxArgs, PythonType, TypeInfDataset
-from spot.utils import TokenizerSPOT
+from spot.data import ChunkedDataset, CtxArgs, PythonType
+from spot.utils import *
 
 
 def visualize_batch(
-    dataset: TypeInfDataset,
+    dataset: ChunkedDataset,
     i: int,
     preds: list[list[PythonType]],
     tokenizer: TokenizerSPOT,
@@ -28,13 +28,13 @@ def visualize_batch(
     sep_2 = tokenizer.encode(
         "\n---------⬇context⬇---------\n", add_special_tokens=False
     )
-    ctx_margin = ctx_args.ctx_margin
+    margin_left, _, margin_right = ctx_args.as_tuple()
     code_tks = (
-        code_tks[:ctx_margin]
+        code_tks[:margin_left]
         + sep_1
-        + code_tks[ctx_margin:-ctx_margin]
+        + code_tks[margin_left:-margin_right]
         + sep_2
-        + code_tks[-ctx_margin:]
+        + code_tks[-margin_right:]
     )
     code_dec = tokenizer.decode(code_tks, skip_special_tokens=False)
     code_dec = code_inline_extra_ids(code_dec, label_types)
@@ -77,40 +77,61 @@ def inline_predictions(
     return out_tks
 
 
-def display_code_sequence(texts: Sequence[str], titles=None):
-    if titles is None:
-        titles = range(len(texts))
+def visualize_sequence(
+    contents: Sequence[str | widgets.Widget], height: Optional[str] = "500px"
+) -> widgets.VBox:
+    assert len(contents) > 0
 
-    def code_to_html(code):
-        return colorize_code_html(html.escape(code))
+    slider = widgets.IntSlider(min=0, max=len(contents) - 1, value=0)
+    slider_label = widgets.Label(value=f"({len(contents)} total)")
 
-    outputs = [
+    def select(i: int):
+        el = contents[i]
+        if isinstance(el, str):
+            print(el)
+        else:
+            display(el)
+
+    out = widgets.interactive_output(select, {"i": slider})
+    if height is not None:
+        out.layout.height = height
+    box_layout = widgets.Layout(overflow="scroll")
+    return widgets.VBox(
+        [
+            widgets.HBox([slider, slider_label]),
+            widgets.Box([out], layout=box_layout),
+        ]
+    )
+
+
+def visualize_code_sequence(contents: Sequence[str]):
+    els = [
         widgets.HTML(
-            value="<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30); }'>"
-            + code_to_html(s)
+            "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30); }'>"
+            + colorize_code_html(html.escape(contents[i]))
             + "</pre>"
         )
-        for s in texts
+        for i in range(len(contents))
     ]
 
-    tab = widgets.Tab(outputs)
-    for i, t in enumerate(titles):
-        tab.set_title(i, str(t))
-    return tab
+    return visualize_sequence(els)
 
 
 def colorize_code_html(code: str) -> str:
     "Highligh the special comments in the type checker-augmented python code."
     output = list[str]()
+    in_comment = False
     for i in range(len(code)):
         c = code[i]
         prev = code[i - 1] if i > 0 else None
         next = code[i + 1] if i < len(code) - 1 else None
-        if c == "/" and next == "*":
+        if not in_comment and c == "/" and next == "*":
             output.append("<span style='color: rgb(106, 153, 85)'>")
+            in_comment = True
         output.append(c)
-        if prev == "*" and c == "/":
+        if in_comment and prev == "*" and c == "/":
             output.append("</span>")
+            in_comment = False
     new_code = "".join(output)
 
     def replace(m: re.Match[str]):

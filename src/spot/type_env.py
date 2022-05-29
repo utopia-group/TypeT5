@@ -1,19 +1,16 @@
 import ast
 import enum
+import multiprocessing
 import re
+import shutil
 import subprocess
 import time
 from argparse import ArgumentError
 from dataclasses import dataclass, field
-from distutils.log import error
-from logging import warn
-from os import PathLike
 from posixpath import dirname, realpath
 from typing import *
-from unittest import case
 
 from libcst.metadata import CodeRange, PositionProvider
-from numpy import isin
 from pyrsistent import plist
 from pyrsistent.typing import PList
 from tqdm import tqdm
@@ -30,18 +27,6 @@ class AnnotCat(enum.Enum):
     ClassAtribute = enum.auto()
     GlobalVar = enum.auto()
     LocalVar = enum.auto()
-
-
-# @dataclass(order=True, unsafe_hash=True)
-# class AnnotSegment:
-#     """A segment of an annotation path. The id records how many segments of the same name
-#     has occurred before this segment."""
-
-#     name: str
-#     id: int
-
-#     def __str__(self):
-#         return self.name if self.id == 0 else f"{self.name}[{self.id}]"
 
 
 @dataclass(order=True, unsafe_hash=True)
@@ -303,14 +288,28 @@ class StmtsAdder(cst.CSTTransformer):
         return updated.with_changes(body=body_type(self.stmts) + updated.body)
 
 
+class MypyFeedback(NamedTuple):
+    position: CodePosition
+    message: str
+    error_code: str
+
+
 @dataclass
 class MypyResult:
     # total number of errors in all files
     num_errors: int
     # records the errors in each file and their locations. Absolute paths are recorded.
-    error_dict: dict[Path, list[tuple[CodePosition, str]]]
+    error_dict: dict[Path, list[MypyFeedback]]
     # the original output by mypy
     output_str: str
+
+
+MypyErrorsToIgnore = [
+    # currently we use a very simple way handle Literal types.
+    "Literal[...] must have at least one parameter",
+]
+
+MypyErrorCodesToIgnore = {"valid-type"}
 
 
 class MypyChecker:
@@ -325,6 +324,7 @@ class MypyChecker:
         "--show-column-numbers",
         "--show-error-codes",
         "--soft-error-limit=-1",
+        "--no-strict-optional",  # to be compatible with training data
         "--config-file=",
         # "--check-untyped-defs",  # turn off to improve performance
     ]
@@ -389,6 +389,42 @@ class MypyChecker:
         return MypyChecker.parse_mypy_output(out, cmd, cwd=proj)
 
     @staticmethod
+    def check_code(
+        code: str, cwd: Optional[Path] = None, mypy_path: Path = None
+    ) -> MypyResult | str:
+        if mypy_path is None:
+            mypy_path = proj_root() / ".venv/bin/mypy"
+        if cwd is None:
+            proc = multiprocessing.current_process()
+            cwd = proj_root() / "mypy_temp" / proc.name
+        cwd.mkdir(parents=True, exist_ok=True)
+
+        (cwd / "code.py").write_text(code)
+        try:
+            cmd = [
+                "python",
+                str(mypy_path),
+                "code.py",
+                "--check-untyped-defs",
+                *MypyChecker.TypeCheckFlags,
+            ]
+            out = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+            )
+        finally:
+            os.remove(cwd / "code.py")
+        return MypyChecker.parse_mypy_output(out, cmd, cwd)
+
+    @staticmethod
+    def clear_temp_cache():
+        cwd = proj_root() / "mypy_temp"
+        if cwd.exists():
+            shutil.rmtree(cwd)
+
+    @staticmethod
     def parse_mypy_output(
         output: subprocess.CompletedProcess[str],
         cmd: list[str],
@@ -397,22 +433,29 @@ class MypyChecker:
         lines = output.stdout.splitlines()
         if len(lines) == 0:
             return f"mypy failed. Command: `{' '.join(cmd)}` in cwd='{cwd}'\nError: {output.stderr}"
-        error_dict: dict[Path, list[tuple[CodePosition, str]]] = {}
+        error_dict: dict[Path, list[MypyFeedback]] = {}
         for l in lines:
-            m = re.match(r"(.*\.py):(\d+:\d+): error: (.+) \[[a-z\-]+\]", l)
+            m = re.match(r"(.*\.py|<string>):(\d+:\d+): error: (.+) \[([a-z\-]+)\]", l)
             if m is not None:
                 file = Path(cwd / m.group(1)).resolve()
                 line, col = map(int, m.group(2).split(":"))
-                error = m.group(3)
+                msg = m.group(3)
+                error_code = m.group(4)
+                if error_code in MypyErrorCodesToIgnore or any(
+                    e in msg for e in MypyErrorsToIgnore
+                ):
+                    continue
                 if file not in error_dict:
                     error_dict[file] = []
-                error_dict[file].append((CodePosition(line, col), error))
+                fb = MypyFeedback(CodePosition(line, col), msg, error_code)
+                error_dict[file].append(fb)
 
-        m = re.match(r"Found (\d+) errors? in", lines[-1])
-        if m is None:
-            num_errors = 0
-        else:
-            num_errors = int(m.group(1))
+        # m = re.match(r"Found (\d+) errors? in", lines[-1])
+        # if m is None:
+        #     num_errors = 0
+        # else:
+        #     num_errors = int(m.group(1))
+        num_errors = sum(map(len, error_dict.values()))
 
         # total_errors = sum(map(len, error_dict.values()))
         # unfortunately, some errors do not have a column number.
@@ -677,19 +720,36 @@ def test_inference_performance(src_root, src_files=None, silent=True):
 class PythonType:
     head: tuple[str, ...]
     args: tuple["PythonType", ...] = ()
+    is_quoted: bool = False
 
     def __str__(self):
         h = ".".join(self.head)
-        rest = f"[{', '.join(map(str, self.args))}]"
-        if h == "[List]":
-            return rest
-        if self.args:
-            return f"{h}{rest}"
+        out: str
+        if h.startswith("<"):
+            match h:
+                case "<List>":
+                    out = f"[{', '.join(map(str, self.args))}]"
+                case "<|>":
+                    out = " | ".join(map(str, self.args))
+                case "<FuncCall>":
+                    out = "_FuncCall_"
+                case "<Tuple>":
+                    if len(self.args) == 1:
+                        out = f"({str(self.args[0])},)"
+                    else:
+                        out = f"({', '.join(map(str, self.args))})"
+                case _:
+                    raise ValueError(f"Don't know how to handle special head: '{h}'")
+        elif len(self.args) == 0:
+            out = h
         else:
-            return h
+            out = f"{h}[{', '.join(map(str, self.args))}]"
+        if self.is_quoted:
+            out = f'"{out}"'
+        return out
 
     def __repr__(self):
-        return self.__str__()
+        return f"PythonType('{str(self)}')"
 
     def all_heads(self):
         """Return an iterator of all the type heads."""
@@ -706,7 +766,7 @@ class PythonType:
 
     def is_union(self) -> bool:
         """Check whether the type is a union type."""
-        return self.head_name() == "Union"
+        return self.head_name() == "Union" or self.head_name() == "<|>"
 
     @staticmethod
     def Any() -> "PythonType":
@@ -776,7 +836,9 @@ def parse_type_from_ast(tree: ast.expr) -> PythonType:
         case ast.Name() | ast.Attribute():
             return PythonType(parse_qualified_name(tree))
         case ast.Constant(value=str() as s):
-            return parse_type_from_ast(ast.parse(s, mode="eval").body)
+            ty = parse_type_from_ast(ast.parse(s, mode="eval").body)
+            ty.is_quoted = True
+            return ty
         case ast.Constant(value=v):
             if v == None:
                 return PythonType(("None",))
@@ -786,7 +848,7 @@ def parse_type_from_ast(tree: ast.expr) -> PythonType:
                 return PythonType((str(v),))
         case ast.List(elts=elts):  # this can happen inside Callable
             args = tuple(map(parse_type_from_ast, elts))
-            return PythonType(("[List]",), args)
+            return PythonType(("<List>",), args)
         case ast.Subscript(value=(ast.Attribute() | ast.Name()) as v, slice=slice):
             head = parse_qualified_name(v)
             if head[-1] == "Literal":
@@ -799,12 +861,12 @@ def parse_type_from_ast(tree: ast.expr) -> PythonType:
             return PythonType(head, args)
         case ast.BinOp(left=left, right=right, op=ast.BitOr()):
             return PythonType(
-                ("Union",), (parse_type_from_ast(left), parse_type_from_ast(right))
+                ("<|>",), (parse_type_from_ast(left), parse_type_from_ast(right))
             )
         case ast.Call():
-            return PythonType(("[FuncCall]",))
+            return PythonType(("<FuncCall>",))
         case ast.Tuple(elts=elts):
-            return PythonType(("Tuple",), tuple(map(parse_type_from_ast, elts)))
+            return PythonType(("<Tuple>",), tuple(map(parse_type_from_ast, elts)))
         case _:
             raise ArgumentError(
                 None, f"Unsupported ast type: {ast.dump(tree, include_attributes=True)}"

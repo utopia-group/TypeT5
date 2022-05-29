@@ -2,6 +2,7 @@ import ast
 import logging
 import os
 import pickle
+import shutil
 import time
 from abc import ABC, abstractmethod
 from asyncio import current_task
@@ -14,6 +15,7 @@ from typing import (
     Any,
     Callable,
     Generator,
+    Generic,
     Iterable,
     Optional,
     Sequence,
@@ -25,6 +27,7 @@ from typing import (
 import libcst as cst
 import numpy as np
 import pandas as pd
+from IPython.display import display
 from libcst.metadata import CodePosition, CodeRange
 from sklearn.metrics import confusion_matrix
 from tqdm.auto import tqdm
@@ -234,6 +237,11 @@ class TaskMonitor(ABC):
         pass
 
 
+class EmptyLoggingMonitor(TaskMonitor):
+    def log_task(self, name: str):
+        pass
+
+
 @dataclass
 class TaskLoggingMonitor(TaskMonitor):
     monitor_name: str
@@ -267,7 +275,11 @@ import json
 import urllib
 
 
-def pushover_alert(title: str, message: str, print_to_console: bool = True) -> None:
+def pushover_alert(
+    title: str, message: str, print_to_console: bool = True, notify: bool = True
+) -> None:
+    "If notify=False, will only print to console."
+
     conn = http.client.HTTPSConnection("api.pushover.net:443")
     config_file = proj_root() / "config/pushover.json"
     if print_to_console:
@@ -276,7 +288,7 @@ def pushover_alert(title: str, message: str, print_to_console: bool = True) -> N
         print(
             f"No pushover config file found at {config_file}. Not able to push message."
         )
-    else:
+    elif notify:
         config = json.loads(config_file.read_text())
         conn.request(
             "POST",
@@ -296,7 +308,9 @@ def pushover_alert(title: str, message: str, print_to_console: bool = True) -> N
 
 
 @contextmanager
-def run_long_task(name: str):
+def run_long_task(name: str, notify: bool = True):
+    "When notify=False, will only push notifiations when encountering errors."
+
     try:
         start = time.time()
         yield
@@ -304,4 +318,122 @@ def run_long_task(name: str):
         pushover_alert(f"Failed: {name}.", str(e))
         raise e
     time_taken = time.time() - start
-    pushover_alert(f"Finished: {name}.", f"Time taken: {time_taken:.1f}s")
+    pushover_alert(
+        f"Finished: '{name}'.",
+        f"Time taken: {time_taken:.1f}s",
+        notify=notify,
+    )
+
+
+class PickleCache:
+    def __init__(self, cache_dir: Path):
+        self.cache_dir = cache_dir
+
+    def cached(self, rel_path: Path | str, func: Callable[[], T1]) -> T1:
+        path = self.cache_dir / rel_path
+        if not path.exists():
+            value = func()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            print(f"[PickleCache] Saving to cache: '{path}'")
+            with path.open("wb") as f:
+                pickle.dump(value, f)
+            return value
+        else:
+            print(f"[PickleCache] Loading from cache: '{path}'")
+            with path.open("rb") as f:
+                return pickle.load(f)
+
+    def set(self, rel_path: Path | str, value: T1):
+        path = self.cache_dir / rel_path
+        with path.open("wb") as f:
+            pickle.dump(value, f)
+
+    def remove(self, rel_path: Path | str):
+        path = self.cache_dir / rel_path
+        if path.exists():
+            path.unlink()
+
+    def clear(self):
+        if self.cache_dir.exists():
+            logging.info(f"Clearing cache: at: {self.cache_dir}")
+            shutil.rmtree(self.cache_dir)
+        else:
+            logging.warning(f"No cache found at: {self.cache_dir}, skip clearing.")
+
+
+def assert_eq(left: T1, right: T1) -> None:
+    if left != right:
+        raise AssertionError(f"{left} != {right}")
+
+
+def scalar_stats(xs) -> dict[str, float]:
+    x = np.array(xs)
+    return {
+        "mean": x.mean(),
+        "median": np.median(x),
+        "min": x.min(),
+        "max": x.max(),
+    }
+
+
+def cumulative_counts(elems: Sequence[int]) -> tuple[list[int], list[int]]:
+    counts = Counter(elems)
+    keys = sorted(counts.keys())
+    n = 0
+    ys = []
+    for k in keys:
+        n += counts[k]
+        ys.append(n)
+    return keys, ys
+
+
+def pickle_dump(file: Path, obj):
+    file.parent.mkdir(parents=True, exist_ok=True)
+    with file.open("wb") as f:
+        pickle.dump(obj, f)
+
+
+def pickle_load(file: Path):
+    with file.open("rb") as f:
+        return pickle.load(f)
+
+
+def get_subset(data, key: slice | Iterable):
+    if isinstance(key, slice):
+        return data[key]
+    else:
+        return [data[i] for i in key]
+
+
+def pretty_print_dict(
+    d: dict,
+    level: int = 0,
+    max_show_level: int = 1000,
+    float_precision: int = 5,
+):
+    for k, v in d.items():
+        print("   " * level, end="")
+        if isinstance(v, float):
+            print(f"{k}: %.{float_precision}g" % v)
+        elif isinstance(v, dict) or isinstance(v, list):
+            if level >= max_show_level:
+                print(f"{k}: ...")
+            else:
+                print(f"{k}:")
+                if isinstance(v, list):
+                    v = {f"[{i}]": e for i, e in enumerate(v)}
+                pretty_print_accuracies(
+                    v, level=level + 1, max_show_level=max_show_level
+                )
+        else:
+            print(f"{k}: {v}")
+
+
+def pretty_print_accuracies(
+    accs: dict[str, Any],
+    level: int = 0,
+    max_show_level: int = 1000,
+):
+    pretty_print_dict(
+        accs, level=level, max_show_level=max_show_level, float_precision=4
+    )
