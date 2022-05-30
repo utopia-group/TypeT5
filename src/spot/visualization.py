@@ -8,35 +8,42 @@ from spot.data import ChunkedDataset, CtxArgs, PythonType
 from spot.utils import *
 
 
+def visualize_chunks(chunks: ChunkedDataset, height="500px") -> widgets.VBox:
+    def show(i):
+        d = chunks.data[i]
+        print("Labels:", chunks.tokenizer.decode(d["labels"]))
+        print("============== code =================")
+        print(chunks.tokenizer.decode(d["input_ids"]))
+
+    return interactive_sized(show, {"i": (0, len(chunks.data) - 1)}, height=height)
+
+
+def visualize_code_sequence(contents: Sequence[str]):
+    els = [
+        widgets.HTML(
+            "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30); }'>"
+            + colorize_code_html(html.escape(contents[i]))
+            + "</pre>"
+        )
+        for i in range(len(contents))
+    ]
+
+    return visualize_sequence(els)
+
+
 def visualize_batch(
     dataset: ChunkedDataset,
     i: int,
     preds: list[list[PythonType]],
-    tokenizer: TokenizerSPOT,
-    ctx_args: Optional[CtxArgs],
 ) -> str:
     pred_types = preds[i]
+    tokenizer = dataset.tokenizer
     typpes_enc = [
         tokenizer.encode(str(t), add_special_tokens=False) for t in pred_types
     ]
 
     label_types = dataset.chunks_info[i].types
     code_tks = inline_predictions(dataset.data["input_ids"][i], typpes_enc, tokenizer)
-    if ctx_args is not None:
-        sep_1 = tokenizer.encode(
-            "\n---------⬆context⬆---------\n", add_special_tokens=False
-        )
-        sep_2 = tokenizer.encode(
-            "\n---------⬇context⬇---------\n", add_special_tokens=False
-        )
-        margin_left, _, margin_right = ctx_args.as_tuple()
-        code_tks = (
-            code_tks[:margin_left]
-            + sep_1
-            + code_tks[margin_left:-margin_right]
-            + sep_2
-            + code_tks[-margin_right:]
-        )
     code_dec = tokenizer.decode(code_tks, skip_special_tokens=False)
     code_dec = code_inline_extra_ids(code_dec, label_types)
     src_ids = sorted(list(set(dataset.chunks_info[i].src_ids)))
@@ -105,17 +112,22 @@ def visualize_sequence(
     )
 
 
-def visualize_code_sequence(contents: Sequence[str]):
-    els = [
-        widgets.HTML(
-            "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30); }'>"
-            + colorize_code_html(html.escape(contents[i]))
-            + "</pre>"
-        )
-        for i in range(len(contents))
-    ]
-
-    return visualize_sequence(els)
+def interactive_sized(
+    f,
+    kwargs: dict,
+    height: str = "500px",
+) -> widgets.VBox:
+    out = widgets.interactive(f, **kwargs)
+    panel = out.children[-1]
+    if height is not None:
+        panel.layout.height = height
+    box_layout = widgets.Layout(overflow="scroll")
+    return widgets.VBox(
+        [
+            *out.children[:-1],
+            widgets.Box((panel,), layout=box_layout),
+        ]
+    )
 
 
 def colorize_code_html(code: str) -> str:

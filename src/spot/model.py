@@ -1,16 +1,12 @@
-import enum
-import logging
 import random
 from collections import Counter
 from copy import copy, deepcopy
 
 import numpy as np
-import torch
 from datasets import Dataset
 from mypy_extensions import mypyc_attr
 from torch.utils.data import DataLoader, RandomSampler
 from transformers import DataCollatorForSeq2Seq
-from transformers.trainer import Trainer
 
 from spot.data import (
     ChunkedDataset,
@@ -27,8 +23,8 @@ from spot.utils import *
 
 @dataclass
 class DecodingArgs:
-    ctx_args: Optional[CtxArgs]
-    sampling_batch_size: int
+    ctx_args: CtxArgs
+    sampling_max_tokens: int
     max_workers: int
     max_tokens_per_type: int = 10
     do_sample: bool = False
@@ -36,8 +32,6 @@ class DecodingArgs:
 
     def scale_ctx_size(self, factor: float) -> "DecodingArgs":
         result = deepcopy(self)
-        if self.ctx_args is None:
-            return result
         assert result.ctx_args is not None
         """Scale the context size of the model by the given factor, while keeping the window size the same.
         Also scale down the sampling batch size accordingly."""
@@ -47,15 +41,15 @@ class DecodingArgs:
         result.ctx_args.ctx_size = ctx_size
         result.ctx_args.left_margin = left_margin
         result.ctx_args.right_margin = right_margin
-        result.sampling_batch_size = round(self.sampling_batch_size / factor**2)
+        result.sampling_max_tokens = round(self.sampling_max_tokens / factor**2)
 
         return result
 
 
 @dataclass
 class ModelTrainingArgs:
-    train_batch_size: int
-    eval_batch_size: int
+    train_max_tokens: int
+    eval_max_tokens: int
     max_epochs: int
     accumulate_grad_batches: int | dict | None = None
 
@@ -104,9 +98,9 @@ class ModelWrapper:
         collator = DataCollatorForSeq2Seq(self.tokenizer, model)
         loader = dynamic_dataloader(
             dataset,  # type: ignore
-            batch_size=self.args.sampling_batch_size,
+            max_tokens=self.args.sampling_max_tokens,
             collate_fn=collator,
-            train_per_file=self.args.ctx_args is None,
+            shuffle=True,
         )
         device = model.device
         pred_types = dict[int, list[PythonType]]()
@@ -150,10 +144,7 @@ class ModelWrapper:
     ) -> tuple[dict, ChunkedDataset, list[list[PythonType]]]:
         """Convinient method to preprocess the src according to the model's ctx_args and evaluate the (R0) accuracy."""
         chunks = src_data.to_chunks(
-            self.tokenizer,
-            self.args.ctx_args,
-            max_workers=self.args.max_workers,
-            tqdm_args=tqdm_args,
+            self.tokenizer, self.args.ctx_args, tqdm_args=tqdm_args
         )
         preds = self.predict(chunks.data, tqdm_args=tqdm_args)
         accs = preds_to_accuracies(preds, chunks, normalize_types=True)
@@ -165,20 +156,10 @@ class ModelWrapper:
 
 def dynamic_dataloader(
     dataset: Dataset,
-    batch_size: int,
+    max_tokens: int,
     collate_fn,
-    train_per_file: bool,
     shuffle: bool = False,
 ):
-
-    if not train_per_file:
-        return DataLoader(
-            cast(Any, dataset),
-            batch_size=batch_size,
-            collate_fn=collate_fn,
-            shuffle=shuffle,
-        )
-
     ex_sizes = [len(x) for x in dataset["input_ids"]]
     ids = list(range(len(ex_sizes)))
     if shuffle:
@@ -187,7 +168,7 @@ def dynamic_dataloader(
     batches = list[list[int]]()
     while len(ids) > 0:
         w = ex_sizes[ids[0]]
-        n = max(1, batch_size // w)
+        n = max(1, max_tokens // w)
         batches.append(ids[:n])
         ids = ids[n:]
     if shuffle:

@@ -339,16 +339,34 @@ def chunk_srcs(
         files=files,
         file2src={f: s.origin_code for f, s in zip(files, srcs)},
         file2repo={f: (repos_root / s.repo).resolve() for f, s in zip(files, srcs)},
+        tokenizer=tokenizer,
     )
+
+
+def compute_ctx_sizes(
+    src_len, window_start: int, ctx_args: "CtxArgs"
+) -> tuple[int, int, int]:
+    left_margin_start = max(0, window_start - ctx_args.left_margin)
+    left_margin_size = window_start - left_margin_start
+    right_margin_end = left_margin_start + ctx_args.ctx_size
+    if right_margin_end >= src_len:
+        # we don't need a right margin
+        right_margin_size = 0
+        window_size = src_len - left_margin_size
+    else:
+        right_margin_size = ctx_args.right_margin
+        window_size = ctx_args.ctx_size - left_margin_size - right_margin_size
+    return left_margin_size, window_size, right_margin_size
 
 
 def chunk_srcs_per_file(
     repos_root: Path,
     srcs: Sequence[TokenizedSrc],
+    ctx_args: "CtxArgs",
     tokenizer: TokenizerSPOT,
     tqdm_args: dict,
 ) -> "ChunkedDataset":
-    """Turn each file into a single chunk."""
+    """Turn each file into a single chunk when possible, or break it down into multiple chunks."""
 
     chunks: dict[str, list] = {
         "input_ids": [],
@@ -361,28 +379,51 @@ def chunk_srcs_per_file(
     special_tks = [tokenizer.additional_special_tokens_ids[99 - i] for i in range(100)]
     bos_id, eos_id = not_none(tokenizer.bos_token_id), not_none(tokenizer.eos_token_id)
 
-    for src_id, src in enumerate(tqdm(srcs, **tqdm_args)):
-        tks = copy(src.tokenized_code)
-        for i in range(len(src.types)):
-            label_pos = src.types_pos[i]
-            tks[label_pos] = special_tks[i]
-        chunks["input_ids"].append(tks)
+    chunk_id = 0
 
-        label_ids = [bos_id]
-        for i, type_tks in enumerate(src.types_tks):
-            label_ids.append(special_tks[i])
-            label_ids.extend(type_tks)
-        label_ids.append(eos_id)
-        chunks["labels"].append(label_ids)
-
-        chunks["n_labels"].append(len(src.types))
-        chunks["chunk_id"].append(src_id)
-        meta = SrcChunkInfo(
-            src.types,
-            src.types_info,
-            src_ids=[src_id] * len(src.types),
+    def src_to_chunks(src: TokenizedSrc, src_id: int, window_start: int) -> None:
+        l_size, w_size, r_size = compute_ctx_sizes(
+            len(src.tokenized_code), window_start, ctx_args
         )
-        chunks_info.append(meta)
+        tks = src.tokenized_code[window_start - l_size : window_start + w_size + r_size]
+        label_ids = [bos_id]
+        types = list[PythonType]()
+        types_info = list[AnnotInfo]()
+        n_labels = 0
+        for i in range(len(src.types)):
+            label_pos = src.types_pos[i] - (window_start - l_size)
+            if l_size <= label_pos < l_size + w_size:
+                tks[label_pos] = special_tks[n_labels]
+                label_ids.append(special_tks[n_labels])
+                label_ids.extend(src.types_tks[i])
+                types.append(src.types[i])
+                types_info.append(src.types_info[i])
+                n_labels += 1
+            if n_labels >= 100:
+                break  # can't handle more than 100 labels
+        label_ids.append(eos_id)
+
+        if n_labels > 0:
+            assert len(tks) <= ctx_args.ctx_size
+            chunks["input_ids"].append(tks)
+            chunks["labels"].append(label_ids)
+            chunks["n_labels"].append(n_labels)
+            nonlocal chunk_id
+            chunks["chunk_id"].append(chunk_id)
+            chunk_id += 1
+            meta = SrcChunkInfo(
+                types,
+                types_info,
+                src_ids=[src_id] * n_labels,
+            )
+            chunks_info.append(meta)
+
+        new_start = window_start + w_size
+        if new_start < len(src.tokenized_code):
+            src_to_chunks(src, src_id, new_start)
+
+    for src_id, src in enumerate(tqdm(srcs, desc="chunk_srcs_per_file", **tqdm_args)):
+        src_to_chunks(src, src_id, 0)
 
     files = [(repos_root / s.file).resolve() for s in srcs]
     return ChunkedDataset(
@@ -391,6 +432,7 @@ def chunk_srcs_per_file(
         files=files,
         file2src={f: s.origin_code for f, s in zip(files, srcs)},
         file2repo={f: (repos_root / s.repo).resolve() for f, s in zip(files, srcs)},
+        tokenizer=tokenizer,
     )
 
 
@@ -450,23 +492,14 @@ class SrcDataset:
     def to_chunks(
         self,
         tokenizer: TokenizerSPOT,
-        ctx_args: Optional["CtxArgs"],
-        max_workers: int,
+        ctx_args: "CtxArgs",
         tqdm_args: dict = {},
     ) -> "ChunkedDataset":
         srcs = self.srcs_with_labels()
-        if ctx_args is None:
-            chunks = chunk_srcs_per_file(self.repos_root, srcs, tokenizer, tqdm_args)
-        else:
-            chunks = chunk_srcs(
-                self.repos_root,
-                srcs,
-                tokenizer,
-                ctx_args,
-                max_workers=max_workers,
-                tqdm_args=tqdm_args,
-            )
-        chunks.verify_labels(self, tokenizer)
+        chunks = chunk_srcs_per_file(
+            self.repos_root, srcs, ctx_args, tokenizer, tqdm_args
+        )
+        chunks.verify_labels(self, tokenizer, tqdm_args=tqdm_args)
         return chunks
 
     def file2src(self):
@@ -676,7 +709,7 @@ def load_src_datasets(
                 n_train = len(src.all_srcs) // data_reduction
                 src = src[:n_train]
             if quicktest:
-                ids = range(0, len(src.all_srcs), max(1, len(src.all_srcs) // 20))
+                ids = range(0, len(src.all_srcs), max(1, len(src.all_srcs) // 10))
                 src = src[ids]
             src_datasets[n] = src
     return src_datasets
@@ -730,6 +763,9 @@ class CommentRemover(cst.CSTTransformer):
             return updated.with_changes(body=new_body)
         else:
             return updated
+
+    def leave_Module(self, node, updated):
+        return self.leave_IndentedBlock(node, updated)
 
     def leave_EmptyLine(self, node: cst.EmptyLine, updated: cst.EmptyLine):
         if updated.comment is not None:
@@ -956,6 +992,7 @@ class ChunkedDataset:
     files: list[Path]
     file2src: dict[Path, str]
     file2repo: dict[Path, Path]
+    tokenizer: TokenizerSPOT
 
     def __post_init__(self):
         assert_eq(len(self.data), len(self.chunks_info))
@@ -973,6 +1010,7 @@ class ChunkedDataset:
             files=self.files,
             file2src=self.file2src,
             file2repo=self.file2repo,
+            tokenizer=self.tokenizer,
         )
 
     def __len__(self):
@@ -982,7 +1020,7 @@ class ChunkedDataset:
     def __repr__(self):
         return f"ChunkedDataset(num_chunks={len(self.chunks_info)}, num_srcs={len(self.files)})"
 
-    def verify_labels(self, srcs: SrcDataset, tokenizer: TokenizerSPOT):
+    def verify_labels(self, srcs: SrcDataset, tokenizer: TokenizerSPOT, tqdm_args={}):
         """
         Verify that the labels in the dataset match the source code.
         """
@@ -993,7 +1031,8 @@ class ChunkedDataset:
                 info.path: ty for ty, info in zip(src.types, src.types_info)
             }
             assert_eq(len(src_path_map[f]), len(src.types))
-        for input, chunk in zip(self.data["input_ids"], self.chunks_info):
+        input_ids = tqdm(self.data["input_ids"], desc="verify_labels", **tqdm_args)
+        for input, chunk in zip(input_ids, self.chunks_info):
             for info, ty, sid in zip(chunk.annots_info, chunk.types, chunk.src_ids):
                 file = self.files[sid]
                 assert file in src_path_map, f"{file} not in file2src."
@@ -1249,4 +1288,4 @@ def get_model_name(
     drop_tag = "-drop_comments" if drop_comments else ""
     data_tag = "" if data_reduction == 1 else f"-data_reduction_{data_reduction}"
     round_tag = f"-R{spot_round}"
-    return f"{test_tag}SPOT-model{round_tag}-{ctx_sizes}{drop_tag}{data_tag}"
+    return f"{test_tag}SPOT-model-per_file{round_tag}-{ctx_sizes}{drop_tag}{data_tag}"

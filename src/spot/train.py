@@ -50,6 +50,7 @@ def train_spot_model(
     gpus: list[int] = [0],
     quicktest=False,
     use_small_model=False,
+    ckpt_interval: int = 500,
 ) -> Tuple[ModelWrapper, dict]:
     os.chdir(proj_root())
 
@@ -61,13 +62,12 @@ def train_spot_model(
     tokenizer: TokenizerSPOT = TokenizerSPOT.from_pretrained(model_path)
     lit_model = TrainModelWrapper(model_path, dec_args, record_batches=record_batches)
     wrapper = lit_model.wrapper
-    train_per_file = dec_args.ctx_args is None
 
     chunks: dict[str, ChunkedDataset] = {}
     with run_long_task("Preparing chunked datasets", notify=False):
         for n in ["valid", "test", "train"]:
             src = src_datasets[n]
-            chunks[n] = src.to_chunks(tokenizer, dec_args.ctx_args, max_workers=20)
+            chunks[n] = src.to_chunks(tokenizer, dec_args.ctx_args)
 
     wandb_logger = WandbLogger(
         project=model_name,
@@ -77,7 +77,6 @@ def train_spot_model(
         {
             "decoding_args": dec_args,
             "train_args": train_args,
-            "train_per_file": train_per_file,
         }
     )
 
@@ -87,7 +86,7 @@ def train_spot_model(
     if running_dir.exists():
         shutil.rmtree(running_dir)
     running_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_interval = 1 if quicktest else 350
+    ckpt_interval = 1 if quicktest else ckpt_interval
 
     extra_callbacks = []
     if record_batches:
@@ -96,7 +95,6 @@ def train_spot_model(
                 dirpath=running_dir / "models",
                 save_top_k=-1,
                 filename="{step}",
-                verbose=True,
                 every_n_train_steps=ckpt_interval,
                 save_weights_only=True,
             )
@@ -134,16 +132,14 @@ def train_spot_model(
     collate_fn = DataCollatorForSeq2Seq(lit_model.tokenizer, lit_model.model)
     train_dataloader = dynamic_dataloader(
         cast(Any, chunks["train"].data),
-        batch_size=train_args.train_batch_size,
+        max_tokens=train_args.train_max_tokens,
         collate_fn=collate_fn,
-        train_per_file=train_per_file,
         shuffle=True,
     )
     valid_dataloader = dynamic_dataloader(
         cast(Any, chunks["valid"].data),
-        batch_size=train_args.eval_batch_size,
+        max_tokens=train_args.eval_max_tokens,
         collate_fn=collate_fn,
-        train_per_file=train_per_file,
         shuffle=True,  # doesn't hurt
     )
 
