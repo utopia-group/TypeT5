@@ -1,4 +1,5 @@
 import logging
+import math
 import pickle
 import random
 import shutil
@@ -275,88 +276,39 @@ class _TokenizedSrcHelper:
         return self.dict_to_tokenized_src(d)
 
 
-def chunk_srcs(
-    repos_root: Path,
-    srcs: Sequence[TokenizedSrc],
-    tokenizer: TokenizerSPOT,
-    ctx_args: "CtxArgs",
-    max_workers: int,
-    tqdm_args: dict,
-) -> "ChunkedDataset":
-    """Chunk srcs into batches of size ctx_size. Only types in
-    the middle parts of the batch are treated as predition labels."""
-
-    all_tks = list[int | tuple]()
-    # mask_id = not_none(tokenizer.mask_token_id)
-
-    # first, concat all src tokens, replace masked tokens with tuples.
-    for src_id, src in enumerate(srcs):
-        offset = len(all_tks)
-        all_tks.extend(src.tokenized_code)
-        for i in range(len(src.types)):
-            type_tuple = (src.types[i], src.types_info[i], src.types_tks[i], src_id)
-            label_pos = offset + src.types_pos[i]
-            # assert_eq(all_tks[label_pos], mask_id)
-            all_tks[label_pos] = type_tuple
-
-    # then, use a sliding window over `all_tks` with step size `stride` to turn them into masked chunks
-    helper = _ChunkingHelper(tokenizer, ctx_args)
-    ctx_size = ctx_args.ctx_size
-    stride = ctx_args.window_size
-
-    chunk_tks = [all_tks[i : i + ctx_size] for i in range(0, len(all_tks), stride)]
-    chunk_outputs = process_map(
-        helper.process_chunk,
-        chunk_tks,
-        desc="processing chunks",
-        max_workers=max_workers,
-        chunksize=max(1, len(chunk_tks) // (8 * max_workers)),
-        **tqdm_args,
-    )
-
-    chunks: dict[str, list] = {
-        "input_ids": [],
-        "labels": [],
-        "n_labels": [],
-        "chunk_id": [],
-    }
-    chunks_info: list[SrcChunkInfo] = []
-
-    for i, chunk in enumerate(chunk_outputs):
-        if chunk is None:
-            continue
-        meta: SrcChunkInfo = chunk["meta"]
-        chunks["input_ids"].append(chunk["input_ids"])
-        chunks["labels"].append(chunk["labels"])
-        chunks["n_labels"].append(len(meta.types))
-        chunks["chunk_id"].append(i)
-        chunks_info.append(meta)
-
-    files = [(repos_root / s.file).resolve() for s in srcs]
-    return ChunkedDataset(
-        data=Dataset.from_dict(chunks),
-        chunks_info=chunks_info,
-        files=files,
-        file2src={f: s.origin_code for f, s in zip(files, srcs)},
-        file2repo={f: (repos_root / s.repo).resolve() for f, s in zip(files, srcs)},
-        tokenizer=tokenizer,
-    )
-
-
-def compute_ctx_sizes(
-    src_len, window_start: int, ctx_args: "CtxArgs"
-) -> tuple[int, int, int]:
+def _compute_ctx(
+    src: TokenizedSrc, window_start: int, ctx_args: "CtxArgs"
+) -> tuple[list[int], tuple[int, int]]:
+    src_len = len(src.tokenized_code)
     left_margin_start = max(0, window_start - ctx_args.left_margin)
     left_margin_size = window_start - left_margin_start
+
+    max_window_size = ctx_args.window_size
+    label_ids = list[int]()
+
     right_margin_end = left_margin_start + ctx_args.ctx_size
     if right_margin_end >= src_len:
-        # we don't need a right margin
-        right_margin_size = 0
-        window_size = src_len - left_margin_size
-    else:
-        right_margin_size = ctx_args.right_margin
-        window_size = ctx_args.ctx_size - left_margin_size - right_margin_size
-    return left_margin_size, window_size, right_margin_size
+        right_margin_end = src_len
+        max_window_size = right_margin_end - window_start
+        assert max_window_size > 0
+
+    for i in range(len(src.types)):
+        label_pos = src.types_pos[i] - window_start
+        if 0 <= label_pos < max_window_size:
+            label_ids.append(i)
+        if len(label_ids) >= ctx_args.max_labels:
+            break
+
+    window_size = label_pos + 1
+    right_margin_end = min(
+        right_margin_end, window_start + window_size + ctx_args.right_margin
+    )
+
+    assert right_margin_end - left_margin_start <= ctx_args.ctx_size
+    assert left_margin_size <= ctx_args.left_margin
+    assert len(label_ids) <= ctx_args.max_labels
+
+    return label_ids, (left_margin_start, right_margin_end)
 
 
 def chunk_srcs_per_file(
@@ -382,48 +334,44 @@ def chunk_srcs_per_file(
     chunk_id = 0
 
     def src_to_chunks(src: TokenizedSrc, src_id: int, window_start: int) -> None:
-        l_size, w_size, r_size = compute_ctx_sizes(
-            len(src.tokenized_code), window_start, ctx_args
-        )
-        tks = src.tokenized_code[window_start - l_size : window_start + w_size + r_size]
-        label_ids = [bos_id]
+        label_ids, (ctx_start, ctx_end) = _compute_ctx(src, window_start, ctx_args)
+        tks = src.tokenized_code[ctx_start:ctx_end]
+        label_tkns = [bos_id]
         types = list[PythonType]()
         types_info = list[AnnotInfo]()
-        n_labels = 0
-        for i in range(len(src.types)):
-            label_pos = src.types_pos[i] - (window_start - l_size)
-            if l_size <= label_pos < l_size + w_size:
-                tks[label_pos] = special_tks[n_labels]
-                label_ids.append(special_tks[n_labels])
-                label_ids.extend(src.types_tks[i])
-                types.append(src.types[i])
-                types_info.append(src.types_info[i])
-                n_labels += 1
-            if n_labels >= 100:
-                break  # can't handle more than 100 labels
-        label_ids.append(eos_id)
+        for i, l_id in enumerate(label_ids):
+            label_pos = src.types_pos[l_id] - ctx_start
+            tks[label_pos] = special_tks[i]
+            label_tkns.append(special_tks[i])
+            label_tkns.extend(src.types_tks[l_id])
+            types.append(src.types[l_id])
+            types_info.append(src.types_info[l_id])
+        label_tkns.append(eos_id)
 
-        if n_labels > 0:
-            assert len(tks) <= ctx_args.ctx_size
-            chunks["input_ids"].append(tks)
-            chunks["labels"].append(label_ids)
-            chunks["n_labels"].append(n_labels)
-            nonlocal chunk_id
-            chunks["chunk_id"].append(chunk_id)
-            chunk_id += 1
-            meta = SrcChunkInfo(
-                types,
-                types_info,
-                src_ids=[src_id] * n_labels,
-            )
-            chunks_info.append(meta)
+        assert len(label_ids) > 0
+        assert len(tks) <= ctx_args.ctx_size
+        chunks["input_ids"].append(tks)
+        chunks["labels"].append(label_tkns)
+        chunks["n_labels"].append(len(label_ids))
+        nonlocal chunk_id
+        chunks["chunk_id"].append(chunk_id)
+        chunk_id += 1
+        meta = SrcChunkInfo(
+            types,
+            types_info,
+            src_ids=[src_id] * len(label_ids),
+        )
+        chunks_info.append(meta)
 
-        new_start = window_start + w_size
-        if new_start < len(src.tokenized_code):
+        if len(src.types) > label_ids[-1] + 1:
+            new_start = src.types_pos[label_ids[-1] + 1]
             src_to_chunks(src, src_id, new_start)
 
     for src_id, src in enumerate(tqdm(srcs, desc="chunk_srcs_per_file", **tqdm_args)):
-        src_to_chunks(src, src_id, 0)
+        if len(src.types) == 0:
+            continue
+        window_start = src.types_pos[0]
+        src_to_chunks(src, src_id, window_start)
 
     files = [(repos_root / s.file).resolve() for s in srcs]
     return ChunkedDataset(
@@ -843,132 +791,18 @@ class CtxArgs:
     ctx_size: int
     left_margin: int
     right_margin: int
-    types_in_ctx: bool = False  # whether to expand the label types in the context. If not, will replace them with <mask>.
+    max_labels: int = 16
 
     @property
     def window_size(self) -> int:
         return self.ctx_size - self.left_margin - self.right_margin
 
     def as_tuple(self):
-        "Returns (left_margin, window_size, right_margin)."
-        return self.left_margin, self.window_size, self.right_margin
+        "Returns (left_margin, window_size, right_margin, max_labels)."
+        return self.left_margin, self.window_size, self.right_margin, self.max_labels
 
     def __repr__(self):
-        return f"CtxArgs(left={self.left_margin}, window={self.window_size}, right={self.right_margin})"
-
-
-def _tokenize_masked_code(
-    src: dict, src_id: int, tokenizer: TokenizerSPOT
-) -> list[int | tuple]:
-    bos_id = tokenizer.bos_token_id
-    eos_id = tokenizer.eos_token_id
-    assert bos_id is not None
-    assert eos_id is not None
-
-    all_tks: list[int | tuple] = []
-    segs: list[str] = src["code_segs"]
-    types_labels: list[PythonType] = src["types"]
-    types_info: list[AnnotInfo] = src["annots_info"]
-
-    def as_tuple(p: CodePosition):
-        return (p.line, p.column)
-
-    labels_pos = [as_tuple(not_none(info.annot_range).start) for info in types_info]
-
-    if not issorted(labels_pos):
-        info_str = "\n".join(map(str, types_info))
-        raise RuntimeError(
-            "labels are not sorted according to their src locations:\n" + info_str
-        )
-
-    assert (
-        len(segs) == len(types_labels) + 1
-    ), f"len(segs)={len(segs)}, len(types_labels)={len(types_labels)}"
-    all_tks.append(bos_id)
-    for i in range(len(types_labels)):
-        all_tks.extend(tokenizer.encode(segs[i], add_special_tokens=False))
-        ty = types_labels[i]
-        ty_tks = tokenizer.encode(str(ty), add_special_tokens=False)
-        all_tks.append((ty, types_info[i], ty_tks, src_id))
-    all_tks.extend(tokenizer.encode(segs[-1], add_special_tokens=False))
-    all_tks.append(eos_id)
-    return all_tks
-
-
-@dataclass
-class _ChunkingHelper:
-    """Multi-process helper for `chunk_masked_code`."""
-
-    tokenizer: TokenizerSPOT
-    ctx_args: CtxArgs
-
-    def tokenize(self, src: tuple[int, dict]):
-        return _tokenize_masked_code(src[1], src[0], self.tokenizer)
-
-    def process_chunk(self, tks: list[int | tuple]):
-        args = self.ctx_args
-        tokenizer = self.tokenizer
-
-        def expand_types_as_tks(mixed_tks: list):
-            result = list[int]()
-            mask_id = not_none(tokenizer.mask_token_id)
-            for e in mixed_tks:
-                if isinstance(e, int):
-                    result.append(e)
-                else:
-                    if args.types_in_ctx:
-                        assert isinstance(e[2], list)
-                        result.extend(e[2])
-                    else:
-                        result.append(mask_id)
-            return result
-
-        left_margin, window_size, right_margin = args.as_tuple()
-        chunk_size = args.ctx_size
-
-        if len(tks) != chunk_size:
-            # add padding
-            tks.extend([not_none(tokenizer.pad_token_id)] * (chunk_size - len(tks)))
-        extra_id = 0
-        middle = []
-        types = list[PythonType]()
-        types_tks = list[list[int]]()
-        annots_info = list[AnnotInfo]()
-        src_ids = list[int]()
-
-        for tk in tks[left_margin : left_margin + window_size]:
-            if isinstance(tk, int):
-                middle.append(tk)
-            else:
-                ty, info, type_tks, src_id = tk
-                assert extra_id <= 99, "> 99 annotations in a single sequence"
-                middle.append(tokenizer.additional_special_tokens_ids[99 - extra_id])
-                types.append(ty)
-                types_tks.append(type_tks)
-                annots_info.append(info)
-                src_ids.append(src_id)
-                extra_id += 1
-        if extra_id == 0:
-            return None  # no types to predict in this chunk, discard
-        left_ctx = expand_types_as_tks(tks[:left_margin])[-left_margin:]
-        assert_eq(len(left_ctx), left_margin)
-        right_ctx = expand_types_as_tks(tks[-right_margin:])[:right_margin]
-        assert_eq(len(right_ctx), right_margin)
-        input_ids = left_ctx + middle + right_ctx
-        assert_eq(len(input_ids), chunk_size)
-
-        label_ids = [tokenizer.bos_token_id]
-        for i, type_tks in enumerate(types_tks):
-            label_ids.append(tokenizer.additional_special_tokens_ids[99 - i])
-            label_ids.extend(type_tks)
-        label_ids.append(tokenizer.eos_token_id)
-        meta = SrcChunkInfo(types, annots_info, src_ids)
-
-        return {
-            "input_ids": input_ids,
-            "labels": label_ids,
-            "meta": meta,
-        }
+        return f"CtxArgs(left={self.left_margin}, window={self.window_size}, right={self.right_margin}, max_labels={self.max_labels})"
 
 
 @dataclass
@@ -1179,9 +1013,6 @@ def R1_srcs_from_preds(
         max_workers=max_workers,
         tqdm_args=tqdm_args,
     )
-
-
-import math
 
 
 def type_accuracies(
