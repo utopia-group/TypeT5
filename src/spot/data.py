@@ -156,6 +156,20 @@ class TokenizedSrc:
     origin_code: str
     tokenized_code: list[int]  # with certain types masked out
 
+    def truncate(self, max_tkns: int) -> "TokenizedSrc":
+        n_types = 0
+        for p in self.types_pos:
+            if p < max_tkns:
+                n_types += 1
+        result = copy(self)
+        result.tokenized_code = self.tokenized_code[:max_tkns]
+        result.types = self.types[:n_types]
+        result.types_pos = self.types_pos[:n_types]
+        result.types_str = self.types_str[:n_types]
+        result.types_tks = self.types_tks[:n_types]
+        result.types_info = self.types_info[:n_types]
+        return result
+
 
 class _TokenizedSrcHelper:
     tokenizer: TokenizerSPOT
@@ -328,6 +342,58 @@ def chunk_srcs(
     )
 
 
+def chunk_srcs_per_file(
+    repos_root: Path,
+    srcs: Sequence[TokenizedSrc],
+    tokenizer: TokenizerSPOT,
+    tqdm_args: dict,
+) -> "ChunkedDataset":
+    """Turn each file into a single chunk."""
+
+    chunks: dict[str, list] = {
+        "input_ids": [],
+        "labels": [],
+        "n_labels": [],
+        "chunk_id": [],
+    }
+    chunks_info: list[SrcChunkInfo] = []
+
+    special_tks = [tokenizer.additional_special_tokens_ids[99 - i] for i in range(100)]
+    bos_id, eos_id = not_none(tokenizer.bos_token_id), not_none(tokenizer.eos_token_id)
+
+    for src_id, src in enumerate(tqdm(srcs, **tqdm_args)):
+        tks = copy(src.tokenized_code)
+        for i in range(len(src.types)):
+            label_pos = src.types_pos[i]
+            tks[label_pos] = special_tks[i]
+        chunks["input_ids"].append(tks)
+
+        label_ids = [bos_id]
+        for i, type_tks in enumerate(src.types_tks):
+            label_ids.append(special_tks[i])
+            label_ids.extend(type_tks)
+        label_ids.append(eos_id)
+        chunks["labels"].append(label_ids)
+
+        chunks["n_labels"].append(len(src.types))
+        chunks["chunk_id"].append(src_id)
+        meta = SrcChunkInfo(
+            src.types,
+            src.types_info,
+            src_ids=[src_id] * len(src.types),
+        )
+        chunks_info.append(meta)
+
+    files = [(repos_root / s.file).resolve() for s in srcs]
+    return ChunkedDataset(
+        data=Dataset.from_dict(chunks),
+        chunks_info=chunks_info,
+        files=files,
+        file2src={f: s.origin_code for f, s in zip(files, srcs)},
+        file2repo={f: (repos_root / s.repo).resolve() for f, s in zip(files, srcs)},
+    )
+
+
 @dataclass
 class SrcDataset:
     repos_root: Path
@@ -354,22 +420,52 @@ class SrcDataset:
             self.repos_root, get_subset(self.all_srcs, ids), {"subset_ids": ids}
         )
 
+    def filter_files(
+        self,
+        min_labels_per_file: int = 3,
+        max_labels_per_file: int = 100,
+        min_tokens_per_file: int = 250,
+        max_tokens_per_file: int = 4000,
+    ) -> None:
+        origin_labels = sum(len(s.types) for s in self.srcs_with_labels())
+        origin_tokens = sum(len(s.tokenized_code) for s in self.srcs_with_labels())
+        srcs = [
+            s.truncate(max_tokens_per_file)
+            for s in self.all_srcs
+            if min_labels_per_file <= len(s.types) <= max_labels_per_file
+            and min_tokens_per_file <= len(s.tokenized_code)
+        ]
+        new_labels = sum(len(s.types) for s in srcs)
+        new_tokens = sum(len(s.tokenized_code) for s in srcs)
+        labels_ratio = new_labels / origin_labels
+        tkns_ratio = new_tokens / origin_tokens
+        self.all_srcs = srcs
+        self.add_stats(
+            {
+                "labels_kept_after_filtering": labels_ratio,
+                "tkns_kept_after_filtering": tkns_ratio,
+            }
+        )
+
     def to_chunks(
         self,
         tokenizer: TokenizerSPOT,
-        ctx_args: "CtxArgs",
+        ctx_args: Optional["CtxArgs"],
         max_workers: int,
         tqdm_args: dict = {},
     ) -> "ChunkedDataset":
         srcs = self.srcs_with_labels()
-        chunks = chunk_srcs(
-            self.repos_root,
-            srcs,
-            tokenizer,
-            ctx_args,
-            max_workers=max_workers,
-            tqdm_args=tqdm_args,
-        )
+        if ctx_args is None:
+            chunks = chunk_srcs_per_file(self.repos_root, srcs, tokenizer, tqdm_args)
+        else:
+            chunks = chunk_srcs(
+                self.repos_root,
+                srcs,
+                tokenizer,
+                ctx_args,
+                max_workers=max_workers,
+                tqdm_args=tqdm_args,
+            )
         chunks.verify_labels(self, tokenizer)
         return chunks
 
@@ -1046,39 +1142,17 @@ def R1_srcs_from_preds(
     )
 
 
-def compute_metrics(
-    predictions: np.ndarray,
-    label_ids: np.ndarray,
-    cats: list[AnnotCat],
-    n_labels: Sequence[int],
-    tokenizer: TokenizerSPOT,
-) -> dict[str, Any]:
-    # apply the tokenizer decoder to each rows
-    assert len(predictions.shape) == 2
-    assert (n_rows := predictions.shape[0]) == label_ids.shape[0]
-    preds = list[PythonType]()
-    labels = list[PythonType]()
-    for i in tqdm(range(n_rows), desc="decoding types"):
-        pred = output_ids_as_types(predictions[i, :], tokenizer, n_labels[i])
-        label = output_ids_as_types(label_ids[i, :], tokenizer, n_labels[i])
-        preds.extend(map(normalize_type, pred))
-        labels.extend(map(normalize_type, label))
-
-    r = type_accuracies(preds, labels, cats, normalize_types=False)
-    r["pred_types"] = [ty.head_name() for ty in preds]
-    r["label_types"] = [ty.head_name() for ty in labels]
-    return r
+import math
 
 
 def type_accuracies(
     pred_types: Sequence[PythonType],
     label_types: Sequence[PythonType],
     types_cat: Sequence[AnnotCat],
+    types_pos: Sequence[int],
     normalize_types=True,
 ) -> dict[str, Any]:
-    assert len(pred_types) == len(
-        label_types
-    ), f"{len(pred_types)} != {len(label_types)}"
+    assert_eq(len(pred_types), len(label_types), len(types_cat), len(types_pos))
 
     def safe_div(a, b):
         if b == 0:
@@ -1089,15 +1163,24 @@ def type_accuracies(
         pred_types = [normalize_type(ty) for ty in pred_types]
         label_types = [normalize_type(ty) for ty in label_types]
 
+    def i_to_range(i):
+        if i == 0:
+            return range(0, 1)
+        p = int(math.log(i, 2))
+        return range(2**p, 2 ** (p + 1))
+
     n_correct_by_cat = Counter[AnnotCat]()
+    n_correct_by_pos = Counter[range]()
     n_partial_by_cat = Counter[AnnotCat]()
     n_label_by_cat = Counter[AnnotCat](types_cat)
+    n_label_by_pos = Counter[range](map(i_to_range, types_pos))
     n_partial_no_any = 0
     n_label_no_any = 0
 
-    for p, l, cat in zip(pred_types, label_types, types_cat):
+    for p, l, cat, pos in zip(pred_types, label_types, types_cat, types_pos):
         if p == l:
             n_correct_by_cat[cat] += 1
+            n_correct_by_pos[i_to_range(pos)] += 1
         if p.head_name() == l.head_name():
             n_partial_by_cat[cat] += 1
         if l.head_name() != "Any":
@@ -1115,6 +1198,10 @@ def type_accuracies(
     for k in sorted(n_correct_by_cat.keys(), key=lambda k: k.value):
         full_accs[k.name] = safe_div(n_correct_by_cat[k], n_label_by_cat[k])
 
+    pos_accs = {}
+    for i in sorted(n_correct_by_pos.keys(), key=lambda r: r.start):
+        pos_accs[i] = safe_div(n_correct_by_pos[i], n_label_by_pos[i])
+
     return {
         "partial_acc": partial_acc,
         "partial_acc_wo_any": safe_div(n_partial_no_any, n_label_no_any),
@@ -1122,6 +1209,7 @@ def type_accuracies(
         "full_acc": full_acc,
         "full_accs": full_accs,
         "n_labels": n_label_by_cat.total(),
+        "pos_accs": pos_accs,
     }
 
 
@@ -1130,8 +1218,9 @@ def preds_to_accuracies(
 ):
     cats = [an.cat for info in dataset.chunks_info for an in info.annots_info]
     labels = [ty for info in dataset.chunks_info for ty in info.types]
+    poses = [i for info in dataset.chunks_info for i in range(len(info.types))]
     return type_accuracies(
-        list(seq_flatten(preds)), labels, cats, normalize_types=normalize_types
+        list(seq_flatten(preds)), labels, cats, poses, normalize_types=normalize_types
     )
 
 
@@ -1150,12 +1239,12 @@ def get_dataset_name(drop_comments: bool, spot_round: int = 0, quicktest: bool =
 
 def get_model_name(
     drop_comments: bool,
-    ctx_args: CtxArgs,
+    ctx_args: Optional[CtxArgs],
     data_reduction: int = 1,
     spot_round: int = 0,
     quicktest: bool = False,
 ):
-    ctx_sizes = ctx_args.as_tuple()
+    ctx_sizes = ctx_args.as_tuple() if ctx_args is not None else "per_file"
     test_tag = "quicktest-" if quicktest else ""
     drop_tag = "-drop_comments" if drop_comments else ""
     data_tag = "" if data_reduction == 1 else f"-data_reduction_{data_reduction}"

@@ -361,9 +361,10 @@ class PickleCache:
             logging.warning(f"No cache found at: {self.cache_dir}, skip clearing.")
 
 
-def assert_eq(left: T1, right: T1) -> None:
-    if left != right:
-        raise AssertionError(f"{left} != {right}")
+def assert_eq(*xs: T1) -> None:
+    assert len(xs) > 1
+    for x, y in zip(xs, xs[1:]):
+        assert x == y, f"{x} != {y}"
 
 
 def scalar_stats(xs) -> dict[str, float]:

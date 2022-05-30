@@ -1,6 +1,7 @@
 import os
 import pickle
 import warnings
+from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import *
@@ -8,6 +9,7 @@ from typing import *
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
+from datasets import Dataset
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 from regex import D
@@ -33,6 +35,7 @@ from spot.model import (
     ModelTrainingArgs,
     ModelWrapper,
     TokenizerSPOT,
+    dynamic_dataloader,
 )
 from spot.type_env import PythonType
 from spot.utils import *
@@ -46,16 +49,19 @@ def train_spot_model(
     record_batches: bool,
     gpus: list[int] = [0],
     quicktest=False,
+    use_small_model=False,
 ) -> Tuple[ModelWrapper, dict]:
     os.chdir(proj_root())
 
     datadir = Path(os.getenv("datadir", "data"))
 
-    tokenizer: TokenizerSPOT = TokenizerSPOT.from_pretrained("Salesforce/codet5-base")
-
-    model_path = "Salesforce/codet5-base"
+    model_path = (
+        "Salesforce/codet5-small" if use_small_model else "Salesforce/codet5-base"
+    )
+    tokenizer: TokenizerSPOT = TokenizerSPOT.from_pretrained(model_path)
     lit_model = TrainModelWrapper(model_path, dec_args, record_batches=record_batches)
     wrapper = lit_model.wrapper
+    train_per_file = dec_args.ctx_args is None
 
     chunks: dict[str, ChunkedDataset] = {}
     with run_long_task("Preparing chunked datasets", notify=False):
@@ -67,7 +73,13 @@ def train_spot_model(
         project=model_name,
         save_dir=str(datadir),
     )
-    wandb_logger.log_hyperparams({"decoding_args": dec_args, "train_args": train_args})
+    wandb_logger.log_hyperparams(
+        {
+            "decoding_args": dec_args,
+            "train_args": train_args,
+            "train_per_file": train_per_file,
+        }
+    )
 
     val_interval = 1 if quicktest else 500
 
@@ -120,17 +132,21 @@ def train_spot_model(
     )
 
     collate_fn = DataCollatorForSeq2Seq(lit_model.tokenizer, lit_model.model)
-    train_dataloader = DataLoader(
+    train_dataloader = dynamic_dataloader(
         cast(Any, chunks["train"].data),
         batch_size=train_args.train_batch_size,
-        shuffle=True,
         collate_fn=collate_fn,
+        train_per_file=train_per_file,
+        shuffle=True,
     )
-    valid_dataloader = DataLoader(
+    valid_dataloader = dynamic_dataloader(
         cast(Any, chunks["valid"].data),
         batch_size=train_args.eval_batch_size,
         collate_fn=collate_fn,
+        train_per_file=train_per_file,
+        shuffle=True,  # doesn't hurt
     )
+
     warnings.filterwarnings("ignore", "The dataloader.*does not have many workers.*")
 
     with run_long_task(f"Training {model_name}"):
@@ -312,7 +328,8 @@ class TrainModelWrapper(pl.LightningModule):
             input_ids=batch["input_ids"],
             labels=batch["labels"],
         )
-        self.log("valid/loss", outputs.loss)
+        loss = outputs.loss
+        self.log("valid/loss", loss.item())
 
 
 def concat_batches(batches: list[dict], keys: list[str]) -> dict:

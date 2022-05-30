@@ -13,7 +13,7 @@ def visualize_batch(
     i: int,
     preds: list[list[PythonType]],
     tokenizer: TokenizerSPOT,
-    ctx_args: CtxArgs,
+    ctx_args: Optional[CtxArgs],
 ) -> str:
     pred_types = preds[i]
     typpes_enc = [
@@ -22,20 +22,21 @@ def visualize_batch(
 
     label_types = dataset.chunks_info[i].types
     code_tks = inline_predictions(dataset.data["input_ids"][i], typpes_enc, tokenizer)
-    sep_1 = tokenizer.encode(
-        "\n---------⬆context⬆---------\n", add_special_tokens=False
-    )
-    sep_2 = tokenizer.encode(
-        "\n---------⬇context⬇---------\n", add_special_tokens=False
-    )
-    margin_left, _, margin_right = ctx_args.as_tuple()
-    code_tks = (
-        code_tks[:margin_left]
-        + sep_1
-        + code_tks[margin_left:-margin_right]
-        + sep_2
-        + code_tks[-margin_right:]
-    )
+    if ctx_args is not None:
+        sep_1 = tokenizer.encode(
+            "\n---------⬆context⬆---------\n", add_special_tokens=False
+        )
+        sep_2 = tokenizer.encode(
+            "\n---------⬇context⬇---------\n", add_special_tokens=False
+        )
+        margin_left, _, margin_right = ctx_args.as_tuple()
+        code_tks = (
+            code_tks[:margin_left]
+            + sep_1
+            + code_tks[margin_left:-margin_right]
+            + sep_2
+            + code_tks[-margin_right:]
+        )
     code_dec = tokenizer.decode(code_tks, skip_special_tokens=False)
     code_dec = code_inline_extra_ids(code_dec, label_types)
     src_ids = sorted(list(set(dataset.chunks_info[i].src_ids)))
@@ -99,7 +100,7 @@ def visualize_sequence(
     return widgets.VBox(
         [
             widgets.HBox([slider, slider_label]),
-            widgets.Box([out], layout=box_layout),
+            widgets.Box((out,), layout=box_layout),
         ]
     )
 
