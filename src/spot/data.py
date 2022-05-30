@@ -238,9 +238,9 @@ class _TokenizedSrcHelper:
                 f"Failed to parse file: '{src.file}' with content:\n{current_code}"
             ) from e
         m_code = m.code
-        assert m_code == current_code, "Code 1:\n<<{}>>\nCode 2:\n<<{}>>".format(
-            current_code, m_code
-        )
+        assert (
+            m_code.rstrip() == current_code.rstrip()
+        ), f"String diffferences: {show_string_diff(current_code, m_code)}"
         current_annots, _ = collect_user_annotations(m)
         preds_map = dict[CodeRange, str]()
         types = list[PythonType]()

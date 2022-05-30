@@ -29,6 +29,7 @@ class DecodingArgs:
     max_tokens_per_type: int = 10
     do_sample: bool = False
     top_p: float = 0.9
+    num_beams: Optional[int] = None
 
     def scale_ctx_size(self, factor: float) -> "DecodingArgs":
         result = deepcopy(self)
@@ -80,6 +81,7 @@ class ModelWrapper:
             inputs=batch["input_ids"],
             do_sample=self.args.do_sample if do_sample is None else do_sample,
             top_p=self.args.top_p,
+            num_beams=self.args.num_beams,
             max_length=self.args.max_tokens_per_type * max_labels,
         ).cpu()  # type: ignore
         assert len(output_ids.shape) == 2

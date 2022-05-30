@@ -1,5 +1,4 @@
 import os
-import pickle
 import warnings
 from copy import copy
 from dataclasses import dataclass
@@ -8,8 +7,6 @@ from typing import *
 
 import pytorch_lightning as pl
 import torch
-import torch.nn as nn
-from datasets import Dataset
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 from regex import D
@@ -50,17 +47,23 @@ def train_spot_model(
     gpus: list[int] = [0],
     quicktest=False,
     use_small_model=False,
-    ckpt_interval: int = 500,
 ) -> Tuple[ModelWrapper, dict]:
     os.chdir(proj_root())
 
     datadir = Path(os.getenv("datadir", "data"))
 
+    running_dir = datadir / "checkpoints/lit-running" / model_name
+    if running_dir.exists():
+        shutil.rmtree(running_dir)
+    running_dir.mkdir(parents=True, exist_ok=True)
+
     model_path = (
         "Salesforce/codet5-small" if use_small_model else "Salesforce/codet5-base"
     )
     tokenizer: TokenizerSPOT = TokenizerSPOT.from_pretrained(model_path)
-    lit_model = TrainModelWrapper(model_path, dec_args, record_batches=record_batches)
+    lit_model = TrainModelWrapper(
+        model_path, dec_args, model_saving_path=running_dir / "models"
+    )
     wrapper = lit_model.wrapper
 
     chunks: dict[str, ChunkedDataset] = {}
@@ -80,25 +83,25 @@ def train_spot_model(
         }
     )
 
+    collate_fn = DataCollatorForSeq2Seq(lit_model.tokenizer, lit_model.model)
+    train_dataloader = dynamic_dataloader(
+        cast(Any, chunks["train"].data),
+        max_tokens=train_args.train_max_tokens,
+        collate_fn=collate_fn,
+        shuffle=True,
+    )
+    valid_dataloader = dynamic_dataloader(
+        cast(Any, chunks["valid"].data),
+        max_tokens=train_args.eval_max_tokens,
+        collate_fn=collate_fn,
+        shuffle=True,  # doesn't hurt
+    )
+
     val_interval = 1 if quicktest else 500
+    ckpt_interval = max(1, len(train_dataloader) // 10)
 
-    running_dir = datadir / "checkpoints/lit-running" / model_name
-    if running_dir.exists():
-        shutil.rmtree(running_dir)
-    running_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_interval = 1 if quicktest else ckpt_interval
-
-    extra_callbacks = []
     if record_batches:
-        extra_callbacks.append(
-            ModelCheckpoint(
-                dirpath=running_dir / "models",
-                save_top_k=-1,
-                filename="{step}",
-                every_n_train_steps=ckpt_interval,
-                save_weights_only=True,
-            )
-        )
+        lit_model.model_saving_interval = ckpt_interval
 
     checkpoint_cb = ModelCheckpoint(
         dirpath=running_dir,
@@ -120,27 +123,12 @@ def train_spot_model(
         logger=wandb_logger,
         val_check_interval=val_interval,
         callbacks=[
-            *extra_callbacks,
             checkpoint_cb,
             EarlyStopping("valid/loss", mode="min", verbose=quicktest),
         ],
         gradient_clip_val=1.0,
         gradient_clip_algorithm="norm",
         accumulate_grad_batches=train_args.accumulate_grad_batches,
-    )
-
-    collate_fn = DataCollatorForSeq2Seq(lit_model.tokenizer, lit_model.model)
-    train_dataloader = dynamic_dataloader(
-        cast(Any, chunks["train"].data),
-        max_tokens=train_args.train_max_tokens,
-        collate_fn=collate_fn,
-        shuffle=True,
-    )
-    valid_dataloader = dynamic_dataloader(
-        cast(Any, chunks["valid"].data),
-        max_tokens=train_args.eval_max_tokens,
-        collate_fn=collate_fn,
-        shuffle=True,  # doesn't hurt
     )
 
     warnings.filterwarnings("ignore", "The dataloader.*does not have many workers.*")
@@ -176,31 +164,18 @@ def train_spot_model(
         wrapper.save_pretrained(save_dir)
         if record_batches:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            wrapper = wrapper.to(device)
             extra["batch_ids"] = lit_model.batch_ids
             with run_long_task("Generating R1 datasets", notify=False):
-                print(f"Generating R1 dataset: train")
-                R1_src_datasets = dict[str, SrcDataset]()
-                R1_src_datasets["train"] = R1_srcs_from_ckpts(
-                    tokenizer,
-                    src_datasets["train"],
-                    chunks["train"],
-                    lit_model.batch_ids,
+                R1_src_datasets = R1_srcs_from_extra(
+                    wrapper,
+                    src_datasets,
+                    chunks,
+                    extra,
                     ckpt_dir=running_dir / "models",
                     ckpt_interval=ckpt_interval,
-                    max_workers=wrapper.args.max_workers,
-                    device=device,
                 )
-                for n in ["valid", "test"]:
-                    print(f"Generating R1 dataset: {n}")
-                    preds = wrapper.to(device).predict(chunks[n].data, {})
-                    R1_src_datasets[n] = R1_srcs_from_preds(
-                        tokenizer,
-                        src_datasets[n],
-                        chunks[n].chunks_info,
-                        chunks[n].files,
-                        preds,
-                        max_workers=wrapper.args.max_workers,
-                    )
+
             extra["R1-src_datasets"] = R1_src_datasets
             pickle_dump(save_dir / "extra.pkl", extra)
 
@@ -213,6 +188,41 @@ def train_spot_model(
     return wrapper, extra
 
 
+def R1_srcs_from_extra(
+    wrapper: ModelWrapper,
+    src_datasets: dict[str, SrcDataset],
+    chunk_datasets: dict[str, ChunkedDataset],
+    extra: dict[str, Any],
+    ckpt_dir: Path,
+    ckpt_interval: int,
+):
+    tokenizer = wrapper.tokenizer
+    batch_ids = extra["batch_ids"]
+    print(f"Generating R1 dataset: train")
+    R1_src_datasets = dict[str, SrcDataset]()
+    R1_src_datasets["train"] = R1_srcs_from_ckpts(
+        tokenizer,
+        src_datasets["train"],
+        chunk_datasets["train"],
+        batch_ids,
+        ckpt_dir=ckpt_dir,
+        ckpt_interval=ckpt_interval,
+        max_workers=wrapper.args.max_workers,
+    )
+    for n in ["valid", "test"]:
+        print(f"Generating R1 dataset: {n}")
+        preds = wrapper.predict(chunk_datasets[n].data, {})
+        R1_src_datasets[n] = R1_srcs_from_preds(
+            tokenizer,
+            src_datasets[n],
+            chunk_datasets[n].chunks_info,
+            chunk_datasets[n].files,
+            preds,
+            max_workers=wrapper.args.max_workers,
+        )
+    return R1_src_datasets
+
+
 def R1_srcs_from_ckpts(
     tokenizer: TokenizerSPOT,
     r0_src: SrcDataset,
@@ -221,7 +231,6 @@ def R1_srcs_from_ckpts(
     ckpt_dir: Path,
     ckpt_interval: int,
     max_workers: int,
-    device,
     tqdm_args={},
 ) -> SrcDataset:
     chunks_info = list[SrcChunkInfo]()
@@ -232,10 +241,7 @@ def R1_srcs_from_ckpts(
         **tqdm_args,
     ):
         ids = list(seq_flatten(chunk_ids[i : i + ckpt_interval]))
-        wrapper = TrainModelWrapper.load_from_checkpoint(
-            str(ckpt_dir / "step={}.ckpt".format(i))
-        ).wrapper
-        wrapper.to(device)
+        wrapper = ModelWrapper.from_pretrained(ckpt_dir / f"n_batches={i}")
         try:
             data_sub = cdata[ids]
         except IndexError as e:
@@ -264,7 +270,7 @@ class TrainModelWrapper(pl.LightningModule):
         model_checkpoint: str | Path,
         args: DecodingArgs,
         *,
-        record_batches: bool,
+        model_saving_path: Path,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -274,13 +280,15 @@ class TrainModelWrapper(pl.LightningModule):
         self.wrapper = ModelWrapper(
             self.model, self.tokenizer, args, EmptyLoggingMonitor()
         )
-        self.record_batches = record_batches
+        self.model_saving_path = model_saving_path
+        self.model_saving_interval: Optional[int] = None
 
     def on_fit_start(self):
         # maps chunk id to the initial predictions made for that chunk immediately
         # before the model was trained on it
-        if self.record_batches:
+        if self.model_saving_interval is not None:
             self.batch_ids: list[list[int]] = []
+            self.saving_coutner = 0
 
     def configure_optimizers(self):
         no_decay = ["bias", "LayerNorm.weight"]
@@ -307,8 +315,15 @@ class TrainModelWrapper(pl.LightningModule):
         return [optimizer], [lr_scheduler]
 
     def training_step(self, batch, batch_idx):
-        if self.record_batches and self.current_epoch == 0:
+        if self.model_saving_interval is not None and self.current_epoch == 0:
             self.batch_ids.append(batch["chunk_id"].tolist())
+            self.saving_coutner += 1
+            if self.saving_coutner >= self.model_saving_interval:
+                self.saving_coutner = 0
+                # model can be used for `n_batches` and onward.
+                self.wrapper.save_pretrained(
+                    self.model_saving_path / f"n_batches={len(self.batch_ids)}"
+                )
 
         outputs = self.model(
             input_ids=batch["input_ids"],

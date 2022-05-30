@@ -1,4 +1,5 @@
 import ast
+import difflib
 import logging
 import os
 import pickle
@@ -438,3 +439,8 @@ def pretty_print_accuracies(
     pretty_print_dict(
         accs, level=level, max_show_level=max_show_level, float_precision=4
     )
+
+
+def show_string_diff(str1, str2) -> str:
+    diffs = difflib.unified_diff(str1.splitlines(), str2.splitlines())
+    return "\n".join(diffs)
