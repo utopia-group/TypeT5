@@ -97,15 +97,15 @@ def train_spot_model(
         shuffle=True,  # doesn't hurt
     )
 
-    val_interval = 1 if quicktest else 500
     ckpt_interval = max(1, len(train_dataloader) // 10)
+    val_interval = ckpt_interval
 
     if record_batches:
         lit_model.model_saving_interval = ckpt_interval
 
     checkpoint_cb = ModelCheckpoint(
         dirpath=running_dir,
-        save_top_k=2,
+        save_top_k=3,
         monitor="valid/loss",
         mode="min",
         save_on_train_epoch_end=False,
@@ -208,6 +208,7 @@ def R1_srcs_from_extra(
         ckpt_dir=ckpt_dir,
         ckpt_interval=ckpt_interval,
         max_workers=wrapper.args.max_workers,
+        device=wrapper.model.device,
     )
     for n in ["valid", "test"]:
         print(f"Generating R1 dataset: {n}")
@@ -231,6 +232,7 @@ def R1_srcs_from_ckpts(
     ckpt_dir: Path,
     ckpt_interval: int,
     max_workers: int,
+    device,
     tqdm_args={},
 ) -> SrcDataset:
     chunks_info = list[SrcChunkInfo]()
@@ -242,6 +244,7 @@ def R1_srcs_from_ckpts(
     ):
         ids = list(seq_flatten(chunk_ids[i : i + ckpt_interval]))
         wrapper = ModelWrapper.from_pretrained(ckpt_dir / f"n_batches={i}")
+        wrapper = wrapper.to(device)
         try:
             data_sub = cdata[ids]
         except IndexError as e:

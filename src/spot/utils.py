@@ -108,6 +108,21 @@ def confusion_matrix_top_k(y_preds, y_true, k):
     return {"labels": labels, "matrix": cm}
 
 
+import matplotlib.pyplot as plt
+from sklearn.metrics import ConfusionMatrixDisplay
+
+
+def display_conf_matrix(conf_matrix: dict):
+    cm = conf_matrix["matrix"]
+    labels = conf_matrix["labels"]
+    n_labels = len(labels)
+    fig, ax = plt.subplots(figsize=(n_labels, n_labels))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+    disp.plot(cmap="Reds", values_format=".2f", ax=ax, colorbar=False)
+    plt.title("Normalized confusion matrix")
+    plt.show()
+
+
 def groupby(iterable: Iterable[T1], keyfunc: Callable[[T1], T2]) -> dict[T2, list[T1]]:
     groups = dict[T2, list[T1]]()
     for item in iterable:
