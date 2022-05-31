@@ -153,6 +153,9 @@ def test_type_normalization():
         ("typing.Union[str, List]", "typing.Union[list, str]"),
         ("typing.Union[str, typing.Union[str, int]]", "str | int"),
         ("typing.Union[str, float, typing.Union[str, int]]", "str | int | float"),
+        ("Union[str, float, None]", "Optional[Union[str, float]]"),
+        ("str | None", "Optional[str]"),
+        ("Any | None", "Optional"),
     ]
 
     for a, b in equiv_pairs:

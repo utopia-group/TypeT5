@@ -768,6 +768,9 @@ class PythonType:
         """Check whether the type is a union type."""
         return self.head_name() == "Union" or self.head_name() == "<|>"
 
+    def is_optional(self) -> bool:
+        return self.head_name() == "Optional"
+
     @staticmethod
     def Any() -> "PythonType":
         return PythonType(("Any",))
@@ -794,14 +797,19 @@ def normalize_type_head(head: tuple[str, ...]) -> tuple[str, ...]:
 
 def normalize_type(typ: PythonType) -> PythonType:
     n_args = map(normalize_type, typ.args)
-    if typ.is_union():
+    if typ.is_union() or typ.is_optional():
         arg_set = set[PythonType]()
+        if typ.is_optional():
+            arg_set.add(PythonType(("None",)))
+            if len(typ.args) == 0:
+                arg_set.add(PythonType.Any())
         for arg in n_args:
             if arg.is_union():
                 arg_set.update(arg.args)
             else:
                 arg_set.add(arg)
-        return PythonType(("Union",), tuple(arg_set))
+        union_args = tuple(sorted(arg_set))
+        return PythonType(("Union",), union_args)
     return PythonType(
         normalize_type_head(typ.head),
         tuple(n_args),
