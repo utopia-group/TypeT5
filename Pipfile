@@ -20,9 +20,10 @@ libcst = "0.4.1"
 sklearn = "*"
 matplotlib = "*"
 pytorch-lightning = "*"
+colored = "*"
+ipykernel = "*"
 
 [dev-packages]
-ipykernel = "*"
 pytest = "*"
 
 [requires]

@@ -1,3 +1,4 @@
 from bad_code_1 import fib
 
-fib(4)
+i: int = 4
+fib(i)

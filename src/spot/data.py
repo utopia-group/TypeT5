@@ -1,5 +1,6 @@
 import logging
 import math
+import multiprocessing
 import pickle
 import random
 import shutil
@@ -251,9 +252,9 @@ class _TokenizedSrcHelper:
 
         for a in current_annots:
             if a.path in path2label_id:
-                assert (range := a.annot_range) is not None
+                assert (r := a.annot_range) is not None
                 assert (annot := a.annot) is not None
-                preds_map[range] = m.code_for_node(annot.annotation)
+                preds_map[r] = m.code_for_node(annot.annotation)
                 li = path2label_id[a.path]
                 types.append(src.types[li])
                 types_str.append(src.types_str[li])
@@ -390,6 +391,13 @@ class SrcDataset:
     all_srcs: list[TokenizedSrc] = field(default_factory=list)
     extra_stats: dict = field(default_factory=dict)
 
+    def get_src_by_file(self, rel_path: Path) -> TokenizedSrc:
+        assert isinstance(rel_path, Path)
+        for src in self.all_srcs:
+            if src.file.relative_to(src.repo) == rel_path:
+                return src
+        raise ValueError(f"No src found for {rel_path}")
+
     def repos2srcs(self):
         r = groupby(self.all_srcs, lambda s: s.repo)
         for srcs in r.values():
@@ -450,8 +458,11 @@ class SrcDataset:
         chunks.verify_labels(self, tokenizer, tqdm_args=tqdm_args)
         return chunks
 
-    def file2src(self):
-        return {(self.repos_root / s.file).resolve(): s for s in self.all_srcs}
+    def file2src(self, resolve=True):
+        if resolve:
+            return {(self.repos_root / s.file).resolve(): s for s in self.all_srcs}
+        else:
+            return {s.file: s for s in self.all_srcs}
 
     def stats_to_show(self) -> dict[str, Any]:
         num_repos = len(set(s.repo for s in self.all_srcs))
@@ -476,35 +487,85 @@ class SrcDataset:
     def print_stats(self):
         pretty_print_dict(self.stats_to_show())
 
+    def _get_type_checker_feedback_iso(
+        self,
+        file2preds: dict[Path, dict[int, str]],
+        max_workers: int,
+        mypy_path=None,
+        tqdm_args={},
+    ) -> list["SrcCheckResult"]:
+        file2src = self.file2src(resolve=False)
+        repos_root = self.repos_root
+        src_list = [file2src[f.relative_to(repos_root)] for f in file2preds]
+        chunksize = max(1, len(src_list) // (8 * max_workers))
+
+        # prepare project files
+        template_root = MypyChecker.temp_dir() / "original_projects"
+        template_root.mkdir(parents=True, exist_ok=True)
+
+        repo_set = {s.repo for s in src_list}
+        repo2srcs = self.repos2srcs()
+        for repo in repo_set:
+            for s in repo2srcs[repo]:
+                any_preds = {i: "Any" for i, _ in enumerate(s.types)}
+                new_code = code_to_check_from_preds(s, any_preds)
+                new_path = template_root / s.file
+                new_path.parent.mkdir(parents=True, exist_ok=True)
+                new_path.write_text(new_code)
+
+        project_roots = [template_root / f.repo for f in src_list]
+
+        check_rs: list[SrcCheckResult] = process_map(
+            type_check_src_in_project,
+            src_list,
+            list(file2preds.values()),
+            project_roots,
+            [mypy_path for _ in src_list],
+            max_workers=max_workers,
+            desc="map type_check_src_in_project",
+            chunksize=chunksize,
+            **tqdm_args,
+        )
+        return check_rs
+
     def add_type_checker_feedback(
         self,
         tokenizer: TokenizerSPOT,
         file2preds: dict[Path, dict[int, str]],
         max_workers: int,
         tqdm_args: dict,
+        in_isolation: bool,
         mypy_path: Optional[Path] = None,
     ) -> "SrcDataset":
         """Add the predictions to the corresponding files, call the type checker to
-        collect the feedbacks (in isolation), and then patch the feedbacks as well as the original
-        predictions to form the new inputs."""
+        collect the feedbacks, and then patch the feedbacks as well as the original
+        predictions to form the new inputs.
+
+        If in_isolation is True, then each file is treated as a single-file project.
+        This can lead to better performance but is less precise.
+        """
 
         file2src = self.file2src()
-
         src_list = [file2src[f.resolve()] for f in file2preds]
         chunksize = max(1, len(src_list) // (8 * max_workers))
 
         # first, collec type checker feedbacks
         try:
-            check_rs = process_map(
-                type_check_src,
-                src_list,
-                list(file2preds.values()),
-                [mypy_path for _ in src_list],
-                max_workers=max_workers,
-                desc="type_check_src",
-                chunksize=chunksize,
-                **tqdm_args,
-            )
+            if in_isolation:
+                check_rs: list[SrcCheckResult] = process_map(
+                    type_check_src,
+                    src_list,
+                    list(file2preds.values()),
+                    [mypy_path for _ in src_list],
+                    max_workers=max_workers,
+                    desc="map type_check_src",
+                    chunksize=chunksize,
+                    **tqdm_args,
+                )
+            else:
+                check_rs = self._get_type_checker_feedback_iso(
+                    file2preds, max_workers, mypy_path, tqdm_args
+                )
         finally:
             MypyChecker.clear_temp_cache()
         n_checked = 0
@@ -663,20 +724,41 @@ def load_src_datasets(
     return src_datasets
 
 
+def code_to_check_from_preds(src: TokenizedSrc, preds: dict[int, str]):
+    code = src.origin_code
+    changes = list[tuple[CodeRange, int, str]]()
+    start = CodePosition(0, 0)
+    changes.append((CodeRange(start, start), 0, MypyChecker.Preamble))
+    for k in preds.keys():
+        assert k in range(len(src.types)), f"Prediction index out of range: {k}"
+    for i, info in enumerate(src.types_info):
+        r = not_none(info.annot_range)
+        pred = preds.get(i, "Any")
+        changes.append((r, 1, pred))
+    new_code = replace_strs_by_pos(code, changes)
+    return new_code
+
+
+class SrcCheckResult(NamedTuple):
+    feedbacks: list[MypyFeedback] | str
+    new_code: str
+
+    def pretty_print(self):
+        print("Feedbacks:")
+        for f in self.feedbacks:
+            print(f)
+        print("======= New code =======")
+        print(add_line_numbers(self.new_code))
+
+
 def type_check_src(
     src: TokenizedSrc,
     preds: dict[int, str],
     mypy_path: Optional[Path] = None,
     cwd: Optional[Path] = None,
-) -> tuple[list[MypyFeedback] | str, str]:
-    code = src.origin_code
-
+) -> SrcCheckResult:
     def from_preds(preds: dict[int, str]):
-        changes = list[tuple[CodeRange, int, str]]()
-        for i, pred in preds.items():
-            range = not_none(src.types_info[i].annot_range)
-            changes.append((range, 1, pred))
-        new_code = replace_strs_by_pos(code, changes)
+        new_code = code_to_check_from_preds(src, preds)
         check_r = MypyChecker.check_code(new_code, cwd=cwd, mypy_path=mypy_path)
         feedback: list[MypyFeedback] | str
         if isinstance(check_r, str):
@@ -693,9 +775,55 @@ def type_check_src(
     if isinstance(fdbk1, list) and isinstance(fdbk0, list):
         preexisting = {(f.position.line, f.message) for f in fdbk0}
         new_fdbk = [f for f in fdbk1 if (f.position.line, f.message) not in preexisting]
-        return new_fdbk, new_code
+        return SrcCheckResult(new_fdbk, new_code)
     else:
-        return fdbk1, new_code
+        return SrcCheckResult(fdbk1, new_code)
+
+
+def type_check_src_in_project(
+    src: TokenizedSrc,
+    preds: dict[int, str],
+    project_root: Path,
+    mypy_path: Optional[Path] = None,
+) -> SrcCheckResult:
+    # setup: copy all files into cwd
+    proc = multiprocessing.current_process()
+    cwd = MypyChecker.temp_dir() / proc.name / project_root.name
+    if cwd.exists():
+        shutil.rmtree(cwd)
+    cwd.mkdir(parents=True, exist_ok=True)
+
+    for f in project_root.glob("**/*.py"):
+        rel_path = f.relative_to(project_root)
+        (cwd / rel_path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(f, cwd / rel_path)
+
+    def from_preds(preds: dict[int, str]):
+        new_code = code_to_check_from_preds(src, preds)
+        rel_path = src.file.relative_to(src.repo)
+        file_path = cwd / rel_path
+        file_path.write_text(new_code)
+        check_r = MypyChecker.check_project(cwd, mypy_path=mypy_path)
+        feedback: list[MypyFeedback] | str
+        if isinstance(check_r, str):
+            feedback = check_r
+        else:
+            feedback = check_r.error_dict.get(file_path.resolve(), [])
+        return feedback, new_code
+
+    try:
+        fdbk0, _ = from_preds({i: "Any" for i, _ in preds.items()})
+        fdbk1, new_code = from_preds(preds)
+        if isinstance(fdbk1, list) and isinstance(fdbk0, list):
+            preexisting = {(f.position.line, f.message) for f in fdbk0}
+            new_fdbk = [
+                f for f in fdbk1 if (f.position.line, f.message) not in preexisting
+            ]
+            return SrcCheckResult(new_fdbk, new_code)
+        else:
+            return SrcCheckResult(fdbk1, new_code)
+    finally:
+        shutil.rmtree(MypyChecker.temp_dir() / proc.name)
 
 
 class CommentRemover(cst.CSTTransformer):
@@ -981,6 +1109,7 @@ def R1_srcs_from_preds(
     chunks_info: list[SrcChunkInfo],
     src_files: list[Path],
     r0_preds: list[list[PythonType]],
+    check_in_isolation: bool,
     max_workers: int,
     tqdm_args: dict = {},
 ) -> SrcDataset:
@@ -1010,6 +1139,7 @@ def R1_srcs_from_preds(
     return r0_src.add_type_checker_feedback(
         tokenizer,
         file2preds1,
+        in_isolation=check_in_isolation,
         max_workers=max_workers,
         tqdm_args=tqdm_args,
     )
@@ -1112,6 +1242,7 @@ def get_model_name(
     ctx_args: Optional[CtxArgs],
     data_reduction: int = 1,
     spot_round: int = 0,
+    check_in_isolation: bool = False,
     quicktest: bool = False,
 ):
     ctx_sizes = ctx_args.as_tuple() if ctx_args is not None else "per_file"
@@ -1119,4 +1250,5 @@ def get_model_name(
     drop_tag = "-drop_comments" if drop_comments else ""
     data_tag = "" if data_reduction == 1 else f"-data_reduction_{data_reduction}"
     round_tag = f"-R{spot_round}"
-    return f"{test_tag}SPOT-model-per_file{round_tag}-{ctx_sizes}{drop_tag}{data_tag}"
+    check_tag = f"-proj_check" if spot_round > 0 and not check_in_isolation else ""
+    return f"{test_tag}SPOT-model-per_file{round_tag}{check_tag}-{ctx_sizes}{drop_tag}{data_tag}"

@@ -173,3 +173,41 @@ def test_type_normalization():
         ta = parse_type_str(a)
         tb = parse_type_str(b)
         assert normalize_type(ta) != normalize_type(tb)
+
+
+import shutil
+
+from spot.data import SrcDataset, type_check_src, type_check_src_in_project
+from spot.utils import get_spot_tokenizer, proj_root
+
+
+def test_mypy_checking():
+    simple_dataset = SrcDataset.from_repos(
+        proj_root() / "data",
+        [proj_root() / "data/code"],
+        get_spot_tokenizer(),
+        drop_comments=True,
+        max_workers=10,
+        label_ratio=1.0,
+    )
+
+    src_to_check = simple_dataset.get_src_by_file(Path("bad_code_2.py"))
+    result_1 = type_check_src(src_to_check, {0: "int"})
+    assert len(result_1.feedbacks) == 0
+
+    src_to_check = simple_dataset.get_src_by_file(Path("bad_code_2.py"))
+    temp_dir = proj_root() / "mypy_temp/test_dir"
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+    result_2 = type_check_src_in_project(
+        src_to_check,
+        {0: "int"},
+        project_files=(proj_root() / "data/code").glob("**/*.py"),
+        project_root=(proj_root() / "data/code"),
+        temp_dir=temp_dir,
+    )
+    assert len(result_2.feedbacks) == 1
+    assert (
+        'Argument 1 to "fib" has incompatible type "int"; expected "str"'
+        in result_2.feedbacks[0].message
+    )

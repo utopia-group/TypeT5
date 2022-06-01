@@ -48,14 +48,6 @@ class DecodingArgs:
         return result
 
 
-@dataclass
-class ModelTrainingArgs:
-    train_max_tokens: int
-    eval_max_tokens: int
-    max_epochs: int
-    accumulate_grad_batches: int | dict | None = None
-
-
 class DatasetEvalResult(NamedTuple):
     accuracies: dict
     chunks: ChunkedDataset
@@ -192,6 +184,7 @@ def dynamic_dataloader(
 class CombinedModel:
     r0_wrapper: ModelWrapper
     r1_wrapper: ModelWrapper
+    check_in_isolation: bool
 
     def eval_on_dataset(self, dataset: SrcDataset, tqdm_args={}) -> tuple[dict, dict]:
         r0_wrapper, r1_wrapper = self.r0_wrapper, self.r1_wrapper
@@ -205,6 +198,7 @@ class CombinedModel:
             r0_chunks.files,
             r0_preds,
             max_workers=r0_wrapper.args.max_workers,
+            check_in_isolation=self.check_in_isolation,
         )
         r1_accs, _, _ = r1_wrapper.eval_on_dataset(r1_srcs, tqdm_args={"leave": False})
         return r0_accs, r1_accs

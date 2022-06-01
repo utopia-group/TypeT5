@@ -29,13 +29,21 @@ from spot.model import (
     CtxArgs,
     DecodingArgs,
     ModelSPOT,
-    ModelTrainingArgs,
     ModelWrapper,
     TokenizerSPOT,
     dynamic_dataloader,
 )
 from spot.type_env import PythonType
 from spot.utils import *
+
+
+@dataclass
+class ModelTrainingArgs:
+    train_max_tokens: int
+    eval_max_tokens: int
+    max_epochs: int
+    check_in_isolation: bool
+    accumulate_grad_batches: int | dict | None = None
 
 
 def train_spot_model(
@@ -166,6 +174,7 @@ def train_spot_model(
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             wrapper = wrapper.to(device)
             extra["batch_ids"] = lit_model.batch_ids
+            extra["check_in_isolation"] = train_args.check_in_isolation
             with run_long_task("Generating R1 datasets", notify=False):
                 R1_src_datasets = R1_srcs_from_extra(
                     wrapper,
@@ -198,6 +207,7 @@ def R1_srcs_from_extra(
 ):
     tokenizer = wrapper.tokenizer
     batch_ids = extra["batch_ids"]
+    check_in_isolation = extra["check_in_isolation"]
     print(f"Generating R1 dataset: train")
     R1_src_datasets = dict[str, SrcDataset]()
     R1_src_datasets["train"] = R1_srcs_from_ckpts(
@@ -205,6 +215,7 @@ def R1_srcs_from_extra(
         src_datasets["train"],
         chunk_datasets["train"],
         batch_ids,
+        check_in_isolation=check_in_isolation,
         ckpt_dir=ckpt_dir,
         ckpt_interval=ckpt_interval,
         max_workers=wrapper.args.max_workers,
@@ -219,6 +230,7 @@ def R1_srcs_from_extra(
             chunk_datasets[n].chunks_info,
             chunk_datasets[n].files,
             preds,
+            check_in_isolation=check_in_isolation,
             max_workers=wrapper.args.max_workers,
         )
     return R1_src_datasets
@@ -229,6 +241,7 @@ def R1_srcs_from_ckpts(
     r0_src: SrcDataset,
     cdata: ChunkedDataset,
     chunk_ids: list[list[int]],
+    check_in_isolation: bool,
     ckpt_dir: Path,
     ckpt_interval: int,
     max_workers: int,
@@ -260,6 +273,7 @@ def R1_srcs_from_ckpts(
         chunks_info,
         cdata.files,
         model_preds,
+        check_in_isolation=check_in_isolation,
         max_workers=max_workers,
         tqdm_args=tqdm_args,
     )

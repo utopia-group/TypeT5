@@ -1,6 +1,7 @@
 import ast
 import difflib
 import logging
+import math
 import os
 import pickle
 import shutil
@@ -18,6 +19,7 @@ from typing import (
     Generator,
     Generic,
     Iterable,
+    NamedTuple,
     Optional,
     Sequence,
     TypeVar,
@@ -39,6 +41,10 @@ from transformers.models.t5 import T5ForConditionalGeneration
 
 TokenizerSPOT = RobertaTokenizer
 ModelSPOT = T5ForConditionalGeneration
+
+
+def get_spot_tokenizer() -> TokenizerSPOT:
+    return TokenizerSPOT.from_pretrained("Salesforce/codet5-base")
 
 
 class SpecialNames:
@@ -478,3 +484,10 @@ def pretty_print_accuracies(
 def show_string_diff(str1, str2) -> str:
     diffs = difflib.unified_diff(str1.splitlines(), str2.splitlines())
     return "\n".join(diffs)
+
+
+def add_line_numbers(code: str):
+    lines = code.split("\n")
+    ln_digits = int(math.log(len(lines), 10)) + 1
+    format_s = "{ln:" + str(ln_digits) + "d}|  {line}"
+    return "\n".join(format_s.format(ln=i + 1, line=l) for i, l in enumerate(lines))
