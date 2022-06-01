@@ -1,6 +1,7 @@
 import random
 from collections import Counter
 from copy import copy, deepcopy
+from typing import NamedTuple
 
 import numpy as np
 from datasets import Dataset
@@ -53,6 +54,12 @@ class ModelTrainingArgs:
     eval_max_tokens: int
     max_epochs: int
     accumulate_grad_batches: int | dict | None = None
+
+
+class DatasetEvalResult(NamedTuple):
+    accuracies: dict
+    chunks: ChunkedDataset
+    predictions: list[list[PythonType]]
 
 
 @dataclass
@@ -141,9 +148,7 @@ class ModelWrapper:
             monitor=TaskLoggingMonitor(path.name),
         )
 
-    def eval_on_dataset(
-        self, src_data: SrcDataset, tqdm_args={}
-    ) -> tuple[dict, ChunkedDataset, list[list[PythonType]]]:
+    def eval_on_dataset(self, src_data: SrcDataset, tqdm_args={}) -> DatasetEvalResult:
         """Convinient method to preprocess the src according to the model's ctx_args and evaluate the (R0) accuracy."""
         chunks = src_data.to_chunks(
             self.tokenizer, self.args.ctx_args, tqdm_args=tqdm_args
@@ -153,7 +158,7 @@ class ModelWrapper:
         accs_strict = preds_to_accuracies(preds, chunks, normalize_types=False)
         accs["partial_acc_strict"] = accs_strict["partial_acc"]
         accs["full_acc_strict"] = accs_strict["full_acc"]
-        return (accs, chunks, preds)
+        return DatasetEvalResult(accs, chunks, preds)
 
 
 def dynamic_dataloader(

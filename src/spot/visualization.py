@@ -2,6 +2,7 @@ import html
 import re
 from typing import Sequence
 
+import colored
 import ipywidgets as widgets
 
 from spot.data import ChunkedDataset, CtxArgs, PythonType
@@ -18,52 +19,50 @@ def visualize_chunks(chunks: ChunkedDataset, height="500px") -> widgets.VBox:
     return interactive_sized(show, {"i": (0, len(chunks.data) - 1)}, height=height)
 
 
-def visualize_code_sequence(contents: Sequence[str]):
-    els = [
-        widgets.HTML(
+def visualize_preds_on_code(
+    dataset: ChunkedDataset,
+    preds: list[list[PythonType]],
+) -> widgets.VBox:
+    def show_batch(i: int):
+        pred_types = preds[i]
+        tokenizer = dataset.tokenizer
+        typpes_enc = [
+            tokenizer.encode(str(t), add_special_tokens=False) for t in pred_types
+        ]
+
+        label_types = dataset.chunks_info[i].types
+        code_tks = inline_predictions(
+            dataset.data["input_ids"][i], typpes_enc, tokenizer
+        )
+        code_dec = tokenizer.decode(code_tks, skip_special_tokens=False)
+        code_dec = code_inline_extra_ids(code_dec, label_types)
+        src_ids = sorted(list(set(dataset.chunks_info[i].src_ids)))
+        files = [dataset.files[i] for i in src_ids]
+        meta = "".join(
+            [
+                "labels: ",
+                str(label_types),
+                "\n",
+                "preds: ",
+                str(pred_types),
+                "\n",
+                "files: ",
+                str(files),
+            ]
+        )
+        display(in_scroll_pane(meta, height=None))
+
+        code = widgets.HTML(
             "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30); }'>"
-            + colorize_code_html(html.escape(contents[i]))
+            + colorize_code_html(html.escape(code_dec))
             + "</pre>"
         )
-        for i in range(len(contents))
-    ]
+        display(in_scroll_pane(code))
 
-    return visualize_sequence(els)
-
-
-def visualize_batch(
-    dataset: ChunkedDataset,
-    i: int,
-    preds: list[list[PythonType]],
-) -> str:
-    pred_types = preds[i]
-    tokenizer = dataset.tokenizer
-    typpes_enc = [
-        tokenizer.encode(str(t), add_special_tokens=False) for t in pred_types
-    ]
-
-    label_types = dataset.chunks_info[i].types
-    code_tks = inline_predictions(dataset.data["input_ids"][i], typpes_enc, tokenizer)
-    code_dec = tokenizer.decode(code_tks, skip_special_tokens=False)
-    code_dec = code_inline_extra_ids(code_dec, label_types)
-    src_ids = sorted(list(set(dataset.chunks_info[i].src_ids)))
-    files = [dataset.files[i] for i in src_ids]
-    return "".join(
-        [
-            "labels: ",
-            str(label_types),
-            "\n",
-            "preds: ",
-            str(pred_types),
-            "\n",
-            "files: ",
-            str(files),
-            "\n",
-            "========================== Code =======================\n",
-            code_dec,
-            "\n",
-        ]
+    slider = widgets.IntSlider(
+        0, min=0, max=len(dataset.data) - 1, continuous_update=False
     )
+    return widgets.interactive(show_batch, i=slider)
 
 
 def inline_predictions(
@@ -112,20 +111,28 @@ def visualize_sequence(
     )
 
 
+def in_scroll_pane(
+    content: widgets.Widget | str, height: Optional[str] = "500px"
+) -> widgets.Box:
+    if isinstance(content, str):
+        with (out := widgets.Output()):
+            print(content)
+        content = out
+    box_layout = widgets.Layout(overflow="scroll", height=height)
+    return widgets.Box([content], layout=box_layout)
+
+
 def interactive_sized(
     f,
     kwargs: dict,
-    height: str = "500px",
+    height: Optional[str] = "500px",
 ) -> widgets.VBox:
     out = widgets.interactive(f, **kwargs)
     panel = out.children[-1]
-    if height is not None:
-        panel.layout.height = height
-    box_layout = widgets.Layout(overflow="scroll")
     return widgets.VBox(
         [
             *out.children[:-1],
-            widgets.Box((panel,), layout=box_layout),
+            in_scroll_pane(panel, height=height),
         ]
     )
 
@@ -165,3 +172,20 @@ def code_inline_extra_ids(code: str, preds: list):
         return f"<label;{label};label>"
 
     return re.sub(r"(<extra_id_\d+>)", replace, code)
+
+
+def code_inline_type_masks(code: str, preds: list, label_color: Optional[str] = None):
+    i = 0
+    if label_color is not None:
+        color_mark = colored.fg(label_color)
+        reset_mark = colored.attr("reset")
+
+    def replace(m: re.Match[str]):
+        nonlocal i
+        l = str(preds[i])
+        i += 1
+        if label_color is not None:
+            l = color_mark + l + reset_mark
+        return l
+
+    return re.sub(SpecialNames.TypeMask, replace, code)

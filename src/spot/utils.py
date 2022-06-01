@@ -25,6 +25,7 @@ from typing import (
     cast,
 )
 
+import ipywidgets as widgets
 import libcst as cst
 import numpy as np
 import pandas as pd
@@ -444,6 +445,24 @@ def pretty_print_dict(
                 )
         else:
             print(f"{k}: {v}")
+
+
+def pretty_display_dict(d: dict, float_precision: int = 5):
+    outputs = list[widgets.Output]()
+    for expand in [False, True]:
+        o = widgets.Output()
+        with o:
+            max_level = 1000 if expand else 0
+            pretty_print_dict(
+                d, float_precision=float_precision, max_show_level=max_level
+            )
+        outputs.append(o)
+
+    tab = widgets.Tab()
+    tab.children = outputs
+    tab.set_title(0, "Compressed")
+    tab.set_title(1, "Expanded")
+    return tab
 
 
 def pretty_print_accuracies(
