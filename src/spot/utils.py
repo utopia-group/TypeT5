@@ -357,12 +357,12 @@ class PickleCache:
         if not path.exists():
             value = func()
             path.parent.mkdir(parents=True, exist_ok=True)
-            print(f"[PickleCache] Saving to cache: '{path}'")
+            logging.info(f"[PickleCache] Saving to cache: '{path}'")
             with path.open("wb") as f:
                 pickle.dump(value, f)
             return value
         else:
-            print(f"[PickleCache] Loading from cache: '{path}'")
+            logging.info(f"[PickleCache] Loading from cache: '{path}'")
             with path.open("rb") as f:
                 return pickle.load(f)
 

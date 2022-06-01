@@ -469,6 +469,7 @@ class SrcDataset:
         useful_srcs = self.srcs_with_labels()
         num_files = len(useful_srcs)
         num_lines = sum(len(s.origin_code.split("\n")) for s in useful_srcs)
+        num_labels = sum(len(s.types) for s in useful_srcs)
         tokens_per_file = [len(s.tokenized_code) for s in useful_srcs]
         target_tks_per_file = [
             sum(len(tks) + 1 for tks in s.types_tks) for s in useful_srcs
@@ -477,11 +478,14 @@ class SrcDataset:
             "num_repos": num_repos,
             "num_files": num_files,
             "num_lines": num_lines,
+            "num_labels": num_labels,
             "tokens_per_file": scalar_stats(tokens_per_file),
             "target_tks_per_file": scalar_stats(target_tks_per_file),
         }
         basic_stats.update(self.extra_stats)
+        # hide the follwing stats since they are too verbose
         basic_stats.pop("mypy_feedbacks", None)
+        basic_stats.pop("check_failure_reasons", None)
         return basic_stats
 
     def print_stats(self):
@@ -572,9 +576,11 @@ class SrcDataset:
         code_list = list[str]()
         feedback_list = list[list[MypyFeedback]]()
         n_error_list = list[int]()
+        check_failure_reasons = list[str]()
         for i in range(len(src_list)):
             errors, new_code = check_rs[i]
             if isinstance(errors, str):
+                check_failure_reasons.append(errors)
                 errors = []
             else:
                 n_checked += 1
@@ -589,6 +595,9 @@ class SrcDataset:
                 "feedbacks_per_file": scalar_stats(n_error_list),
             },
             not silent,
+        )
+        result.add_stats(
+            {"check_failure_reasons": check_failure_reasons}, should_print=False
         )
 
         # then, patch the srcs with the feedbacks and predictions to from new srcs
@@ -695,21 +704,15 @@ class SrcDataset:
 
 def load_src_datasets(
     datadir: Path,
-    drop_comments: bool = False,
-    spot_round: int = 0,
+    datasets_name: str,
     data_reduction: int = 1,
     quicktest: bool = False,
     repos_root: Optional[Path] = None,
     sets_to_load=["train", "valid", "test"],
 ) -> dict[str, SrcDataset]:
-    src_datasets_path = (
-        datadir
-        / f"SPOT-data"
-        / get_dataset_name(drop_comments=drop_comments, spot_round=spot_round)
-    )
     src_datasets = dict[str, SrcDataset]()
     for n in sets_to_load:
-        with open(src_datasets_path / f"{n}.pkl", "rb") as f:
+        with open(datadir / "SPOT-data" / datasets_name / f"{n}.pkl", "rb") as f:
             src: SrcDataset = pickle.load(f)
             src = SrcDataset(src.repos_root, src.srcs_with_labels())
             if repos_root is not None:
@@ -1145,6 +1148,58 @@ def R1_srcs_from_preds(
     )
 
 
+def safe_div(a, b):
+    if b == 0:
+        return float("nan")
+    return a / b
+
+
+def show_count(c: int):
+    if c < 1000:
+        return str(c)
+    return f"{c / 1000:.1f}k"
+
+
+class CountedAcc(NamedTuple):
+    n_correct: int
+    n_total: int
+
+    @property
+    def acc(self):
+        return safe_div(self.n_correct, self.n_total)
+
+    def __str__(self):
+        acc = safe_div(self.n_correct, self.n_total)
+        return f"{acc:.2%} (count={show_count(self.n_total)})"
+
+    def __repr__(self):
+        acc = safe_div(self.n_correct, self.n_total)
+        return f"CountedAcc({acc:.2%}, count={self.n_total})"
+
+
+class GroupedAccCounter(Generic[T1]):
+    def __init__(self) -> None:
+        self.correct_counter = Counter[T1]()
+        self.total_counter = Counter[T1]()
+
+    def count(self, key: T1, n_correct: int | bool, total: int) -> None:
+        self.correct_counter[key] += int(n_correct)
+        self.total_counter[key] += total
+
+    def grouped_accs(
+        self, key=lambda x: x, sort_by=lambda x: x
+    ) -> dict[Any, CountedAcc]:
+        return {
+            key(k): CountedAcc(self.correct_counter[k], self.total_counter[k])
+            for k in sorted(self.total_counter.keys(), key=sort_by)
+        }
+
+    def overall_acc(self) -> CountedAcc:
+        return CountedAcc(
+            sum(self.correct_counter.values()), sum(self.total_counter.values())
+        )
+
+
 def type_accuracies(
     pred_types: Sequence[PythonType],
     label_types: Sequence[PythonType],
@@ -1153,11 +1208,6 @@ def type_accuracies(
     normalize_types=True,
 ) -> dict[str, Any]:
     assert_eq(len(pred_types), len(label_types), len(types_cat), len(types_pos))
-
-    def safe_div(a, b):
-        if b == 0:
-            return float("nan")
-        return a / b
 
     if normalize_types:
         pred_types = [normalize_type(ty) for ty in pred_types]
@@ -1169,47 +1219,33 @@ def type_accuracies(
         p = int(math.log(i, 2))
         return range(2**p, 2 ** (p + 1))
 
-    n_correct_by_cat = Counter[AnnotCat]()
-    n_correct_by_pos = Counter[range]()
-    n_partial_by_cat = Counter[AnnotCat]()
-    n_label_by_cat = Counter[AnnotCat](types_cat)
-    n_label_by_pos = Counter[range](map(i_to_range, types_pos))
-    n_partial_no_any = 0
-    n_label_no_any = 0
+    def ast_size(ty: PythonType) -> int:
+        return 1 + sum(ast_size(a) for a in ty.args)
+
+    def ast_overlap(ty1: PythonType, ty2: PythonType) -> int:
+        if ty1.head != ty2.head:
+            return 0
+        return 1 + sum(ast_overlap(a1, a2) for a1, a2 in zip(ty1.args, ty2.args))
+
+    partial_by_cat = GroupedAccCounter[AnnotCat]()
+    partial_by_pos = GroupedAccCounter[range]()
+    full_acc = GroupedAccCounter[None]()
+    ast_acc = GroupedAccCounter[None]()
 
     for p, l, cat, pos in zip(pred_types, label_types, types_cat, types_pos):
-        if p == l:
-            n_correct_by_cat[cat] += 1
-            n_correct_by_pos[i_to_range(pos)] += 1
-        if p.head_name() == l.head_name():
-            n_partial_by_cat[cat] += 1
-        if l.head_name() != "Any":
-            n_label_no_any += 1
-            if p.head_name() == l.head_name():
-                n_partial_no_any += 1
-
-    partial_acc = safe_div(n_partial_by_cat.total(), n_label_by_cat.total())
-    partial_accs = {}
-    for k in sorted(n_partial_by_cat.keys(), key=lambda k: k.value):
-        partial_accs[k.name] = safe_div(n_partial_by_cat[k], n_label_by_cat[k])
-
-    full_acc = safe_div(n_correct_by_cat.total(), n_label_by_cat.total())
-    full_accs = {}
-    for k in sorted(n_correct_by_cat.keys(), key=lambda k: k.value):
-        full_accs[k.name] = safe_div(n_correct_by_cat[k], n_label_by_cat[k])
-
-    pos_accs = {}
-    for i in sorted(n_correct_by_pos.keys(), key=lambda r: r.start):
-        pos_accs[i] = safe_div(n_correct_by_pos[i], n_label_by_pos[i])
+        partial_by_cat.count(cat, p.head_name() == l.head_name(), 1)
+        partial_by_pos.count(i_to_range(pos), p.head_name() == l.head_name(), 1)
+        full_acc.count(None, p == l, 1)
+        ast_acc.count(None, ast_overlap(p, l), ast_size(l))
 
     return {
-        "partial_acc": partial_acc,
-        "partial_acc_wo_any": safe_div(n_partial_no_any, n_label_no_any),
-        "partial_accs": partial_accs,
-        "full_acc": full_acc,
-        "full_accs": full_accs,
-        "n_labels": n_label_by_cat.total(),
-        "pos_accs": pos_accs,
+        "partial_acc": partial_by_cat.overall_acc(),
+        "ast_acc": ast_acc.overall_acc(),
+        "full_acc": full_acc.overall_acc(),
+        "partial_acc_by_cat": partial_by_cat.grouped_accs(
+            key=lambda k: k.name, sort_by=lambda k: k.value
+        ),
+        "partial_acc_by_pos": partial_by_pos.grouped_accs(sort_by=lambda k: k.start),
     }
 
 
@@ -1230,15 +1266,15 @@ def _turn_off_tokenizer_warning(tokenizer: TokenizerSPOT):
     ] = True
 
 
-def get_dataset_name(drop_comments: bool, spot_round: int = 0, quicktest: bool = False):
-    test_tag = "quicktest-" if quicktest else ""
+def get_dataset_name(drop_comments: bool, all_labels: bool, spot_round: int = 0):
     drop_tag = "-drop_comments" if drop_comments else ""
+    label_tag = "-all_labels" if all_labels else ""
     round_tag = f"-R{spot_round}" if spot_round > 0 else ""
-    return f"{test_tag}src_datasets{round_tag}{drop_tag}"
+    return f"src_datasets{round_tag}{label_tag}{drop_tag}"
 
 
 def get_model_name(
-    drop_comments: bool,
+    dataset_name: str,
     ctx_args: Optional[CtxArgs],
     data_reduction: int = 1,
     spot_round: int = 0,
@@ -1247,8 +1283,6 @@ def get_model_name(
 ):
     ctx_sizes = ctx_args.as_tuple() if ctx_args is not None else "per_file"
     test_tag = "quicktest-" if quicktest else ""
-    drop_tag = "-drop_comments" if drop_comments else ""
     data_tag = "" if data_reduction == 1 else f"-data_reduction_{data_reduction}"
-    round_tag = f"-R{spot_round}"
     check_tag = f"-proj_check" if spot_round > 0 and not check_in_isolation else ""
-    return f"{test_tag}SPOT-model-per_file{round_tag}{check_tag}-{ctx_sizes}{drop_tag}{data_tag}"
+    return f"{test_tag}SPOT-model{check_tag}-{ctx_sizes}--{dataset_name}{data_tag}"

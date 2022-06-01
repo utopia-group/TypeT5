@@ -18,12 +18,10 @@ from transformers.trainer_pt_utils import get_parameter_names
 import wandb
 from spot.data import (
     ChunkedDataset,
+    CountedAcc,
     R1_srcs_from_preds,
     SrcChunkInfo,
     SrcDataset,
-    get_dataset_name,
-    get_model_name,
-    load_src_datasets,
 )
 from spot.model import (
     CtxArgs,
@@ -362,3 +360,128 @@ class TrainModelWrapper(pl.LightningModule):
 
 def concat_batches(batches: list[dict], keys: list[str]) -> dict:
     return {k: torch.concat([b[k] for b in batches]) for k in keys}
+
+
+# model evaluation
+
+import ipywidgets as widgets
+
+from spot.data import R1_srcs_from_preds, load_src_datasets, pretty_print_accuracies
+from spot.model import DatasetPredResult
+from spot.type_env import normalize_type
+from spot.utils import (
+    PickleCache,
+    confusion_matrix_top_k,
+    display_conf_matrix,
+    pretty_print_dict,
+    seq_flatten,
+)
+
+
+def evaluate_model(
+    r0_wrapper: ModelWrapper,
+    r1_wrapper: Optional[ModelWrapper],
+    model_name: str,
+    r0_srcs: SrcDataset,
+    datadir: Path,
+    check_in_isolation: bool,
+    max_labels: int = 16,
+    reeval=False,
+    dataset_name: Optional[str] = None,
+) -> list[tuple[DecodingArgs, DatasetPredResult]]:
+    data_tag = f"-{dataset_name}" if dataset_name is not None else ""
+    eval_cache = PickleCache(
+        datadir / f"checkpoints/lit-saved/{model_name}/eval{data_tag}"
+    )
+    if reeval:
+        eval_cache.clear()
+    results = list[tuple[DecodingArgs, DatasetPredResult]]()
+    r0_result = eval_cache.cached(
+        f"r0_eval-{r0_wrapper.args}.pkl",
+        lambda: r0_wrapper.eval_on_dataset(
+            r0_srcs, max_labels=max_labels, tqdm_args={"leave": False}
+        ),
+    )
+    results.append((r0_wrapper.args, r0_result))
+    if r1_wrapper is None:
+        return results
+
+    r1_srcs = eval_cache.cached(
+        f"r1_srcs-{r0_wrapper.args}-iso={check_in_isolation}.pkl",
+        lambda: R1_srcs_from_preds(
+            r1_wrapper.tokenizer,  # type: ignore
+            r0_srcs,
+            r0_result.chunks.chunks_info,
+            r0_result.chunks.files,
+            r0_result.predictions,
+            check_in_isolation=check_in_isolation,
+            max_workers=r0_wrapper.args.max_workers,
+        ),
+    )
+
+    r1_result = eval_cache.cached(
+        f"r1_eval-{r1_wrapper.args}-iso={check_in_isolation}.pkl",
+        lambda: r1_wrapper.eval_on_dataset(  # type: ignore
+            r1_srcs, max_labels=max_labels, tqdm_args={"leave": False}
+        ),
+    )
+    results.append((r1_wrapper.args, r1_result))
+
+    return results
+
+
+def visualize_accuracies(results: list[tuple[DecodingArgs, DatasetPredResult]]):
+    def to_percent_str(d: dict, prev: Optional[dict]):
+        result = dict()
+        for k in d:
+            v = d[k]
+            if isinstance(v, CountedAcc):
+                if prev is not None and k in prev and isinstance(prev[k], CountedAcc):
+                    result[k] = f"{str(v)} [{v.acc - prev[k].acc:+.2%}]"
+                else:
+                    result[k] = f"{str(v)}"
+            elif isinstance(v, dict):
+                new_prev = None if prev is None else prev.get(k, None)
+                result[k] = to_percent_str(v, new_prev)
+            else:
+                result[k] = v
+        return result
+
+    def display_acc(round):
+        (args, (accs, chunks, preds)) = results[round]
+        with (prefix := widgets.Output()):
+            print(f"model=R{round}")
+            print(f"ctx_args: {args.ctx_args}")
+            print(f"num_beams={args.num_beams}\n")
+        prev = None if round == 0 else results[round - 1][1][0]
+        main = pretty_display_dict(to_percent_str(accs, prev))
+        return widgets.VBox([prefix, main])
+
+    tabs = [display_acc(i) for i in range(len(results))]
+    result = widgets.Tab(tabs)
+    for i in range(len(results)):
+        result.set_title(i, f"R{i}")
+    return result
+
+
+def visualize_conf_matrix(results: list[tuple[DecodingArgs, DatasetPredResult]]):
+    def show_conf(round, top_k):
+        (args, (accs, chunks, preds)) = results[round]
+        labels = [
+            normalize_type(t).head_name()
+            for info in chunks.chunks_info
+            for t in info.types
+        ]
+        all_preds = [normalize_type(t).head_name() for t in seq_flatten(preds)]
+        unique_types = len(set(labels))
+        top_k = min(top_k, unique_types)
+        m = confusion_matrix_top_k(all_preds, labels, top_k)
+        display_conf_matrix(m)
+
+    max_round = len(results) - 1
+
+    return widgets.interactive(
+        show_conf,
+        round=widgets.IntSlider(max_round, min=0, max=max_round),
+        top_k=widgets.IntSlider(10, min=5, max=50, continuous_update=False),
+    )

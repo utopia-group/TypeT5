@@ -48,10 +48,14 @@ class DecodingArgs:
         return result
 
 
-class DatasetEvalResult(NamedTuple):
-    accuracies: dict
+@dataclass
+class DatasetPredResult:
     chunks: ChunkedDataset
     predictions: list[list[PythonType]]
+
+    @property
+    def accuracies(self) -> dict:
+        return preds_to_accuracies(self.predictions, self.chunks)
 
 
 @dataclass
@@ -140,17 +144,18 @@ class ModelWrapper:
             monitor=TaskLoggingMonitor(path.name),
         )
 
-    def eval_on_dataset(self, src_data: SrcDataset, tqdm_args={}) -> DatasetEvalResult:
+    def eval_on_dataset(
+        self, src_data: SrcDataset, max_labels: Optional[int] = None, tqdm_args={}
+    ) -> DatasetPredResult:
         """Convinient method to preprocess the src according to the model's ctx_args and evaluate the (R0) accuracy."""
-        chunks = src_data.to_chunks(
-            self.tokenizer, self.args.ctx_args, tqdm_args=tqdm_args
-        )
+        ctx_args = self.args.ctx_args
+        if max_labels is not None:
+            ctx_args = copy(ctx_args)
+            ctx_args.max_labels = max_labels
+
+        chunks = src_data.to_chunks(self.tokenizer, ctx_args, tqdm_args=tqdm_args)
         preds = self.predict(chunks.data, tqdm_args=tqdm_args)
-        accs = preds_to_accuracies(preds, chunks, normalize_types=True)
-        accs_strict = preds_to_accuracies(preds, chunks, normalize_types=False)
-        accs["partial_acc_strict"] = accs_strict["partial_acc"]
-        accs["full_acc_strict"] = accs_strict["full_acc"]
-        return DatasetEvalResult(accs, chunks, preds)
+        return DatasetPredResult(chunks, preds)
 
 
 def dynamic_dataloader(
@@ -186,19 +191,19 @@ class CombinedModel:
     r1_wrapper: ModelWrapper
     check_in_isolation: bool
 
-    def eval_on_dataset(self, dataset: SrcDataset, tqdm_args={}) -> tuple[dict, dict]:
+    def eval_on_dataset(
+        self, dataset: SrcDataset, tqdm_args={}
+    ) -> tuple[DatasetPredResult, DatasetPredResult]:
         r0_wrapper, r1_wrapper = self.r0_wrapper, self.r1_wrapper
-        r0_accs, r0_chunks, r0_preds = r0_wrapper.eval_on_dataset(
-            dataset, tqdm_args={"leave": False}
-        )
+        r0_eval = r0_wrapper.eval_on_dataset(dataset, tqdm_args={"leave": False})
         r1_srcs = R1_srcs_from_preds(
             r1_wrapper.tokenizer,
             dataset,
-            r0_chunks.chunks_info,
-            r0_chunks.files,
-            r0_preds,
+            r0_eval.chunks.chunks_info,
+            r0_eval.chunks.files,
+            r0_eval.predictions,
             max_workers=r0_wrapper.args.max_workers,
             check_in_isolation=self.check_in_isolation,
         )
-        r1_accs, _, _ = r1_wrapper.eval_on_dataset(r1_srcs, tqdm_args={"leave": False})
-        return r0_accs, r1_accs
+        r1_eval = r1_wrapper.eval_on_dataset(r1_srcs, tqdm_args={"leave": False})
+        return r0_eval, r1_eval
