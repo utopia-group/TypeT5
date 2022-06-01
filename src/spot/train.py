@@ -47,6 +47,7 @@ class ModelTrainingArgs:
 def train_spot_model(
     src_datasets: dict[str, SrcDataset],
     model_name: str,
+    train_ctx_args: CtxArgs,
     dec_args: DecodingArgs,
     train_args: ModelTrainingArgs,
     record_batches: bool,
@@ -66,17 +67,15 @@ def train_spot_model(
     model_path = (
         "Salesforce/codet5-small" if use_small_model else "Salesforce/codet5-base"
     )
-    tokenizer: TokenizerSPOT = TokenizerSPOT.from_pretrained(model_path)
-    lit_model = TrainModelWrapper(
-        model_path, dec_args, model_saving_path=running_dir / "models"
-    )
-    wrapper = lit_model.wrapper
+    lit_model = TrainModelWrapper(model_path, model_saving_path=running_dir / "models")
+    tokenizer: TokenizerSPOT = lit_model.tokenizer
+    wrapper = ModelWrapper(lit_model.model, tokenizer, dec_args)
 
     chunks: dict[str, ChunkedDataset] = {}
     with run_long_task("Preparing chunked datasets", notify=False):
-        for n in ["valid", "test", "train"]:
+        for n in ["valid", "train"]:
             src = src_datasets[n]
-            chunks[n] = src.to_chunks(tokenizer, dec_args.ctx_args)
+            chunks[n] = src.to_chunks(tokenizer, train_ctx_args)
 
     wandb_logger = WandbLogger(
         project=model_name,
@@ -160,16 +159,16 @@ def train_spot_model(
             print(
                 f"Loading best model with score {best_loss} from: {checkpoint_cb.best_model_path}"
             )
-            wrapper = TrainModelWrapper.load_from_checkpoint(
+            wrapper.model = TrainModelWrapper.load_from_checkpoint(
                 checkpoint_cb.best_model_path
-            ).wrapper
+            ).model
         if save_dir.exists():
             shutil.rmtree(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
 
         wrapper.save_pretrained(save_dir)
         if record_batches:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = torch.device(f"cuda:{gpus[0]}" if gpus else "cpu")
             wrapper = wrapper.to(device)
             extra["batch_ids"] = lit_model.batch_ids
             extra["check_in_isolation"] = train_args.check_in_isolation
@@ -177,7 +176,6 @@ def train_spot_model(
                 R1_src_datasets = R1_srcs_from_extra(
                     wrapper,
                     src_datasets,
-                    chunks,
                     extra,
                     ckpt_dir=running_dir / "models",
                     ckpt_interval=ckpt_interval,
@@ -198,7 +196,6 @@ def train_spot_model(
 def R1_srcs_from_extra(
     wrapper: ModelWrapper,
     src_datasets: dict[str, SrcDataset],
-    chunk_datasets: dict[str, ChunkedDataset],
     extra: dict[str, Any],
     ckpt_dir: Path,
     ckpt_interval: int,
@@ -207,9 +204,16 @@ def R1_srcs_from_extra(
     batch_ids = extra["batch_ids"]
     check_in_isolation = extra["check_in_isolation"]
     print(f"Generating R1 dataset: train")
+
+    chunk_datasets = dict[str, ChunkedDataset]()
+    for n in ["test", "valid", "train"]:
+        src = src_datasets[n]
+        chunk_datasets[n] = src.to_chunks(tokenizer, wrapper.args.ctx_args)
+
     R1_src_datasets = dict[str, SrcDataset]()
     R1_src_datasets["train"] = R1_srcs_from_ckpts(
         tokenizer,
+        wrapper.args,
         src_datasets["train"],
         chunk_datasets["train"],
         batch_ids,
@@ -236,6 +240,7 @@ def R1_srcs_from_extra(
 
 def R1_srcs_from_ckpts(
     tokenizer: TokenizerSPOT,
+    dec_args: DecodingArgs,
     r0_src: SrcDataset,
     cdata: ChunkedDataset,
     chunk_ids: list[list[int]],
@@ -254,7 +259,8 @@ def R1_srcs_from_ckpts(
         **tqdm_args,
     ):
         ids = list(seq_flatten(chunk_ids[i : i + ckpt_interval]))
-        wrapper = ModelWrapper.from_pretrained(ckpt_dir / f"n_batches={i}")
+        model = ModelSPOT.from_pretrained(ckpt_dir / f"n_batches={i}")
+        wrapper = ModelWrapper(model, tokenizer, dec_args)
         wrapper = wrapper.to(device)
         try:
             data_sub = cdata[ids]
@@ -283,7 +289,6 @@ class TrainModelWrapper(pl.LightningModule):
     def __init__(
         self,
         model_checkpoint: str | Path,
-        args: DecodingArgs,
         *,
         model_saving_path: Path,
     ) -> None:
@@ -291,10 +296,6 @@ class TrainModelWrapper(pl.LightningModule):
         self.save_hyperparameters()
         self.model: ModelSPOT = ModelSPOT.from_pretrained(model_checkpoint)
         self.tokenizer: TokenizerSPOT = TokenizerSPOT.from_pretrained(model_checkpoint)
-        self.args = args
-        self.wrapper = ModelWrapper(
-            self.model, self.tokenizer, args, EmptyLoggingMonitor()
-        )
         self.model_saving_path = model_saving_path
         self.model_saving_interval: Optional[int] = None
 
@@ -336,7 +337,7 @@ class TrainModelWrapper(pl.LightningModule):
             if self.saving_coutner >= self.model_saving_interval:
                 self.saving_coutner = 0
                 # model can be used for `n_batches` and onward.
-                self.wrapper.save_pretrained(
+                self.model.save_pretrained(
                     self.model_saving_path / f"n_batches={len(self.batch_ids)}"
                 )
 
@@ -385,7 +386,6 @@ def evaluate_model(
     r0_srcs: SrcDataset,
     datadir: Path,
     check_in_isolation: bool,
-    max_labels: int = 16,
     reeval=False,
     dataset_name: Optional[str] = None,
 ) -> list[tuple[DecodingArgs, DatasetPredResult]]:
@@ -398,9 +398,7 @@ def evaluate_model(
     results = list[tuple[DecodingArgs, DatasetPredResult]]()
     r0_result = eval_cache.cached(
         f"r0_eval-{r0_wrapper.args}.pkl",
-        lambda: r0_wrapper.eval_on_dataset(
-            r0_srcs, max_labels=max_labels, tqdm_args={"leave": False}
-        ),
+        lambda: r0_wrapper.eval_on_dataset(r0_srcs, tqdm_args={"leave": False}),
     )
     results.append((r0_wrapper.args, r0_result))
     if r1_wrapper is None:
@@ -422,7 +420,7 @@ def evaluate_model(
     r1_result = eval_cache.cached(
         f"r1_eval-{r1_wrapper.args}-iso={check_in_isolation}.pkl",
         lambda: r1_wrapper.eval_on_dataset(  # type: ignore
-            r1_srcs, max_labels=max_labels, tqdm_args={"leave": False}
+            r1_srcs, tqdm_args={"leave": False}
         ),
     )
     results.append((r1_wrapper.args, r1_result))
@@ -448,31 +446,34 @@ def visualize_accuracies(results: list[tuple[DecodingArgs, DatasetPredResult]]):
         return result
 
     def display_acc(round):
-        (args, (accs, chunks, preds)) = results[round]
+        (args, pred_r) = results[round]
         with (prefix := widgets.Output()):
             print(f"model=R{round}")
             print(f"ctx_args: {args.ctx_args}")
             print(f"num_beams={args.num_beams}\n")
-        prev = None if round == 0 else results[round - 1][1][0]
-        main = pretty_display_dict(to_percent_str(accs, prev))
+        prev = None if round == 0 else results[round - 1][1].accuracies
+        main = pretty_display_dict(to_percent_str(pred_r.accuracies, prev))
         return widgets.VBox([prefix, main])
 
     tabs = [display_acc(i) for i in range(len(results))]
     result = widgets.Tab(tabs)
     for i in range(len(results)):
         result.set_title(i, f"R{i}")
+    result.selected_index = len(results) - 1
     return result
 
 
 def visualize_conf_matrix(results: list[tuple[DecodingArgs, DatasetPredResult]]):
     def show_conf(round, top_k):
-        (args, (accs, chunks, preds)) = results[round]
+        (args, pred_r) = results[round]
         labels = [
             normalize_type(t).head_name()
-            for info in chunks.chunks_info
+            for info in pred_r.chunks.chunks_info
             for t in info.types
         ]
-        all_preds = [normalize_type(t).head_name() for t in seq_flatten(preds)]
+        all_preds = [
+            normalize_type(t).head_name() for t in seq_flatten(pred_r.predictions)
+        ]
         unique_types = len(set(labels))
         top_k = min(top_k, unique_types)
         m = confusion_matrix_top_k(all_preds, labels, top_k)

@@ -63,7 +63,7 @@ class ModelWrapper:
     model: ModelSPOT
     tokenizer: TokenizerSPOT
     args: DecodingArgs
-    monitor: TaskMonitor
+    monitor: TaskMonitor = EmptyLoggingMonitor()
 
     def scale_ctx_size(self, factor) -> "ModelWrapper":
         r = copy(self)

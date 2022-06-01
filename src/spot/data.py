@@ -449,7 +449,7 @@ class SrcDataset:
         self,
         tokenizer: TokenizerSPOT,
         ctx_args: "CtxArgs",
-        tqdm_args: dict = {},
+        tqdm_args: dict = {"leave": False},
     ) -> "ChunkedDataset":
         srcs = self.srcs_with_labels()
         chunks = chunk_srcs_per_file(
