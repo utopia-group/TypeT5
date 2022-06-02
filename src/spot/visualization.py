@@ -5,7 +5,7 @@ from typing import Sequence
 import colored
 import ipywidgets as widgets
 
-from spot.data import ChunkedDataset, CtxArgs, PythonType
+from spot.data import ChunkedDataset, CtxArgs, PythonType, code_to_check_from_preds
 from spot.utils import *
 
 
@@ -111,6 +111,35 @@ def visualize_sequence(
     )
 
 
+def visualize_sequence_tabs(
+    contents: Sequence[str | widgets.Widget],
+    height: Optional[str] = None,
+    titles: Sequence[str] = None,
+    selected: int = None,
+) -> widgets.VBox:
+    assert len(contents) > 0
+
+    children = list[widgets.Widget]()
+    for el in contents:
+        if isinstance(el, str):
+            el = string_widget(el)
+        children.append(el)
+
+    out = widgets.Tab(children)
+    for i in range(len(children)):
+        title = titles[i] if titles is not None else str(i)
+        out.set_title(i, title)
+    if height is not None:
+        out.layout.height = height
+    box_layout = widgets.Layout(overflow="scroll")
+
+    if selected is None:
+        selected = len(contents) - 1
+    out.selected_index = selected
+
+    return widgets.VBox((out,), layout=box_layout)
+
+
 def in_scroll_pane(
     content: widgets.Widget | str, height: Optional[str] = "500px"
 ) -> widgets.Box:
@@ -189,3 +218,7 @@ def code_inline_type_masks(code: str, preds: list, label_color: Optional[str] = 
         return l
 
     return re.sub(SpecialNames.TypeMask, replace, code)
+
+
+def string_widget(s: str):
+    return widgets.HTML(string_to_html(s))

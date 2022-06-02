@@ -463,15 +463,18 @@ def pretty_show_dict(
         return s.getvalue()
 
 
+def string_to_html(s: str) -> str:
+    return f"<div style='white-space: pre-wrap; line-height: 1.2;'>{s}</div>"
+
+
 def pretty_display_dict(d: dict, float_precision: int = 5):
-    outputs = list[widgets.Output]()
+    outputs = list[widgets.Widget]()
     for expand in [False, True]:
-        o = widgets.Output()
-        with o:
-            max_level = 1000 if expand else 0
-            pretty_print_dict(
-                d, float_precision=float_precision, max_show_level=max_level
-            )
+        max_level = 1000 if expand else 0
+        d_s = pretty_show_dict(
+            d, float_precision=float_precision, max_show_level=max_level
+        )
+        o = widgets.HTML(string_to_html(d_s))
         outputs.append(o)
 
     tab = widgets.Tab()

@@ -33,6 +33,7 @@ from spot.model import (
 )
 from spot.type_env import PythonType
 from spot.utils import *
+from spot.visualization import string_widget, visualize_sequence_tabs
 
 
 @dataclass
@@ -484,20 +485,19 @@ def visualize_accuracies(results: list[tuple[DecodingArgs, DatasetPredResult]]):
 
     def display_acc(round):
         (args, pred_r) = results[round]
-        with (prefix := widgets.Output()):
-            print(f"model=R{round}")
-            print(f"ctx_args: {args.ctx_args}")
-            print(f"num_beams={args.num_beams}\n")
+        prefix = "\n".join(
+            [
+                f"model=R{round}",
+                f"ctx_args: {args.ctx_args}",
+            ]
+        )
         prev = None if round == 0 else results[round - 1][1].accuracies
         main = pretty_display_dict(to_percent_str(pred_r.accuracies, prev))
-        return widgets.VBox([prefix, main])
+        return widgets.VBox([string_widget(prefix), main])
 
-    tabs = [display_acc(i) for i in range(len(results))]
-    result = widgets.Tab(tabs)
-    for i in range(len(results)):
-        result.set_title(i, f"R{i}")
-    result.selected_index = len(results) - 1
-    return result
+    rounds = len(results)
+    tabs = [display_acc(i) for i in range(rounds)]
+    return visualize_sequence_tabs(tabs, titles=[f"R{i}" for i in range(rounds)])
 
 
 def visualize_conf_matrix(results: list[tuple[DecodingArgs, DatasetPredResult]]):
@@ -523,3 +523,28 @@ def visualize_conf_matrix(results: list[tuple[DecodingArgs, DatasetPredResult]])
         round=widgets.IntSlider(max_round, min=0, max=max_round),
         top_k=widgets.IntSlider(10, min=5, max=50, continuous_update=False),
     )
+
+
+import plotly.express as px
+
+from spot.type_env import MypyFeedback
+from spot.utils import groupby, pretty_print_dict
+
+
+def show_feedback_stats(new_dataset: SrcDataset):
+    fb_list: list[list[MypyFeedback]] = new_dataset.extra_stats["mypy_feedbacks"]
+    stats = {}
+    for k in ["feedbacks_per_file", "type_check_success_ratio"]:
+        stats[k] = new_dataset.extra_stats[k]
+    stats["total_feedbacks"] = sum(len(l) for l in fb_list)
+    error_code_counter = Counter[str]()
+    for l in fb_list:
+        for fb in l:
+            error_code_counter[fb.error_code] += 1
+    stats["top_feedbacks"] = dict(error_code_counter.most_common(10))
+    pretty_print_dict(stats)
+    df = pd.DataFrame(error_code_counter.most_common(), columns=["error_code", "count"])
+    display(px.bar(df, x="error_code", y="count", title="Error code frequencies"))
+    fdbk_srcs = [(f, src) for src, fs in zip(new_dataset.all_srcs, fb_list) for f in fs]
+    error_groups = groupby(fdbk_srcs, lambda x: x[0].error_code)
+    return error_groups
