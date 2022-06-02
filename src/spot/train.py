@@ -37,6 +37,8 @@ from spot.utils import *
 
 @dataclass
 class ModelTrainingArgs:
+    train_ctx_args: CtxArgs
+    dec_args: DecodingArgs
     train_max_tokens: int
     eval_max_tokens: int
     max_epochs: int
@@ -44,18 +46,60 @@ class ModelTrainingArgs:
     accumulate_grad_batches: int | dict | None = None
 
 
+class TrainingConfig(NamedTuple):
+    quicktest: bool = False
+    drop_comments: bool = True
+    data_reduction: int = 1
+    check_in_isolation: bool = False
+    all_labels: bool = False
+    ctx_size: int = 4096
+    left_margin: int = 2048
+    right_margin: int = 1024
+    train_max_labels: int = 64
+    dec_max_labels: int = 16
+    use_small_model: bool = False
+
+    def modified_params(self) -> dict[str, Any]:
+        default = TrainingConfig()
+        changed = dict[str, Any]()
+        # collect all attributes that are different from default
+        for attr in self.__annotations__:
+            if getattr(self, attr) != getattr(default, attr):
+                changed[attr] = getattr(self, attr)
+        return changed
+
+    def as_dict(self) -> dict[str, Any]:
+        return {attr: getattr(self, attr) for attr in self.__annotations__}
+
+    def as_name(self) -> str:
+        return "-".join(f"{str(k)}={str(v)}" for k, v in self.modified_params().items())
+
+    def train_ctx_args(self) -> CtxArgs:
+        return CtxArgs(
+            ctx_size=self.ctx_size,
+            left_margin=self.left_margin,
+            right_margin=self.right_margin,
+            max_labels=self.train_max_labels,
+        )
+
+    def dec_ctx_args(self) -> CtxArgs:
+        r = self.train_ctx_args()
+        r.max_labels = self.dec_max_labels
+        return r
+
+
 def train_spot_model(
     src_datasets: dict[str, SrcDataset],
     model_name: str,
-    train_ctx_args: CtxArgs,
-    dec_args: DecodingArgs,
     train_args: ModelTrainingArgs,
     record_batches: bool,
-    gpus: list[int] = [0],
+    gpus: list[int],
     quicktest=False,
     use_small_model=False,
 ) -> Tuple[ModelWrapper, dict]:
     os.chdir(proj_root())
+    train_ctx_args = train_args.train_ctx_args
+    dec_args = train_args.dec_args
 
     datadir = Path(os.getenv("datadir", "data"))
 
@@ -78,14 +122,9 @@ def train_spot_model(
             chunks[n] = src.to_chunks(tokenizer, train_ctx_args)
 
     wandb_logger = WandbLogger(
-        project=model_name,
+        project="SPOT",
+        name=model_name,
         save_dir=str(datadir),
-    )
-    wandb_logger.log_hyperparams(
-        {
-            "decoding_args": dec_args,
-            "train_args": train_args,
-        }
     )
 
     collate_fn = DataCollatorForSeq2Seq(lit_model.tokenizer, lit_model.model)
@@ -103,7 +142,7 @@ def train_spot_model(
     )
 
     ckpt_interval = max(1, len(train_dataloader) // 10)
-    val_interval = ckpt_interval
+    val_interval = max(1 if quicktest else 500, ckpt_interval)
 
     if record_batches:
         lit_model.model_saving_interval = ckpt_interval
@@ -149,8 +188,6 @@ def train_spot_model(
     save_dir = datadir / "checkpoints/lit-saved" / model_name
 
     final_eval = trainer.validate(model=lit_model, dataloaders=valid_dataloader)[0]
-    wandb_logger.finalize("Finished.")
-    wandb.finish()
 
     try:
         if (
@@ -249,7 +286,7 @@ def R1_srcs_from_ckpts(
     ckpt_interval: int,
     max_workers: int,
     device,
-    tqdm_args={},
+    tqdm_args={"leave": False},
 ) -> SrcDataset:
     chunks_info = list[SrcChunkInfo]()
     model_preds = list[list[PythonType]]()
@@ -367,7 +404,7 @@ def concat_batches(batches: list[dict], keys: list[str]) -> dict:
 
 import ipywidgets as widgets
 
-from spot.data import R1_srcs_from_preds, load_src_datasets, pretty_print_accuracies
+from spot.data import R1_srcs_from_preds, load_src_datasets
 from spot.model import DatasetPredResult
 from spot.type_env import normalize_type
 from spot.utils import (

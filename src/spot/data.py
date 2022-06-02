@@ -1190,7 +1190,7 @@ class GroupedAccCounter(Generic[T1]):
         self, key=lambda x: x, sort_by=lambda x: x
     ) -> dict[Any, CountedAcc]:
         return {
-            key(k): CountedAcc(self.correct_counter[k], self.total_counter[k])
+            str(key(k)): CountedAcc(self.correct_counter[k], self.total_counter[k])
             for k in sorted(self.total_counter.keys(), key=sort_by)
         }
 
@@ -1271,18 +1271,3 @@ def get_dataset_name(drop_comments: bool, all_labels: bool, spot_round: int = 0)
     label_tag = "-all_labels" if all_labels else ""
     round_tag = f"-R{spot_round}" if spot_round > 0 else ""
     return f"src_datasets{round_tag}{label_tag}{drop_tag}"
-
-
-def get_model_name(
-    dataset_name: str,
-    ctx_args: Optional[CtxArgs],
-    data_reduction: int = 1,
-    spot_round: int = 0,
-    check_in_isolation: bool = False,
-    quicktest: bool = False,
-):
-    ctx_sizes = ctx_args.as_tuple() if ctx_args is not None else "per_file"
-    test_tag = "quicktest-" if quicktest else ""
-    data_tag = "" if data_reduction == 1 else f"-data_reduction_{data_reduction}"
-    check_tag = f"-proj_check" if spot_round > 0 and not check_in_isolation else ""
-    return f"{test_tag}SPOT-model{check_tag}-{ctx_sizes}--{dataset_name}{data_tag}"

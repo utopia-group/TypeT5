@@ -1,5 +1,6 @@
 import ast
 import difflib
+import io
 import logging
 import math
 import os
@@ -10,7 +11,7 @@ from abc import ABC, abstractmethod
 from asyncio import current_task
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
@@ -446,11 +447,20 @@ def pretty_print_dict(
                 print(f"{k}:")
                 if isinstance(v, list):
                     v = {f"[{i}]": e for i, e in enumerate(v)}
-                pretty_print_accuracies(
-                    v, level=level + 1, max_show_level=max_show_level
-                )
+                pretty_print_dict(v, level=level + 1, max_show_level=max_show_level)
         else:
             print(f"{k}: {v}")
+
+
+def pretty_show_dict(
+    d: dict,
+    level: int = 0,
+    max_show_level: int = 1000,
+    float_precision: int = 5,
+) -> str:
+    with redirect_stdout(io.StringIO()) as s:
+        pretty_print_dict(d, level, max_show_level, float_precision)
+        return s.getvalue()
 
 
 def pretty_display_dict(d: dict, float_precision: int = 5):
@@ -469,16 +479,6 @@ def pretty_display_dict(d: dict, float_precision: int = 5):
     tab.set_title(0, "Compressed")
     tab.set_title(1, "Expanded")
     return tab
-
-
-def pretty_print_accuracies(
-    accs: dict[str, Any],
-    level: int = 0,
-    max_show_level: int = 1000,
-):
-    pretty_print_dict(
-        accs, level=level, max_show_level=max_show_level, float_precision=4
-    )
 
 
 def show_string_diff(str1, str2) -> str:
