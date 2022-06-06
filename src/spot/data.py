@@ -43,6 +43,7 @@ class GitRepo:
     url: str
     stars: int
     forks: int
+    description: str = ""
     lines_of_code: Optional[int] = None
     last_update: Optional[datetime] = None
     n_type_annots: Optional[int] = None
@@ -710,6 +711,7 @@ def load_src_datasets(
     repos_root: Optional[Path] = None,
     sets_to_load=["train", "valid", "test"],
 ) -> dict[str, SrcDataset]:
+    print("Loading datasets: ", datasets_name)
     src_datasets = dict[str, SrcDataset]()
     for n in sets_to_load:
         with open(datadir / "SPOT-data" / datasets_name / f"{n}.pkl", "rb") as f:
@@ -752,6 +754,14 @@ class SrcCheckResult(NamedTuple):
             print(f)
         print("======= New code =======")
         print(add_line_numbers(self.new_code))
+
+
+def type_check_src_skip_check(
+    src: TokenizedSrc,
+    preds: dict[int, str],
+) -> SrcCheckResult:
+    new_code = code_to_check_from_preds(src, preds)
+    return SrcCheckResult([], new_code)
 
 
 def type_check_src(
