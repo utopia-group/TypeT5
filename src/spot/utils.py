@@ -37,11 +37,15 @@ from libcst.metadata import CodePosition, CodeRange
 from sklearn.metrics import confusion_matrix
 from tqdm.auto import tqdm
 from tqdm.contrib.concurrent import process_map, thread_map
-from transformers import RobertaTokenizer
-from transformers.models.t5 import T5ForConditionalGeneration
+from transformers.models.roberta.tokenization_roberta import RobertaTokenizer
+from transformers.models.t5.modeling_t5 import T5ForConditionalGeneration
 
 TokenizerSPOT = RobertaTokenizer
 ModelSPOT = T5ForConditionalGeneration
+
+
+def load_model_spot(path) -> ModelSPOT:
+    return cast(ModelSPOT, ModelSPOT.from_pretrained(path))
 
 
 def get_spot_tokenizer() -> TokenizerSPOT:
@@ -317,7 +321,7 @@ def pushover_alert(
         conn.request(
             "POST",
             "/1/messages.json",
-            urllib.parse.urlencode(
+            urllib.parse.urlencode(  # type: ignore
                 {
                     "token": config["token"],
                     "user": config["user"],
@@ -391,7 +395,7 @@ def assert_eq(*xs: T1) -> None:
         assert x == y, f"{x} != {y}"
 
 
-def scalar_stats(xs) -> dict[str, float]:
+def scalar_stats(xs) -> dict[str, Any]:
     x = np.array(xs)
     return {
         "mean": x.mean(),

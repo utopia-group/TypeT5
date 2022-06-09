@@ -295,6 +295,8 @@ def _compute_ctx(
         max_window_size = right_margin_end - window_start
         assert max_window_size > 0
 
+    label_pos = 0
+    assert len(src.types) > 0
     for i in range(len(src.types)):
         label_pos = src.types_pos[i] - window_start
         if 0 <= label_pos < max_window_size:
@@ -497,9 +499,9 @@ class SrcDataset:
     @contextmanager
     def prepare_typecheck_projects(self, src_list: Sequence[TokenizedSrc]):
         # prepare project files
+        template_root = MypyChecker.temp_dir() / "original_projects"
+        template_root.mkdir(parents=True, exist_ok=True)
         try:
-            template_root = MypyChecker.temp_dir() / "original_projects"
-            template_root.mkdir(parents=True, exist_ok=True)
 
             repo_set = {s.repo for s in src_list}
             repo2srcs = self.repos2srcs()
@@ -1224,9 +1226,9 @@ def type_accuracies(
         "ast_acc": ast_acc.overall_acc(),
         "full_acc": full_acc.overall_acc(),
         "partial_acc_by_cat": partial_by_cat.grouped_accs(
-            key=lambda k: k.name, sort_by=lambda k: k.value
+            key=lambda x: x.name, sort_by=lambda x: x.value
         ),
-        "partial_acc_by_pos": partial_by_pos.grouped_accs(sort_by=lambda k: k.start),
+        "partial_acc_by_pos": partial_by_pos.grouped_accs(sort_by=lambda x: x.start),
     }
 
 

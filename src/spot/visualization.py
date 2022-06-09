@@ -111,7 +111,7 @@ def visualize_sequence(
 
     out = widgets.interactive_output(select, {"i": slider})
     if height is not None:
-        out.layout.height = height
+        out.layout.height = height  # type: ignore
     box_layout = widgets.Layout(overflow="scroll")
     return widgets.VBox(
         [
@@ -124,8 +124,8 @@ def visualize_sequence(
 def visualize_sequence_tabs(
     contents: Sequence[str | widgets.Widget],
     height: Optional[str] = None,
-    titles: Sequence[str] = None,
-    selected: int = None,
+    titles: Sequence[str] | None = None,
+    selected: int | None = None,
 ) -> widgets.VBox:
     assert len(contents) > 0
 
@@ -140,7 +140,7 @@ def visualize_sequence_tabs(
         title = titles[i] if titles is not None else str(i)
         out.set_title(i, title)
     if height is not None:
-        out.layout.height = height
+        out.layout.height = height  # type: ignore
     box_layout = widgets.Layout(overflow="scroll")
 
     if selected is None:
@@ -176,14 +176,14 @@ def interactive_sized(
     )
 
 
-def visualize_dicts(dicts: Sequence[dict], titles: Sequence[str] = None):
+def visualize_dicts(dicts: Sequence[dict], titles: Sequence[str] | None = None):
     def show_dict_with_change(d: dict, prev: Optional[dict]):
         result = dict()
         for k in d:
             v = d[k]
             v0 = prev.get(k, None) if prev is not None else None
             match v, v0:
-                case (CountedAcc(), CountedAcc()):
+                case (CountedAcc() as v, CountedAcc() as v0):
                     result[k] = f"{str(v)} [{v.acc - v0.acc:+.2%}]"
                 case (CountedAcc(), _):
                     result[k] = f"{str(v)}"
@@ -314,7 +314,7 @@ def visualize_counts(
     values: Iterable[str] | Counter,
     x_name: str,
     top_k: int | list[str] = 15,
-    title: str = None,
+    title: str | None = None,
 ):
     if isinstance(values, Counter):
         c = values

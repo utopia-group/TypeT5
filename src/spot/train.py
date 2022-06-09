@@ -311,7 +311,7 @@ def R1_srcs_from_ckpts(
         **tqdm_args,
     ):
         ids = list(seq_flatten(chunk_ids[i : i + ckpt_interval]))
-        model = ModelSPOT.from_pretrained(ckpt_dir / f"n_batches={i}")
+        model = load_model_spot(ckpt_dir / f"n_batches={i}")
         wrapper = ModelWrapper(model, tokenizer, dec_args)
         wrapper = wrapper.to(device)
         try:
@@ -346,7 +346,7 @@ class TrainModelWrapper(pl.LightningModule):
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.model: ModelSPOT = ModelSPOT.from_pretrained(model_checkpoint)
+        self.model: ModelSPOT = load_model_spot(model_checkpoint)
         self.tokenizer: TokenizerSPOT = TokenizerSPOT.from_pretrained(model_checkpoint)
         self.model_saving_path = model_saving_path
         self.model_saving_interval: Optional[int] = None
@@ -436,7 +436,7 @@ def evaluate_model(
     r1_wrapper: Optional[ModelWrapper],
     r0_srcs: SrcDataset,
     check_in_isolation: bool,
-    eval_cache: PickleCache = None,
+    eval_cache: Optional[PickleCache] = None,
 ) -> list[tuple[DecodingArgs, DatasetPredResult]]:
     def cached(name, f):
         if eval_cache is None:

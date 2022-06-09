@@ -228,7 +228,7 @@ class MypyChecker:
     MypyErrorCodesToIgnore = {"valid-type"}
 
     @staticmethod
-    def check_project(proj: Path, mypy_path: Path = None) -> MypyResult | str:
+    def check_project(proj: Path, mypy_path: Path | None = None) -> MypyResult | str:
         if mypy_path is None:
             mypy_path = proj_root() / ".venv/bin/mypy"
         cmd = [
@@ -247,7 +247,7 @@ class MypyChecker:
 
     @staticmethod
     def check_code(
-        code: str, cwd: Optional[Path] = None, mypy_path: Path = None
+        code: str, cwd: Optional[Path] = None, mypy_path: Path | None = None
     ) -> MypyResult | str:
         "Treat code as a single-file project and performs the type checking."
         if mypy_path is None:
@@ -409,7 +409,7 @@ class IncrementalChekcer:
 
 
 @contextmanager
-def mypy_checker(code_dir: Path, dmypy_path: Path = None, wait_before_check=1.0):
+def mypy_checker(code_dir: Path, dmypy_path: Path | None = None, wait_before_check=1.0):
     try:
         if dmypy_path is None:
             dmypy_path = proj_root() / ".venv/bin/dmypy"

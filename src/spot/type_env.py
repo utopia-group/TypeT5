@@ -7,7 +7,6 @@ from typing import *
 from libcst.metadata import CodeRange, PositionProvider
 from pyrsistent import plist
 from pyrsistent.typing import PList
-from tqdm import tqdm
 
 from .type_check import *
 from .utils import *
@@ -299,6 +298,9 @@ class TypeInfState:
     annotated: dict[AnnotPath, TypeExpr]
     num_errors: int
 
+    def next_to_annot(self) -> AnnotPath:
+        return next(iter(self.to_annot))
+
     def __str__(self):
         return f"""
 num_errors: {self.num_errors}
@@ -341,7 +343,7 @@ class TypeInfEnv:
 
     def __init__(
         self,
-        checker: MypyChecker,
+        checker: IncrementalChekcer,
         src_file,
         select_annotations: Callable[..., list[AnnotInfo]],
         check_any=False,
@@ -431,7 +433,7 @@ class TypeInfEnv:
 
 @contextmanager
 def type_inf_env(
-    checker: MypyChecker,
+    checker: IncrementalChekcer,
     src_file,
     select_annotations: Callable = SelectAnnotations.select_annotated,
     check_any=False,
@@ -461,13 +463,13 @@ def test_inference_performance(src_root, src_files=None, silent=True):
     with mypy_checker(src_root) as checker:
         n_checks = 0
         t_s = time.time()
-        for f in iter_f(src_files):
+        for f in iter_f(src_files):  # type: ignore
             with type_inf_env(checker, f) as env:
                 if len(env.init_to_annot()) == 0:
                     continue  # skip files with no annotations
                 n_checks += 1
                 while len(env.state.to_annot) > 0:
                     n_checks += 1
-                    env.step(TypeInfAction(env.state.to_annot[0], cst.Name("int")))
+                    env.step(TypeInfAction(env.state.next_to_annot(), cst.Name("int")))
         t_e = time.time()
         return {"n_checks": n_checks, "time": t_e - t_s}
