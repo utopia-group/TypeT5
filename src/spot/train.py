@@ -1,6 +1,6 @@
 import os
 import warnings
-from copy import copy
+from copy import copy, deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import *
@@ -33,7 +33,11 @@ from spot.model import (
 )
 from spot.type_env import PythonType
 from spot.utils import *
-from spot.visualization import string_widget, visualize_sequence_tabs
+from spot.visualization import (
+    pretty_display_dict,
+    string_widget,
+    visualize_sequence_tabs,
+)
 
 
 @dataclass
@@ -74,7 +78,12 @@ class TrainingConfig(NamedTuple):
         return {attr: getattr(self, attr) for attr in self.__annotations__}
 
     def as_name(self) -> str:
-        return "-".join(f"{str(k)}={str(v)}" for k, v in self.modified_params().items())
+        if len(self.modified_params()) > 0:
+            return "-".join(
+                f"{str(k)}={str(v)}" for k, v in self.modified_params().items()
+            )
+        else:
+            return "default"
 
     def train_ctx_args(self) -> CtxArgs:
         return CtxArgs(
@@ -97,6 +106,7 @@ def train_spot_model(
     record_batches: bool,
     gpus: list[int],
     quicktest=False,
+    use_early_stop=True,
     use_small_model=False,
 ) -> Tuple[ModelWrapper, dict]:
     os.chdir(proj_root())
@@ -143,8 +153,8 @@ def train_spot_model(
         shuffle=True,  # doesn't hurt
     )
 
-    ckpt_interval = max(1, len(train_dataloader) // 10)
-    val_interval = max(1 if quicktest else 500, ckpt_interval)
+    ckpt_interval = max(1, len(train_dataloader) // 8)
+    val_interval = 1 if quicktest else max(500, ckpt_interval)
 
     if record_batches:
         lit_model.model_saving_interval = ckpt_interval
@@ -168,10 +178,11 @@ def train_spot_model(
         max_epochs=train_args.max_epochs,
         logger=wandb_logger,
         val_check_interval=val_interval,
-        callbacks=[
-            checkpoint_cb,
-            EarlyStopping("valid/loss", mode="min", verbose=quicktest),
-        ],
+        callbacks=(
+            [checkpoint_cb, EarlyStopping("valid/loss", mode="min", verbose=quicktest)]
+            if use_early_stop
+            else []
+        ),
         gradient_clip_val=1.0,
         gradient_clip_algorithm="norm",
         accumulate_grad_batches=train_args.accumulate_grad_batches,
@@ -193,8 +204,10 @@ def train_spot_model(
 
     try:
         if (
-            best_loss := checkpoint_cb.best_model_score
-        ) is not None and best_loss < final_eval["valid/loss"]:
+            use_early_stop
+            and (best_loss := checkpoint_cb.best_model_score) is not None
+            and best_loss < final_eval["valid/loss"]
+        ):
             print(
                 f"Loading best model with score {best_loss} from: {checkpoint_cb.best_model_path}"
             )
@@ -421,29 +434,25 @@ from spot.utils import (
 def evaluate_model(
     r0_wrapper: ModelWrapper,
     r1_wrapper: Optional[ModelWrapper],
-    model_name: str,
     r0_srcs: SrcDataset,
-    datadir: Path,
     check_in_isolation: bool,
-    reeval=False,
-    dataset_name: Optional[str] = None,
+    eval_cache: PickleCache = None,
 ) -> list[tuple[DecodingArgs, DatasetPredResult]]:
-    data_tag = f"-{dataset_name}" if dataset_name is not None else ""
-    eval_cache = PickleCache(
-        datadir / f"checkpoints/lit-saved/{model_name}/eval{data_tag}"
-    )
-    if reeval:
-        eval_cache.clear()
+    def cached(name, f):
+        if eval_cache is None:
+            return f()
+        return eval_cache.cached(name, f)
+
     results = list[tuple[DecodingArgs, DatasetPredResult]]()
-    r0_result = eval_cache.cached(
+    r0_result = cached(
         f"r0_eval-{r0_wrapper.args}.pkl",
         lambda: r0_wrapper.eval_on_dataset(r0_srcs, tqdm_args={"leave": False}),
     )
-    results.append((r0_wrapper.args, r0_result))
+    results.append((deepcopy(r0_wrapper.args), r0_result))
     if r1_wrapper is None:
         return results
 
-    r1_srcs = eval_cache.cached(
+    r1_srcs = cached(
         f"r1_srcs-{r0_wrapper.args}-iso={check_in_isolation}.pkl",
         lambda: R1_srcs_from_preds(
             r1_wrapper.tokenizer,  # type: ignore
@@ -456,96 +465,12 @@ def evaluate_model(
         ),
     )
 
-    r1_result = eval_cache.cached(
+    r1_result = cached(
         f"r1_eval-{r1_wrapper.args}-iso={check_in_isolation}.pkl",
         lambda: r1_wrapper.eval_on_dataset(  # type: ignore
             r1_srcs, tqdm_args={"leave": False}
         ),
     )
-    results.append((r1_wrapper.args, r1_result))
+    results.append((deepcopy(r1_wrapper.args), r1_result))
 
     return results
-
-
-def visualize_accuracies(results: list[tuple[DecodingArgs, DatasetPredResult]]):
-    def to_percent_str(d: dict, prev: Optional[dict]):
-        result = dict()
-        for k in d:
-            v = d[k]
-            if isinstance(v, CountedAcc):
-                if prev is not None and k in prev and isinstance(prev[k], CountedAcc):
-                    result[k] = f"{str(v)} [{v.acc - prev[k].acc:+.2%}]"
-                else:
-                    result[k] = f"{str(v)}"
-            elif isinstance(v, dict):
-                new_prev = None if prev is None else prev.get(k, None)
-                result[k] = to_percent_str(v, new_prev)
-            else:
-                result[k] = v
-        return result
-
-    def display_acc(round):
-        (args, pred_r) = results[round]
-        prefix = "\n".join(
-            [
-                f"model=R{round}",
-                f"ctx_args: {args.ctx_args}",
-            ]
-        )
-        prev = None if round == 0 else results[round - 1][1].accuracies
-        main = pretty_display_dict(to_percent_str(pred_r.accuracies, prev))
-        return widgets.VBox([string_widget(prefix), main])
-
-    rounds = len(results)
-    tabs = [display_acc(i) for i in range(rounds)]
-    return visualize_sequence_tabs(tabs, titles=[f"R{i}" for i in range(rounds)])
-
-
-def visualize_conf_matrix(results: list[tuple[DecodingArgs, DatasetPredResult]]):
-    def show_conf(round, top_k):
-        (args, pred_r) = results[round]
-        labels = [
-            normalize_type(t).head_name()
-            for info in pred_r.chunks.chunks_info
-            for t in info.types
-        ]
-        all_preds = [
-            normalize_type(t).head_name() for t in seq_flatten(pred_r.predictions)
-        ]
-        unique_types = len(set(labels))
-        top_k = min(top_k, unique_types)
-        m = confusion_matrix_top_k(all_preds, labels, top_k)
-        display_conf_matrix(m)
-
-    max_round = len(results) - 1
-
-    return widgets.interactive(
-        show_conf,
-        round=widgets.IntSlider(max_round, min=0, max=max_round),
-        top_k=widgets.IntSlider(10, min=5, max=50, continuous_update=False),
-    )
-
-
-import plotly.express as px
-
-from spot.type_env import MypyFeedback
-from spot.utils import groupby, pretty_print_dict
-
-
-def show_feedback_stats(new_dataset: SrcDataset):
-    fb_list: list[list[MypyFeedback]] = new_dataset.extra_stats["mypy_feedbacks"]
-    stats = {}
-    for k in ["feedbacks_per_file", "type_check_success_ratio"]:
-        stats[k] = new_dataset.extra_stats[k]
-    stats["total_feedbacks"] = sum(len(l) for l in fb_list)
-    error_code_counter = Counter[str]()
-    for l in fb_list:
-        for fb in l:
-            error_code_counter[fb.error_code] += 1
-    stats["top_feedbacks"] = dict(error_code_counter.most_common(10))
-    pretty_print_dict(stats)
-    df = pd.DataFrame(error_code_counter.most_common(), columns=["error_code", "count"])
-    display(px.bar(df, x="error_code", y="count", title="Error code frequencies"))
-    fdbk_srcs = [(f, src) for src, fs in zip(new_dataset.all_srcs, fb_list) for f in fs]
-    error_groups = groupby(fdbk_srcs, lambda x: x[0].error_code)
-    return error_groups

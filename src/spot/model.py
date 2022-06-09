@@ -14,6 +14,7 @@ from spot.data import (
     CtxArgs,
     R1_srcs_from_preds,
     SrcDataset,
+    TokenizedSrc,
     output_ids_as_types,
     patch_code_with_extra,
     preds_to_accuracies,
@@ -117,6 +118,7 @@ class ModelWrapper:
             for i, p in zip(batch["chunk_id"], preds):
                 pred_types[int(i)] = p
             tqdm_bar.update(n_chunks)
+        tqdm_bar.close()
         return [pred_types[int(i)] for i in dataset["chunk_id"]]
 
     def save_pretrained(self, path: Path):

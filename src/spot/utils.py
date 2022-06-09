@@ -463,27 +463,6 @@ def pretty_show_dict(
         return s.getvalue()
 
 
-def string_to_html(s: str) -> str:
-    return f"<div style='white-space: pre-wrap; line-height: 1.2;'>{s}</div>"
-
-
-def pretty_display_dict(d: dict, float_precision: int = 5):
-    outputs = list[widgets.Widget]()
-    for expand in [False, True]:
-        max_level = 1000 if expand else 0
-        d_s = pretty_show_dict(
-            d, float_precision=float_precision, max_show_level=max_level
-        )
-        o = widgets.HTML(string_to_html(d_s))
-        outputs.append(o)
-
-    tab = widgets.Tab()
-    tab.children = outputs
-    tab.set_title(0, "Compressed")
-    tab.set_title(1, "Expanded")
-    return tab
-
-
 def show_string_diff(str1, str2) -> str:
     diffs = difflib.unified_diff(str1.splitlines(), str2.splitlines())
     return "\n".join(diffs)
@@ -494,3 +473,55 @@ def add_line_numbers(code: str):
     ln_digits = int(math.log(len(lines), 10)) + 1
     format_s = "{ln:" + str(ln_digits) + "d}|  {line}"
     return "\n".join(format_s.format(ln=i + 1, line=l) for i, l in enumerate(lines))
+
+
+class CountedAcc(NamedTuple):
+    n_correct: int
+    n_total: int
+
+    @property
+    def acc(self):
+        return safe_div(self.n_correct, self.n_total)
+
+    def __str__(self):
+        acc = safe_div(self.n_correct, self.n_total)
+        return f"{acc:.2%} (count={show_count(self.n_total)})"
+
+    def __repr__(self):
+        acc = safe_div(self.n_correct, self.n_total)
+        return f"CountedAcc({acc:.2%}, count={self.n_total})"
+
+
+def show_count(c: int):
+    if c < 1000:
+        return str(c)
+    return f"{c / 1000:.1f}k"
+
+
+class GroupedAccCounter(Generic[T1]):
+    def __init__(self) -> None:
+        self.correct_counter = Counter[T1]()
+        self.total_counter = Counter[T1]()
+
+    def count(self, key: T1, n_correct: int | bool, total: int) -> None:
+        self.correct_counter[key] += int(n_correct)
+        self.total_counter[key] += total
+
+    def grouped_accs(
+        self, key=lambda x: x, sort_by=lambda x: x
+    ) -> dict[Any, CountedAcc]:
+        return {
+            str(key(k)): CountedAcc(self.correct_counter[k], self.total_counter[k])
+            for k in sorted(self.total_counter.keys(), key=sort_by)
+        }
+
+    def overall_acc(self) -> CountedAcc:
+        return CountedAcc(
+            sum(self.correct_counter.values()), sum(self.total_counter.values())
+        )
+
+
+def safe_div(a, b):
+    if b == 0:
+        return float("nan")
+    return a / b

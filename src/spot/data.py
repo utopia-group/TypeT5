@@ -14,6 +14,7 @@ from typing import *
 import dateparser
 from datasets import Dataset
 
+from spot.type_check import MypyResult
 from spot.type_env import (
     AnnotCat,
     AnnotInfo,
@@ -362,6 +363,7 @@ def chunk_srcs_per_file(
             types,
             types_info,
             src_ids=[src_id] * len(label_ids),
+            label_ids=label_ids,
         )
         chunks_info.append(meta)
 
@@ -492,45 +494,53 @@ class SrcDataset:
     def print_stats(self):
         pretty_print_dict(self.stats_to_show())
 
-    def _get_type_checker_feedback_iso(
+    @contextmanager
+    def prepare_typecheck_projects(self, src_list: Sequence[TokenizedSrc]):
+        # prepare project files
+        try:
+            template_root = MypyChecker.temp_dir() / "original_projects"
+            template_root.mkdir(parents=True, exist_ok=True)
+
+            repo_set = {s.repo for s in src_list}
+            repo2srcs = self.repos2srcs()
+            for repo in repo_set:
+                for s in repo2srcs[repo]:
+                    any_preds = {i: "Any" for i, _ in enumerate(s.types)}
+                    new_code = code_to_check_from_preds(s, any_preds)
+                    new_path = template_root / s.file
+                    new_path.parent.mkdir(parents=True, exist_ok=True)
+                    new_path.write_text(new_code)
+            yield template_root
+        finally:
+            shutil.rmtree(template_root, ignore_errors=True)
+
+    def type_check_in_project(
         self,
         file2preds: dict[Path, dict[int, str]],
         max_workers: int,
         mypy_path=None,
+        include_all_errors: bool = False,
         tqdm_args={},
     ) -> list["SrcCheckResult"]:
         file2src = self.file2src(resolve=False)
         repos_root = self.repos_root
         src_list = [file2src[f.relative_to(repos_root)] for f in file2preds]
-        chunksize = max(1, len(src_list) // (8 * max_workers))
 
-        # prepare project files
-        template_root = MypyChecker.temp_dir() / "original_projects"
-        template_root.mkdir(parents=True, exist_ok=True)
+        with self.prepare_typecheck_projects(src_list) as template_root:
+            project_roots = [template_root / f.repo for f in src_list]
 
-        repo_set = {s.repo for s in src_list}
-        repo2srcs = self.repos2srcs()
-        for repo in repo_set:
-            for s in repo2srcs[repo]:
-                any_preds = {i: "Any" for i, _ in enumerate(s.types)}
-                new_code = code_to_check_from_preds(s, any_preds)
-                new_path = template_root / s.file
-                new_path.parent.mkdir(parents=True, exist_ok=True)
-                new_path.write_text(new_code)
-
-        project_roots = [template_root / f.repo for f in src_list]
-
-        check_rs: list[SrcCheckResult] = process_map(
-            type_check_src_in_project,
-            src_list,
-            list(file2preds.values()),
-            project_roots,
-            [mypy_path for _ in src_list],
-            max_workers=max_workers,
-            desc="map type_check_src_in_project",
-            chunksize=chunksize,
-            **tqdm_args,
-        )
+            check_rs: list[SrcCheckResult] = process_map(
+                type_check_src_in_project,
+                src_list,
+                list(file2preds.values()),
+                project_roots,
+                [include_all_errors for _ in src_list],
+                [mypy_path for _ in src_list],
+                max_workers=max_workers,
+                desc="map type_check_src_in_project",
+                chunksize=max(1, len(src_list) // (8 * max_workers)),
+                **tqdm_args,
+            )
         return check_rs
 
     def add_type_checker_feedback(
@@ -540,6 +550,7 @@ class SrcDataset:
         max_workers: int,
         tqdm_args: dict,
         in_isolation: bool,
+        include_all_errors: bool = False,
         mypy_path: Optional[Path] = None,
     ) -> "SrcDataset":
         """Add the predictions to the corresponding files, call the type checker to
@@ -568,8 +579,12 @@ class SrcDataset:
                     **tqdm_args,
                 )
             else:
-                check_rs = self._get_type_checker_feedback_iso(
-                    file2preds, max_workers, mypy_path, tqdm_args
+                check_rs = self.type_check_in_project(
+                    file2preds,
+                    max_workers,
+                    mypy_path,
+                    include_all_errors=include_all_errors,
+                    tqdm_args=tqdm_args,
                 )
         finally:
             MypyChecker.clear_temp_cache()
@@ -797,6 +812,7 @@ def type_check_src_in_project(
     src: TokenizedSrc,
     preds: dict[int, str],
     project_root: Path,
+    include_all_errors: bool,
     mypy_path: Optional[Path] = None,
 ) -> SrcCheckResult:
     # setup: copy all files into cwd
@@ -811,10 +827,11 @@ def type_check_src_in_project(
         (cwd / rel_path).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(f, cwd / rel_path)
 
+    rel_path = src.file.relative_to(src.repo)
+    file_path = cwd / rel_path
+
     def from_preds(preds: dict[int, str]):
         new_code = code_to_check_from_preds(src, preds)
-        rel_path = src.file.relative_to(src.repo)
-        file_path = cwd / rel_path
         file_path.write_text(new_code)
         check_r = MypyChecker.check_project(cwd, mypy_path=mypy_path)
         feedback: list[MypyFeedback] | str
@@ -825,16 +842,20 @@ def type_check_src_in_project(
         return feedback, new_code
 
     try:
-        fdbk0, _ = from_preds({i: "Any" for i, _ in preds.items()})
-        fdbk1, new_code = from_preds(preds)
-        if isinstance(fdbk1, list) and isinstance(fdbk0, list):
-            preexisting = {(f.position.line, f.message) for f in fdbk0}
-            new_fdbk = [
-                f for f in fdbk1 if (f.position.line, f.message) not in preexisting
-            ]
-            return SrcCheckResult(new_fdbk, new_code)
+        if include_all_errors:
+            fdbk, new_code = from_preds(preds)
+            return SrcCheckResult(fdbk, new_code)
         else:
-            return SrcCheckResult(fdbk1, new_code)
+            fdbk0, _ = from_preds({i: "Any" for i, _ in preds.items()})
+            fdbk1, new_code = from_preds(preds)
+            if isinstance(fdbk1, list) and isinstance(fdbk0, list):
+                preexisting = {(f.position.line, f.message) for f in fdbk0}
+                new_fdbk = [
+                    f for f in fdbk1 if (f.position.line, f.message) not in preexisting
+                ]
+                return SrcCheckResult(new_fdbk, new_code)
+            else:
+                return SrcCheckResult(fdbk1, new_code)
     finally:
         shutil.rmtree(MypyChecker.temp_dir() / proc.name)
 
@@ -954,6 +975,8 @@ class SrcChunkInfo:
     annots_info: list[AnnotInfo]  # the label AnnotInfos in this chunk
     # maps each label to its source file id
     src_ids: list[int]
+    # maps each label to its label id in the corresponding TokenizedSrc
+    label_ids: list[int]
 
     def __repr__(self):
         return f"SrcChunkInfo(num_types={len(self.types)}, unique_src_ids={set(self.src_ids)})"
@@ -1156,58 +1179,6 @@ def R1_srcs_from_preds(
         max_workers=max_workers,
         tqdm_args=tqdm_args,
     )
-
-
-def safe_div(a, b):
-    if b == 0:
-        return float("nan")
-    return a / b
-
-
-def show_count(c: int):
-    if c < 1000:
-        return str(c)
-    return f"{c / 1000:.1f}k"
-
-
-class CountedAcc(NamedTuple):
-    n_correct: int
-    n_total: int
-
-    @property
-    def acc(self):
-        return safe_div(self.n_correct, self.n_total)
-
-    def __str__(self):
-        acc = safe_div(self.n_correct, self.n_total)
-        return f"{acc:.2%} (count={show_count(self.n_total)})"
-
-    def __repr__(self):
-        acc = safe_div(self.n_correct, self.n_total)
-        return f"CountedAcc({acc:.2%}, count={self.n_total})"
-
-
-class GroupedAccCounter(Generic[T1]):
-    def __init__(self) -> None:
-        self.correct_counter = Counter[T1]()
-        self.total_counter = Counter[T1]()
-
-    def count(self, key: T1, n_correct: int | bool, total: int) -> None:
-        self.correct_counter[key] += int(n_correct)
-        self.total_counter[key] += total
-
-    def grouped_accs(
-        self, key=lambda x: x, sort_by=lambda x: x
-    ) -> dict[Any, CountedAcc]:
-        return {
-            str(key(k)): CountedAcc(self.correct_counter[k], self.total_counter[k])
-            for k in sorted(self.total_counter.keys(), key=sort_by)
-        }
-
-    def overall_acc(self) -> CountedAcc:
-        return CountedAcc(
-            sum(self.correct_counter.values()), sum(self.total_counter.values())
-        )
 
 
 def type_accuracies(

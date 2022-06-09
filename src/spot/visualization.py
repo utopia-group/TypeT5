@@ -4,8 +4,18 @@ from typing import Sequence
 
 import colored
 import ipywidgets as widgets
+import plotly.express as px
 
-from spot.data import ChunkedDataset, CtxArgs, PythonType, code_to_check_from_preds
+from spot.data import (
+    ChunkedDataset,
+    CountedAcc,
+    CtxArgs,
+    PythonType,
+    SrcDataset,
+    code_to_check_from_preds,
+)
+from spot.model import DatasetPredResult, DecodingArgs
+from spot.type_check import normalize_type
 from spot.utils import *
 
 
@@ -166,6 +176,61 @@ def interactive_sized(
     )
 
 
+def visualize_dicts(dicts: Sequence[dict], titles: Sequence[str] = None):
+    def show_dict_with_change(d: dict, prev: Optional[dict]):
+        result = dict()
+        for k in d:
+            v = d[k]
+            v0 = prev.get(k, None) if prev is not None else None
+            match v, v0:
+                case (CountedAcc(), CountedAcc()):
+                    result[k] = f"{str(v)} [{v.acc - v0.acc:+.2%}]"
+                case (CountedAcc(), _):
+                    result[k] = f"{str(v)}"
+                case (float(), float()) | (int(), int()):
+                    result[k] = f"{str(v)} [{v - v0}]"
+                case (dict(), dict() | None):
+                    result[k] = show_dict_with_change(v, v0)
+                case _:
+                    result[k] = str(v)
+        return result
+
+    def display_acc(round):
+        d = dicts[round]
+        prev = None if round == 0 else dicts[round - 1]
+        return pretty_display_dict(show_dict_with_change(d, prev))
+
+    tabs = [display_acc(i) for i in range(len(dicts))]
+    if titles is None:
+        titles = [f"R{i}" for i in range(len(dicts))]
+    return visualize_sequence_tabs(tabs, titles=titles)
+
+
+def visualize_conf_matrix(results: list[DatasetPredResult]):
+    def show_conf(round, top_k):
+        pred_r = results[round]
+        labels = [
+            normalize_type(t).head_name()
+            for info in pred_r.chunks.chunks_info
+            for t in info.types
+        ]
+        all_preds = [
+            normalize_type(t).head_name() for t in seq_flatten(pred_r.predictions)
+        ]
+        unique_types = len(set(labels))
+        top_k = min(top_k, unique_types)
+        m = confusion_matrix_top_k(all_preds, labels, top_k)
+        display_conf_matrix(m)
+
+    max_round = len(results) - 1
+
+    return widgets.interactive(
+        show_conf,
+        round=widgets.IntSlider(max_round, min=0, max=max_round),
+        top_k=widgets.IntSlider(10, min=5, max=50, continuous_update=False),
+    )
+
+
 def colorize_code_html(code: str) -> str:
     "Highligh the special comments in the type checker-augmented python code."
     output = list[str]()
@@ -222,3 +287,112 @@ def code_inline_type_masks(code: str, preds: list, label_color: Optional[str] = 
 
 def string_widget(s: str):
     return widgets.HTML(string_to_html(s))
+
+
+def string_to_html(s: str) -> str:
+    return f"<div style='white-space: pre-wrap; line-height: 1.2; font-family: monospace, monospace;'>{s}</div>"
+
+
+def pretty_display_dict(d: dict, float_precision: int = 5):
+    outputs = list[widgets.Widget]()
+    for expand in [False, True]:
+        max_level = 1000 if expand else 0
+        d_s = pretty_show_dict(
+            d, float_precision=float_precision, max_show_level=max_level
+        )
+        o = widgets.HTML(string_to_html(d_s))
+        outputs.append(o)
+
+    tab = widgets.Tab()
+    tab.children = outputs
+    tab.set_title(0, "Compressed")
+    tab.set_title(1, "Expanded")
+    return tab
+
+
+def visualize_counts(
+    values: Iterable[str] | Counter,
+    x_name: str,
+    top_k: int | list[str] = 15,
+    title: str = None,
+):
+    if isinstance(values, Counter):
+        c = values
+    else:
+        c = Counter(values)
+    if isinstance(top_k, int):
+        top_values = c.most_common(top_k)
+    else:
+        top_values = [(k, c.get(k, 0)) for k in top_k]
+    df = pd.DataFrame(top_values, columns=[x_name, "count"])
+    if title is None:
+        title = f"{x_name} distribution"
+    return px.bar(df, x=x_name, y="count", title=title)
+
+
+import plotly.express as px
+
+from spot.type_env import MypyFeedback
+from spot.utils import groupby, pretty_print_dict
+
+
+def plot_feedback_distribution(
+    feedbacks: Iterable[MypyFeedback],
+):
+    error_code_counter = Counter[str]()
+    for fb in feedbacks:
+        error_code_counter[fb.error_code] += 1
+    top_feedbacks = dict(error_code_counter.most_common(10))
+    df = pd.DataFrame(error_code_counter.most_common(), columns=["error_code", "count"])
+    display(px.bar(df, x="error_code", y="count", title="Error code frequencies"))
+    return top_feedbacks
+
+
+def show_feedback_stats(dataset: SrcDataset):
+    fb_list: list[list[MypyFeedback]] = dataset.extra_stats["mypy_feedbacks"]
+    stats = {}
+    for k in ["feedbacks_per_file", "type_check_success_ratio"]:
+        stats[k] = dataset.extra_stats[k]
+    stats["total_feedbacks"] = sum(len(l) for l in fb_list)
+    num_labels = sum(len(s.types) for s in dataset.all_srcs)
+    stats["feedbacks_per_label"] = stats["total_feedbacks"] / num_labels
+    stats["top_feedbacks"] = plot_feedback_distribution(seq_flatten(fb_list))
+    pretty_print_dict(stats)
+    fdbk_srcs = [(f, src) for src, fs in zip(dataset.all_srcs, fb_list) for f in fs]
+    error_groups = groupby(fdbk_srcs, lambda x: x[0].error_code)
+    return error_groups
+
+
+def visualize_type_distribution(
+    types: Iterable[PythonType], top_k: int | list[str] = 15, recursive: bool = True
+):
+    values = list[str]()
+
+    def count_type(t: PythonType):
+        values.append(t.head_name())
+        if recursive:
+            for c in t.args:
+                count_type(c)
+
+    for t in types:
+        count_type(t)
+
+    return visualize_counts(values, "type", top_k)
+
+
+def visualize_feedbacks_in_srcs(
+    dataset: SrcDataset,
+):
+    error_groups = show_feedback_stats(dataset)
+    fdbks = list(seq_flatten(list(error_groups.values())))
+    n_total = len(fdbks)
+
+    def viz(i):
+        fdbk, src = fdbks[i]
+        code = code_inline_type_masks(src.origin_code, src.types)
+        text = (
+            f"feedback: {fdbk}\n" + "=========code=========\n" + add_line_numbers(code)
+        )
+        display(string_widget(text))
+
+    return interactive_sized(viz, {"i": (0, n_total - 1)})
