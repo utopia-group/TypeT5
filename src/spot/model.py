@@ -32,6 +32,8 @@ class DecodingArgs:
     do_sample: bool = False
     top_p: float = 0.9
     num_beams: Optional[int] = None
+    num_beam_groups: Optional[int] = None
+    diversity_penalty: float | None = None
 
     def scale_ctx_size(self, factor: float) -> "DecodingArgs":
         result = deepcopy(self)
@@ -71,27 +73,21 @@ class ModelWrapper:
         r.args = r.args.scale_ctx_size(factor)
         return r
 
-    @overload
-    def predict_on_batch(
-        self, batch: dict, num_return_sequences: None
-    ) -> list[list[PythonType]]:
-        ...
-
-    @overload
-    def predict_on_batch(
-        self, batch: dict, num_return_sequences: int
-    ) -> list[list[list[PythonType]]]:
-        ...
-
     def predict_on_batch(
         self,
         batch: dict,
-        num_return_sequences=None,
-    ):
+        num_return_sequences: int | None = None,
+    ) -> list[list[PythonType]]:
         """Run the model on the given batch and return the predicted types for each row."""
         model = self.model
         n_labels = batch["n_labels"]
         max_labels = max(n_labels)
+
+        div_pen = self.args.diversity_penalty
+        if self.args.num_beam_groups is not None:
+            assert (
+                div_pen is not None and div_pen > 0
+            ), "num_beam_groups requires diversity_penalty > 0"
 
         output_ids = model.generate(
             inputs=batch["input_ids"],
@@ -99,31 +95,30 @@ class ModelWrapper:
             top_p=self.args.top_p,
             num_beams=self.args.num_beams,
             num_return_sequences=num_return_sequences,
+            num_beam_groups=self.args.num_beam_groups,
             max_length=self.args.max_tokens_per_type * max_labels,
+            diversity_penalty=div_pen,
+            length_penalty=2.0,
+            renormalize_logits=True,
         ).cpu()  # type: ignore
-        if num_return_sequences is None:
-            assert len(output_ids.shape) == 2
-        else:
-            assert len(output_ids.shape) == 3
+        assert len(output_ids.shape) == 2
 
         def decode_row(row, n_labels) -> list[PythonType]:
             return output_ids_as_types(row, self.tokenizer, n_labels)
 
-        n_chunks = output_ids.shape[0]
-        if num_return_sequences is None:
-            return [decode_row(output_ids[i, :], n_labels[i]) for i in range(n_chunks)]
+        n_rows = output_ids.shape[0]
+        if num_return_sequences is not None:
+            assert_eq(n_rows, num_return_sequences * len(n_labels))
         else:
-            return [
-                [
-                    decode_row(output_ids[i, j, :], n_labels[i])
-                    for j in range(num_return_sequences)
-                ]
-                for i in range(n_chunks)
-            ]
+            num_return_sequences = 1
+        return [
+            decode_row(output_ids[i, :], n_labels[i // num_return_sequences])
+            for i in range(n_rows)
+        ]
 
     @overload
     def predict(
-        self, dataset: Dataset, tqdm_args: dict, num_return_sequences: None = None
+        self, dataset: Dataset, tqdm_args: dict = {}, num_return_sequences: None = None
     ) -> list[list[PythonType]]:
         ...
 
@@ -150,17 +145,24 @@ class ModelWrapper:
             shuffle=True,
         )
         device = model.device
+        # we use this dict to keep the order of the chunks since it may be permuted by dynamic_dataloader
         pred_types = dict[int, list]()
         tqdm_bar = tqdm(total=len(dataset), desc="predict", **tqdm_args)
         for batch in loader:
             n_chunks = batch["input_ids"].shape[0]
             batch["input_ids"] = batch["input_ids"].to(device)
             preds = self.predict_on_batch(batch, num_return_sequences)
-            for i, p in zip(batch["chunk_id"], preds):
-                pred_types[int(i)] = p  # type: ignore
+            for i, c_id in enumerate(batch["chunk_id"]):
+                c_id = int(c_id)
+                if num_return_sequences is None:
+                    pred_types[c_id] = preds[i]
+                else:
+                    pred_types[c_id] = preds[
+                        i * num_return_sequences : (i + 1) * num_return_sequences
+                    ]
             tqdm_bar.update(n_chunks)
         tqdm_bar.close()
-        return [pred_types[int(i)] for i in dataset["chunk_id"]]
+        return [pred_types[int(c_id)] for c_id in dataset["chunk_id"]]
 
     def save_pretrained(self, path: Path):
         """Save the model to the given path along with its tokenizer and args."""

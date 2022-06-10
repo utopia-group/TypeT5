@@ -420,3 +420,18 @@ def mypy_checker(code_dir: Path, dmypy_path: Path | None = None, wait_before_che
         )
     finally:
         checker.close()
+
+
+def count_type_frequency(types: Iterable[PythonType], recursive: bool=True) -> Counter[str]:
+    counter = Counter[str]()
+    
+    def count_type(t: PythonType):
+        counter[t.head_name()] += 1
+        if recursive:
+            for c in t.args:
+                count_type(c)
+
+    for t in types:
+        count_type(t)
+        
+    return counter

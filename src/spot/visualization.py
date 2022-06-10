@@ -135,7 +135,7 @@ def visualize_sequence_tabs(
             el = string_widget(el)
         children.append(el)
 
-    out = widgets.Tab(children)
+    out = widgets.Tab(children=children)
     for i in range(len(children)):
         title = titles[i] if titles is not None else str(i)
         out.set_title(i, title)
@@ -188,7 +188,9 @@ def visualize_dicts(dicts: Sequence[dict], titles: Sequence[str] | None = None):
                 case (CountedAcc(), _):
                     result[k] = f"{str(v)}"
                 case (float(), float()) | (int(), int()):
-                    result[k] = f"{str(v)} [{v - v0}]"
+                    result[k] = f"{v:.4g} [{v - v0:.4g}]"
+                case (float(), _) | (int(), _):
+                    result[k] = f"{v:.4g}"
                 case (dict(), dict() | None):
                     result[k] = show_dict_with_change(v, v0)
                 case _:
@@ -311,23 +313,28 @@ def pretty_display_dict(d: dict, float_precision: int = 5):
 
 
 def visualize_counts(
-    values: Iterable[str] | Counter,
+    values: Counter[str] | dict[str, Counter[str]],
     x_name: str,
     top_k: int | list[str] = 15,
     title: str | None = None,
 ):
     if isinstance(values, Counter):
-        c = values
-    else:
-        c = Counter(values)
+        values = {"Source": values}
+    y_names = list(values.keys())
+    counters = list(values.values())
     if isinstance(top_k, int):
-        top_values = c.most_common(top_k)
+        top_keys = [k for k, _ in counters[0].most_common(top_k)]
     else:
-        top_values = [(k, c.get(k, 0)) for k in top_k]
-    df = pd.DataFrame(top_values, columns=[x_name, "count"])
+        top_keys = top_k
+    data = list[dict]()
+    for s in y_names:
+        c = values[s]
+        for k in top_keys:
+            data.append({x_name: k, "Count": c.get(k, 0), "Source": s})
+    df = pd.DataFrame(data)
     if title is None:
         title = f"{x_name} distribution"
-    return px.bar(df, x=x_name, y="count", title=title)
+    return px.bar(df, x=x_name, y="Count", color="Source", title=title)
 
 
 import plotly.express as px
@@ -361,23 +368,6 @@ def show_feedback_stats(dataset: SrcDataset):
     fdbk_srcs = [(f, src) for src, fs in zip(dataset.all_srcs, fb_list) for f in fs]
     error_groups = groupby(fdbk_srcs, lambda x: x[0].error_code)
     return error_groups
-
-
-def visualize_type_distribution(
-    types: Iterable[PythonType], top_k: int | list[str] = 15, recursive: bool = True
-):
-    values = list[str]()
-
-    def count_type(t: PythonType):
-        values.append(t.head_name())
-        if recursive:
-            for c in t.args:
-                count_type(c)
-
-    for t in types:
-        count_type(t)
-
-    return visualize_counts(values, "type", top_k)
 
 
 def visualize_feedbacks_in_srcs(

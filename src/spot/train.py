@@ -437,6 +437,7 @@ def evaluate_model(
     r0_srcs: SrcDataset,
     check_in_isolation: bool,
     eval_cache: Optional[PickleCache] = None,
+    tqdm_args={},
 ) -> list[tuple[DecodingArgs, DatasetPredResult]]:
     def cached(name, f):
         if eval_cache is None:
@@ -446,7 +447,7 @@ def evaluate_model(
     results = list[tuple[DecodingArgs, DatasetPredResult]]()
     r0_result = cached(
         f"r0_eval-{r0_wrapper.args}.pkl",
-        lambda: r0_wrapper.eval_on_dataset(r0_srcs, tqdm_args={"leave": False}),
+        lambda: r0_wrapper.eval_on_dataset(r0_srcs, tqdm_args=tqdm_args),
     )
     results.append((deepcopy(r0_wrapper.args), r0_result))
     if r1_wrapper is None:
@@ -467,9 +468,7 @@ def evaluate_model(
 
     r1_result = cached(
         f"r1_eval-{r1_wrapper.args}-iso={check_in_isolation}.pkl",
-        lambda: r1_wrapper.eval_on_dataset(  # type: ignore
-            r1_srcs, tqdm_args={"leave": False}
-        ),
+        lambda: r1_wrapper.eval_on_dataset(r1_srcs, tqdm_args=tqdm_args),
     )
     results.append((deepcopy(r1_wrapper.args), r1_result))
 

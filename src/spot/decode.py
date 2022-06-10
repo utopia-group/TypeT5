@@ -17,19 +17,38 @@ def sample_then_select(
     wrapper: ModelWrapper, src_data: SrcDataset, n_samples: int
 ) -> DatasetPredResult:
     """
-    Sample the solutions for each file using top-p sampling and then
-    select the best solution according to the type checker feedbacks.
+    Sample the solutions for each file using top-p sampling or (diverse) beam search
+    and then select the best solution according to the type checker feedbacks.
     """
     tokenizer = wrapper.tokenizer
     ctx_args = wrapper.args.ctx_args
-    assert wrapper.args.do_sample, "do_sample needs to be True"
+
+    do_sample = wrapper.args.do_sample
+    if not do_sample:
+        assert wrapper.args.num_beams is not None, "num_beams needs to be set"
+        assert n_samples <= wrapper.args.num_beams
 
     chunks = src_data.to_chunks(tokenizer, ctx_args, tqdm_args={"disable": True})
     n_chunks = len(chunks.data)
-    samples = [
-        wrapper.predict(chunks.data, tqdm_args={"leave": False})
-        for _ in tqdm(range(n_samples), desc="Sampling")
-    ]
+
+    if do_sample:
+        samples = [
+            wrapper.predict(chunks.data, tqdm_args={"leave": False})
+            for _ in tqdm(range(n_samples), desc="Sampling")
+        ]  # of shape (n_samples, n_chunks, n_labels)
+    else:
+        samples = wrapper.predict(
+            chunks.data,
+            num_return_sequences=n_samples,
+            tqdm_args={},
+        )  # of shape (n_chunks, n_samples, n_labels)
+        assert_eq(len(samples), n_chunks)
+        assert_eq(len(samples[0]), n_samples)
+
+    def get_preds(chunk_id, sample_id):
+        return (
+            samples[sample_id][chunk_id] if do_sample else samples[chunk_id][sample_id]
+        )
 
     file2src = src_data.file2src(resolve=False)
 
@@ -43,7 +62,7 @@ def sample_then_select(
             src = file2src[file.relative_to(src_data.repos_root)]
             proj_root = template_root / src.repo
             for j in range(n_samples):
-                preds = samples[j][i]
+                preds = get_preds(i, j)
                 preds_dict = {
                     l_id: str(pred) for l_id, pred in zip(info.label_ids, preds)
                 }
@@ -67,7 +86,7 @@ def sample_then_select(
     for i in range(n_chunks):
         errors = [check_rs_dict[(i, j)] for j in range(n_samples)]
         sample_id = int(np.argmin(errors))
-        final_preds.append(samples[sample_id][i])
+        final_preds.append(get_preds(i, sample_id))
     return DatasetPredResult(chunks, final_preds)
 
 
@@ -107,6 +126,7 @@ def collect_type_errors_from_predictions(
             max_workers=max_workers,
             desc="map type_check_src_in_project",
             chunksize=max(1, len(to_check) // (8 * max_workers)),
+            leave=False,
         )
         feebacks = [
             (f, e)

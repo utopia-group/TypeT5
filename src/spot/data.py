@@ -1229,6 +1229,12 @@ def type_accuracies(
             key=lambda x: x.name, sort_by=lambda x: x.value
         ),
         "partial_acc_by_pos": partial_by_pos.grouped_accs(sort_by=lambda x: x.start),
+        "avg_label_size": safe_div(
+            sum(ast_size(l) for l in label_types), len(label_types)
+        ),
+        "avg_pred_size": safe_div(
+            sum(ast_size(p) for p in pred_types), len(pred_types)
+        ),
     }
 
 

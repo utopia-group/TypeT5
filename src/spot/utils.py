@@ -76,6 +76,13 @@ def proj_root() -> Path:
     return Path(__file__).parent.parent.parent
 
 
+def get_data_dir() -> Path:
+    if (v := os.getenv("datadir")) is not None:
+        return Path(v)
+    else:
+        return proj_root() / "data"
+
+
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")
 
