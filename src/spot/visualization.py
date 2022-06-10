@@ -208,9 +208,9 @@ def visualize_dicts(dicts: Sequence[dict], titles: Sequence[str] | None = None):
     return visualize_sequence_tabs(tabs, titles=titles)
 
 
-def visualize_conf_matrix(results: list[DatasetPredResult]):
-    def show_conf(round, top_k):
-        pred_r = results[round]
+def visualize_conf_matrix(results: dict[str, DatasetPredResult], top_k: int = 15):
+    def show_conf(name, top_k):
+        pred_r = results[name]
         labels = [
             normalize_type(t).head_name()
             for info in pred_r.chunks.chunks_info
@@ -224,13 +224,13 @@ def visualize_conf_matrix(results: list[DatasetPredResult]):
         m = confusion_matrix_top_k(all_preds, labels, top_k)
         display_conf_matrix(m)
 
-    max_round = len(results) - 1
+    tabs = []
+    for name in results:
+        with (out := widgets.Output()):
+            show_conf(name, top_k)
+        tabs.append(out)
 
-    return widgets.interactive(
-        show_conf,
-        round=widgets.IntSlider(max_round, min=0, max=max_round),
-        top_k=widgets.IntSlider(10, min=5, max=50, continuous_update=False),
-    )
+    return visualize_sequence_tabs(tabs, titles=list(results.keys()))
 
 
 def colorize_code_html(code: str) -> str:

@@ -814,7 +814,7 @@ def type_check_src_in_project(
     src: TokenizedSrc,
     preds: dict[int, str],
     project_root: Path,
-    include_all_errors: bool,
+    include_all_errors: bool = False,
     mypy_path: Optional[Path] = None,
 ) -> SrcCheckResult:
     # setup: copy all files into cwd
@@ -966,7 +966,7 @@ class CtxArgs:
         return self.left_margin, self.window_size, self.right_margin, self.max_labels
 
     def __repr__(self):
-        return f"CtxArgs(left={self.left_margin}, window={self.window_size}, right={self.right_margin}, max_labels={self.max_labels})"
+        return repr_modified_args(self)
 
 
 @dataclass

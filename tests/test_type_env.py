@@ -63,10 +63,10 @@ code_1_patch = {
 
 def test_annotation_applying():
     old_annots = collect_annots_info(parsed)
-    old_map = {a.path: a.annot for a in old_annots}
+    old_map = {a.path: a.annot for a in old_annots if a.annot is not None}
     new_parsed = apply_annotations(parsed, code_1_patch)
     new_annots = collect_annots_info(new_parsed)
-    new_map = {a.path: a.annot for a in new_annots}
+    new_map = {a.path: a.annot for a in new_annots if a.annot is not None}
 
     for k, v in code_1_patch.items():
         assert old_map[k].annotation.value != new_map[k].annotation.value
@@ -74,14 +74,14 @@ def test_annotation_applying():
 
 
 def test_mypy_checker_1():
-    with mypy_checker("data/code", wait_before_check=0.0) as checker:
+    with mypy_checker(Path("data/code"), wait_before_check=0.0) as checker:
         check_r = checker.recheck_project()
         assert Path("data/code/bad_code_1.py").resolve() in check_r.error_dict
         assert Path("data/code/bad_code_2.py").resolve() in check_r.error_dict
 
 
 def test_mypy_checker_2():
-    with mypy_checker("data/code_output", wait_before_check=0.0) as checker:
+    with mypy_checker(Path("data/code_output"), wait_before_check=0.0) as checker:
         if Path("data/code_output/bad_code_1.py").exists():
             os.remove("data/code_output/bad_code_1.py")
         oe = checker.recheck_project().num_errors
@@ -202,11 +202,9 @@ def test_mypy_checking():
     result_2 = type_check_src_in_project(
         src_to_check,
         {0: "int"},
-        project_files=(proj_root() / "data/code").glob("**/*.py"),
         project_root=(proj_root() / "data/code"),
-        temp_dir=temp_dir,
     )
-    assert len(result_2.feedbacks) == 1
+    assert isinstance(result_2.feedbacks, list) and len(result_2.feedbacks) == 1
     assert (
         'Argument 1 to "fib" has incompatible type "int"; expected "str"'
         in result_2.feedbacks[0].message

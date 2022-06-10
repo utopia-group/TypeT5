@@ -33,6 +33,7 @@ class DecodingArgs:
     top_p: float = 0.9
     num_beams: Optional[int] = None
     num_beam_groups: Optional[int] = None
+    length_penalty: float = 1.0
     diversity_penalty: float | None = None
 
     def scale_ctx_size(self, factor: float) -> "DecodingArgs":
@@ -49,6 +50,9 @@ class DecodingArgs:
         result.sampling_max_tokens = round(self.sampling_max_tokens / factor**2)
 
         return result
+
+    def __repr__(self) -> str:
+        return repr_modified_args(self)
 
 
 @dataclass
@@ -98,7 +102,7 @@ class ModelWrapper:
             num_beam_groups=self.args.num_beam_groups,
             max_length=self.args.max_tokens_per_type * max_labels,
             diversity_penalty=div_pen,
-            length_penalty=2.0,
+            length_penalty=self.args.length_penalty,
             renormalize_logits=True,
         ).cpu()  # type: ignore
         assert len(output_ids.shape) == 2

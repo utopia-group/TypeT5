@@ -536,3 +536,29 @@ def safe_div(a, b):
     if b == 0:
         return float("nan")
     return a / b
+
+
+def get_modified_args(instance, recursive: bool = False) -> dict[str, Any] | Any:
+    """Collect only the arguments that differ from the default value, or return the value
+    itself if `instance` does not contain `__annotations__`."""
+    if not hasattr(instance, "__annotations__"):
+        return instance
+
+    cls = type(instance)
+    delta = dict[str, Any]()
+    # collect all values that are different from the default
+    for attr in instance.__annotations__:
+        v = getattr(instance, attr)
+        if hasattr(cls, attr) and getattr(cls, attr) == v:
+            continue
+        delta[attr] = get_modified_args(v) if recursive else v
+    return delta
+
+
+def repr_modified_args(instance) -> str:
+    ma = get_modified_args(instance, False)
+    if isinstance(ma, dict):
+        type_name = type(instance).__name__
+        return f"{type_name}({', '.join(f'{k}={v}' for k, v in ma.items())})"
+    else:
+        return repr(ma)

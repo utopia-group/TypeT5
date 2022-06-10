@@ -223,6 +223,7 @@ class MypyChecker:
     MypyErrorsToIgnore = [
         # currently we use a very simple way handle Literal types.
         "Literal[...] must have at least one parameter",
+        'The return type of "__init__" must be None',
     ]
 
     MypyErrorCodesToIgnore = {"valid-type"}
@@ -422,9 +423,11 @@ def mypy_checker(code_dir: Path, dmypy_path: Path | None = None, wait_before_che
         checker.close()
 
 
-def count_type_frequency(types: Iterable[PythonType], recursive: bool=True) -> Counter[str]:
+def count_type_frequency(
+    types: Iterable[PythonType], recursive: bool = True
+) -> Counter[str]:
     counter = Counter[str]()
-    
+
     def count_type(t: PythonType):
         counter[t.head_name()] += 1
         if recursive:
@@ -433,5 +436,5 @@ def count_type_frequency(types: Iterable[PythonType], recursive: bool=True) -> C
 
     for t in types:
         count_type(t)
-        
+
     return counter
