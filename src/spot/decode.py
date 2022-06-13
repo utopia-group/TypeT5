@@ -157,8 +157,6 @@ def collect_type_errors_in_project(
     # setup: copy all files into cwd
     proc = multiprocessing.current_process()
     cwd = MypyChecker.temp_dir() / proc.name / project_root.name
-    if cwd.exists():
-        shutil.rmtree(cwd)
     cwd.mkdir(parents=True, exist_ok=True)
 
     for f in project_root.glob("**/*.py"):
@@ -166,13 +164,10 @@ def collect_type_errors_in_project(
         (cwd / rel_path).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(f, cwd / rel_path)
 
-    try:
-        for src, preds in zip(srcs, preds_list):
-            rel_path = src.file.relative_to(src.repo)
-            file_path = cwd / rel_path
-            new_code = code_to_check_from_preds(src, preds)
-            file_path.write_text(new_code)
-        check_r = MypyChecker.check_project(cwd, mypy_path=mypy_path)
-        return check_r
-    finally:
-        shutil.rmtree(MypyChecker.temp_dir() / proc.name)
+    for src, preds in zip(srcs, preds_list):
+        rel_path = src.file.relative_to(src.repo)
+        file_path = cwd / rel_path
+        new_code = code_to_check_from_preds(src, preds)
+        file_path.write_text(new_code)
+    check_r = MypyChecker.check_project(cwd, mypy_path=mypy_path)
+    return check_r

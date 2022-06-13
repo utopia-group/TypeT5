@@ -234,7 +234,7 @@ def visualize_conf_matrix(results: dict[str, DatasetPredResult], top_k: int = 15
 
 
 def colorize_code_html(code: str) -> str:
-    "Highligh the special comments in the type checker-augmented python code."
+    "Highlight the special comments in the type checker-augmented python code."
     output = list[str]()
     in_comment = False
     for i in range(len(code)):

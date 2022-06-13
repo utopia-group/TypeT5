@@ -92,7 +92,7 @@ def not_none(x: Optional[T1]) -> T1:
     return x
 
 
-def seq_flatten(xs: Sequence[Sequence[T1]]) -> Generator[T1, None, None]:
+def seq_flatten(xs: Iterable[Iterable[T1]]) -> Generator[T1, None, None]:
     return (item for sublist in xs for item in sublist)
 
 

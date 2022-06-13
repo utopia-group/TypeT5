@@ -514,9 +514,9 @@ class SrcDataset:
                     new_path.write_text(new_code)
             yield template_root
         finally:
-            shutil.rmtree(template_root, ignore_errors=True)
+            shutil.rmtree(MypyChecker.temp_dir(), ignore_errors=True)
 
-    def type_check_in_project(
+    def type_check_each_file_in_project(
         self,
         file2preds: dict[Path, dict[int, str]],
         max_workers: int,
@@ -581,7 +581,7 @@ class SrcDataset:
                     **tqdm_args,
                 )
             else:
-                check_rs = self.type_check_in_project(
+                check_rs = self.type_check_each_file_in_project(
                     file2preds,
                     max_workers,
                     mypy_path,
