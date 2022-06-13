@@ -1,5 +1,4 @@
 import multiprocessing
-from shutil import rmtree
 
 from spot.data import (
     SrcCheckResult,
@@ -139,11 +138,20 @@ def collect_type_errors_from_predictions(
 
 
 def count_type_errors_in_project(
-    srcs: list[TokenizedSrc], preds_list: list[dict[int, str]], proj_root: Path
+    srcs: list[TokenizedSrc],
+    preds_list: list[dict[int, str]],
+    proj_root: Path,
+    only_errors_in_srcs: bool = False,
 ) -> int:
     r = collect_type_errors_in_project(srcs, preds_list, proj_root)
     if isinstance(r, MypyResult):
-        return sum(len(ls) for ls in r.error_dict.values())
+        if only_errors_in_srcs:
+            file_errors = [
+                r.error_dict.get(s.file.relative_to(s.repo), []) for s in srcs
+            ]
+        else:
+            file_errors = list(r.error_dict.values())
+        return sum(len(ls) for ls in file_errors)
     else:
         return 0
 
@@ -170,4 +178,8 @@ def collect_type_errors_in_project(
         new_code = code_to_check_from_preds(src, preds)
         file_path.write_text(new_code)
     check_r = MypyChecker.check_project(cwd, mypy_path=mypy_path)
+    if isinstance(check_r, MypyResult):
+        check_r.error_dict = {
+            f.relative_to(cwd): es for f, es in check_r.error_dict.items()
+        }
     return check_r
