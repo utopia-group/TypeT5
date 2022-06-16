@@ -29,50 +29,71 @@ def visualize_chunks(chunks: ChunkedDataset, height="500px") -> widgets.VBox:
     return interactive_sized(show, {"i": (0, len(chunks.data) - 1)}, height=height)
 
 
+def display_as_widget(x) -> widgets.Output:
+    with (out := widgets.Output()):
+        display(x)
+    return out
+
+
 def visualize_preds_on_code(
     dataset: ChunkedDataset,
-    preds: list[list[PythonType]],
+    preds: list[list[str]],
 ) -> widgets.VBox:
-    def show_batch(i: int):
+    assert_eq(len(dataset.data), len(preds))
+
+    def show_chunk(i: int):
+        assert_eq(int(dataset.data[i]["chunk_id"]), i)
         pred_types = preds[i]
         tokenizer = dataset.tokenizer
         typpes_enc = [
             tokenizer.encode(str(t), add_special_tokens=False) for t in pred_types
         ]
 
+        meta_data = dict[str, list]()
         label_types = dataset.chunks_info[i].types
+        meta_data["label_types"] = label_types
+        prev_types = dataset.chunks_info[i].prev_types
+        if prev_types is not None:
+            meta_data["prev_types"] = prev_types
+            prev_correct = [
+                normalize_type(t) == normalize_type(l)
+                for t, l in zip(prev_types, label_types)
+            ]
+            meta_data["prev_correct"] = prev_correct
+        meta_data["predictions"] = pred_types
         code_tks = inline_predictions(
-            dataset.data["input_ids"][i], typpes_enc, tokenizer
+            dataset.data[i]["input_ids"], typpes_enc, tokenizer
         )
         code_dec = tokenizer.decode(code_tks, skip_special_tokens=False)
         code_dec = code_inline_extra_ids(code_dec, label_types)
         src_ids = sorted(list(set(dataset.chunks_info[i].src_ids)))
-        files = [dataset.files[i] for i in src_ids]
-        meta = "".join(
-            [
-                "labels: ",
-                str(label_types),
-                "\n",
-                "preds: ",
-                str(pred_types),
-                "\n",
-                "files: ",
-                str(files),
-            ]
-        )
-        display(in_scroll_pane(meta, height=None))
+        files = [dataset.files[sid] for sid in src_ids]
 
         code = widgets.HTML(
             "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30); }'>"
+            + str(label_types)
             + colorize_code_html(html.escape(code_dec))
             + "</pre>"
         )
-        display(in_scroll_pane(code))
+
+        rows = [
+            in_scroll_pane(display_as_widget(pd.DataFrame(meta_data)), height="100px"),
+            in_scroll_pane(str(files), height=None),
+            in_scroll_pane(code),
+        ]
+        return widgets.VBox(rows)
 
     slider = widgets.IntSlider(
         0, min=0, max=len(dataset.data) - 1, continuous_update=False
     )
-    return widgets.interactive(show_batch, i=slider)
+    panel = widgets.VBox([show_chunk(slider.value)])
+
+    def on_slider_change(change):
+        panel.children = (show_chunk(change["new"]),)
+
+    slider.observe(on_slider_change, names="value")  # type: ignore
+
+    return widgets.VBox([slider, panel])
 
 
 def inline_predictions(
