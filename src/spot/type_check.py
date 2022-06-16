@@ -218,7 +218,7 @@ class MypyChecker:
         # "--check-untyped-defs",  # turn off to improve performance
     ]
 
-    Preamble = "from typing import Any # SPOT\n"
+    Preamble = "from typing import Any, List, Tuple, Dict, Set # SPOT\n"
 
     MypyErrorsToIgnore = [
         # currently we use a very simple way handle Literal types.

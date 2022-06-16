@@ -7,33 +7,34 @@ from typing import *
 
 import pytorch_lightning as pl
 import torch
+import torch.nn as nn
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
-from regex import D
 from torch.optim import AdamW, Optimizer
 from torch.utils.data import DataLoader
 from transformers import DataCollatorForSeq2Seq, get_linear_schedule_with_warmup
 from transformers.trainer_pt_utils import get_parameter_names
 
 import wandb
-from spot.data import (
+from .data import (
     ChunkedDataset,
     CountedAcc,
     R1_srcs_from_preds,
     SrcChunkInfo,
     SrcDataset,
 )
-from spot.model import (
+from .model import (
     CtxArgs,
     DecodingArgs,
     ModelSPOT,
     ModelWrapper,
     TokenizerSPOT,
     dynamic_dataloader,
+    DatasetPredResult,
 )
-from spot.type_env import PythonType
-from spot.utils import *
-from spot.visualization import (
+from .type_env import PythonType
+from .utils import *
+from .visualization import (
     pretty_display_dict,
     string_widget,
     visualize_sequence_tabs,
@@ -108,7 +109,7 @@ def train_spot_model(
     quicktest=False,
     use_early_stop=True,
     use_small_model=False,
-) -> Tuple[ModelWrapper, dict]:
+) -> tuple[ModelWrapper, dict]:
     os.chdir(proj_root())
     train_ctx_args = train_args.train_ctx_args
     dec_args = train_args.dec_args
@@ -133,11 +134,7 @@ def train_spot_model(
             src = src_datasets[n]
             chunks[n] = src.to_chunks(tokenizer, train_ctx_args)
 
-    wandb_logger = WandbLogger(
-        project="SPOT",
-        name=model_name,
-        save_dir=str(datadir),
-    )
+    wandb_logger = WandbLogger()  # assuming a run has already been initialized
 
     collate_fn = DataCollatorForSeq2Seq(lit_model.tokenizer, lit_model.model)
     train_dataloader = dynamic_dataloader(
@@ -153,7 +150,7 @@ def train_spot_model(
         shuffle=True,  # doesn't hurt
     )
 
-    ckpt_interval = max(1, len(train_dataloader) // 8)
+    ckpt_interval = max(1, len(train_dataloader) // 10)
     val_interval = 1 if quicktest else max(500, ckpt_interval)
 
     if record_batches:
@@ -249,8 +246,8 @@ def R1_srcs_from_extra(
     wrapper: ModelWrapper,
     src_datasets: dict[str, SrcDataset],
     extra: dict[str, Any],
-    ckpt_dir: Path,
-    ckpt_interval: int,
+    ckpt_dir: Optional[Path] = None,
+    ckpt_interval: Optional[int] = None,
 ):
     tokenizer = wrapper.tokenizer
     batch_ids = extra["batch_ids"]
@@ -263,18 +260,33 @@ def R1_srcs_from_extra(
         chunk_datasets[n] = src.to_chunks(tokenizer, wrapper.args.ctx_args)
 
     R1_src_datasets = dict[str, SrcDataset]()
-    R1_src_datasets["train"] = R1_srcs_from_ckpts(
-        tokenizer,
-        wrapper.args,
-        src_datasets["train"],
-        chunk_datasets["train"],
-        batch_ids,
-        check_in_isolation=check_in_isolation,
-        ckpt_dir=ckpt_dir,
-        ckpt_interval=ckpt_interval,
-        max_workers=wrapper.args.max_workers,
-        device=wrapper.model.device,
-    )
+    if ckpt_dir is None or ckpt_interval is None:
+        chunks_info = extra["chunks_info"]
+        model_preds = extra["model_preds"]
+        R1_src_datasets["train"] = R1_srcs_from_preds(
+            tokenizer,
+            src_datasets["train"],
+            chunks_info,
+            chunk_datasets["train"].files,
+            model_preds,
+            check_in_isolation=check_in_isolation,
+            max_workers=wrapper.args.max_workers,
+        )
+    else:
+        R1_src_datasets["train"], chunks_info, model_preds = R1_srcs_from_ckpts(
+            tokenizer,
+            wrapper.args,
+            src_datasets["train"],
+            chunk_datasets["train"],
+            batch_ids,
+            check_in_isolation=check_in_isolation,
+            ckpt_dir=ckpt_dir,
+            ckpt_interval=ckpt_interval,
+            max_workers=wrapper.args.max_workers,
+            device=wrapper.model.device,
+        )
+        extra["chunks_info"] = chunks_info
+        extra["model_preds"] = model_preds
     for n in ["valid", "test"]:
         print(f"Generating R1 dataset: {n}")
         preds = wrapper.predict(chunk_datasets[n].data, {})
@@ -302,11 +314,17 @@ def R1_srcs_from_ckpts(
     max_workers: int,
     device,
     tqdm_args={"leave": False},
-) -> SrcDataset:
+):
+    # TODO: find out why some chunks are missing
+    # assert_eq(sum(len(x) for x in chunk_ids), len(cdata.chunks_info))
+    if (n_got := sum(len(x) for x in chunk_ids)) != len(cdata.chunks_info):
+        logging.warning(
+            f"Some chunks are missing. Got {n_got} chunks, but expected {len(cdata.chunks_info)}"
+        )
     chunks_info = list[SrcChunkInfo]()
     model_preds = list[list[PythonType]]()
     for i in tqdm(
-        range(ckpt_interval, len(chunk_ids), ckpt_interval),
+        range(0, len(chunk_ids), ckpt_interval),
         desc="R1_srcs_from_ckpts",
         **tqdm_args,
     ):
@@ -323,7 +341,7 @@ def R1_srcs_from_ckpts(
         chunks_info.extend(data_sub.chunks_info)
         preds = wrapper.predict(data_sub.data, tqdm_args=tqdm_args)
         model_preds.extend(preds)
-    return R1_srcs_from_preds(
+    srcs = R1_srcs_from_preds(
         tokenizer,
         r0_src,
         chunks_info,
@@ -333,16 +351,14 @@ def R1_srcs_from_ckpts(
         max_workers=max_workers,
         tqdm_args=tqdm_args,
     )
+    return srcs, chunks_info, model_preds
 
 
 class TrainModelWrapper(pl.LightningModule):
     "A pytorch lightening module that handles training and evaluation of the SPOT model."
 
     def __init__(
-        self,
-        model_checkpoint: str | Path,
-        *,
-        model_saving_path: Path,
+        self, model_checkpoint: str | Path, *, model_saving_path: Path
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -356,38 +372,18 @@ class TrainModelWrapper(pl.LightningModule):
         # before the model was trained on it
         if self.model_saving_interval is not None:
             self.batch_ids: list[list[int]] = []
-            self.saving_coutner = 0
+            self.saving_counter = 0
+            self.model.save_pretrained(self.model_saving_path / f"n_batches=0")
 
     def configure_optimizers(self):
-        no_decay = ["bias", "LayerNorm.weight"]
-        grouped_params = [
-            {
-                "params": [
-                    p
-                    for pn, p in self.model.named_parameters()
-                    if not any(n in pn for n in no_decay)
-                ],
-                "weight_decay": 0.01,
-            },
-            {
-                "params": [
-                    p
-                    for pn, p in self.model.named_parameters()
-                    if any(n in pn for n in no_decay)
-                ],
-                "weight_decay": 0.0,
-            },
-        ]
-        optimizer = AdamW(grouped_params, lr=2e-5)
-        lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1, gamma=0.2)
-        return [optimizer], [lr_scheduler]
+        return _configure_optimizers(self.model)
 
     def training_step(self, batch, batch_idx):
         if self.model_saving_interval is not None and self.current_epoch == 0:
             self.batch_ids.append(batch["chunk_id"].tolist())
-            self.saving_coutner += 1
-            if self.saving_coutner >= self.model_saving_interval:
-                self.saving_coutner = 0
+            self.saving_counter += 1
+            if self.saving_counter >= self.model_saving_interval:
+                self.saving_counter = 0
                 # model can be used for `n_batches` and onward.
                 self.model.save_pretrained(
                     self.model_saving_path / f"n_batches={len(self.batch_ids)}"
@@ -415,20 +411,29 @@ def concat_batches(batches: list[dict], keys: list[str]) -> dict:
     return {k: torch.concat([b[k] for b in batches]) for k in keys}
 
 
-# model evaluation
-
-import ipywidgets as widgets
-
-from spot.data import R1_srcs_from_preds, load_src_datasets
-from spot.model import DatasetPredResult
-from spot.type_env import normalize_type
-from spot.utils import (
-    PickleCache,
-    confusion_matrix_top_k,
-    display_conf_matrix,
-    pretty_print_dict,
-    seq_flatten,
-)
+def _configure_optimizers(model: nn.Module):
+    no_decay = ["bias", "LayerNorm.weight"]
+    grouped_params = [
+        {
+            "params": [
+                p
+                for pn, p in model.named_parameters()
+                if not any(n in pn for n in no_decay)
+            ],
+            "weight_decay": 0.01,
+        },
+        {
+            "params": [
+                p
+                for pn, p in model.named_parameters()
+                if any(n in pn for n in no_decay)
+            ],
+            "weight_decay": 0.0,
+        },
+    ]
+    optimizer = AdamW(grouped_params, lr=2e-5)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1, gamma=0.2)
+    return [optimizer], [lr_scheduler]
 
 
 def evaluate_model(

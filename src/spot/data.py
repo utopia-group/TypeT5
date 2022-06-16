@@ -14,7 +14,7 @@ from typing import *
 import dateparser
 from datasets import Dataset
 
-from spot.type_check import MypyResult
+from spot.type_check import MypyResult, parse_type_str
 from spot.type_env import (
     AnnotCat,
     AnnotInfo,
@@ -159,6 +159,7 @@ class TokenizedSrc:
     types_info: list[AnnotInfo]
     origin_code: str
     tokenized_code: list[int]  # with certain types masked out
+    prev_types: list[PythonType] | None = None  # previously predicted types, if any
 
     def truncate(self, max_tkns: int) -> "TokenizedSrc":
         n_types = 0
@@ -172,6 +173,8 @@ class TokenizedSrc:
         result.types_str = self.types_str[:n_types]
         result.types_tks = self.types_tks[:n_types]
         result.types_info = self.types_info[:n_types]
+        if self.prev_types is not None:
+            result.prev_types = self.prev_types[:n_types]
         return result
 
 
@@ -193,6 +196,7 @@ class _TokenizedSrcHelper:
             types_str=list[str](),
             types_info=list[AnnotInfo](),
             types_tks=list[list[int]](),
+            prev_types=d["prev_types"],
         )
 
         match d:
@@ -247,6 +251,7 @@ class _TokenizedSrcHelper:
         ), f"String diffferences: {show_string_diff(current_code, m_code)}"
         current_annots, _ = collect_user_annotations(m)
         preds_map = dict[CodeRange, str]()
+        prev_types = list[PythonType]()
         types = list[PythonType]()
         types_str = list[str]()
         annots_info = list[AnnotInfo]()
@@ -256,7 +261,8 @@ class _TokenizedSrcHelper:
             if a.path in path2label_id:
                 assert (r := a.annot_range) is not None
                 assert (annot := a.annot) is not None
-                preds_map[r] = m.code_for_node(annot.annotation)
+                prev_type = preds_map[r] = m.code_for_node(annot.annotation)
+                prev_types.append(parse_type_str(prev_type))
                 li = path2label_id[a.path]
                 types.append(src.types[li])
                 types_str.append(src.types_str[li])
@@ -274,6 +280,7 @@ class _TokenizedSrcHelper:
             "types": types,
             "types_str": types_str,
             "annots_info": annots_info,
+            "prev_types": prev_types,
             "is_label": None,
         }
         return self.dict_to_tokenized_src(d)
@@ -344,6 +351,7 @@ def chunk_srcs_per_file(
         label_tkns = [bos_id]
         types = list[PythonType]()
         types_info = list[AnnotInfo]()
+        prev_types = list[PythonType]() if src.prev_types is not None else None
         for i, l_id in enumerate(label_ids):
             label_pos = src.types_pos[l_id] - ctx_start
             tks[label_pos] = special_tks[i]
@@ -351,6 +359,8 @@ def chunk_srcs_per_file(
             label_tkns.extend(src.types_tks[l_id])
             types.append(src.types[l_id])
             types_info.append(src.types_info[l_id])
+            if prev_types is not None:
+                prev_types.append(not_none(src.prev_types)[l_id])
         label_tkns.append(eos_id)
 
         assert len(label_ids) > 0
@@ -366,6 +376,7 @@ def chunk_srcs_per_file(
             types_info,
             src_ids=[src_id] * len(label_ids),
             label_ids=label_ids,
+            prev_types=prev_types,
         )
         chunks_info.append(meta)
 
@@ -593,7 +604,6 @@ class SrcDataset:
         n_checked = 0
         code_list = list[str]()
         feedback_list = list[list[MypyFeedback]]()
-        n_error_list = list[int]()
         check_failure_reasons = list[str]()
         for i in range(len(src_list)):
             errors, new_code = check_rs[i]
@@ -604,18 +614,21 @@ class SrcDataset:
                 n_checked += 1
             code_list.append(new_code)
             feedback_list.append(errors)
-            n_error_list.append(len(errors))
         result = SrcDataset(self.repos_root)
         silent = tqdm_args.get("disable", False)
         result.add_stats(
             {
                 "type_check_success_ratio": n_checked / len(src_list),
-                "feedbacks_per_file": scalar_stats(n_error_list),
+                "feedbacks_per_file": scalar_stats([len(fs) for fs in feedback_list]),
             },
             not silent,
         )
         result.add_stats(
-            {"check_failure_reasons": check_failure_reasons}, should_print=False
+            {
+                "check_failure_reasons": check_failure_reasons,
+                "mypy_feedbacks": feedback_list,
+            },
+            should_print=False,
         )
 
         # then, patch the srcs with the feedbacks and predictions to from new srcs
@@ -631,7 +644,7 @@ class SrcDataset:
             **tqdm_args,
         )
         result.all_srcs = new_srcs
-        result.add_stats({"mypy_feedbacks": feedback_list}, should_print=False)
+        # assert_eq(len(new_srcs), len(file2preds))
         return result
 
     def __repr__(self):
@@ -700,6 +713,7 @@ class SrcDataset:
             x["is_label"] = [random.random() < label_ratio for _ in range(n)]
             x["file"] = srcs_list[i][0].relative_to(repos_root)
             x["repo"] = srcs_list[i][1][1].relative_to(repos_root)
+            x["prev_types"] = None
             filtered_srcs.append(x)
         random.setstate(rands)
 
@@ -979,6 +993,7 @@ class SrcChunkInfo:
     src_ids: list[int]
     # maps each label to its label id in the corresponding TokenizedSrc
     label_ids: list[int]
+    prev_types: list[PythonType] | None
 
     def __repr__(self):
         return f"SrcChunkInfo(num_types={len(self.types)}, unique_src_ids={set(self.src_ids)})"
@@ -1152,7 +1167,6 @@ def R1_srcs_from_preds(
     tqdm_args: dict = {},
 ) -> SrcDataset:
     file2preds = dict[Path, dict[AnnotPath, str]]()
-    assert_eq(len(r0_preds), len(chunks_info))
     for preds, chunk_info in zip(r0_preds, chunks_info):
         assert_eq(len(preds), len(chunk_info.types))
         for i, pred in enumerate(preds):
@@ -1174,6 +1188,7 @@ def R1_srcs_from_preds(
         except Exception as e:
             raise RuntimeError(f"In file {f}. path2id={path2id}") from e
 
+    # assert_eq(len(file2preds1), len(r0_src.srcs_with_labels()))
     return r0_src.add_type_checker_feedback(
         tokenizer,
         file2preds1,

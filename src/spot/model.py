@@ -261,3 +261,14 @@ class CombinedModel:
         )
         r1_eval = r1_wrapper.eval_on_dataset(r1_srcs, tqdm_args={"leave": False})
         return r0_eval, r1_eval
+
+
+def encode_model_outputs(
+    types: list[PythonType], tokenizer: TokenizerSPOT
+) -> list[int]:
+    out = list[int]()
+    for i, t in enumerate(types):
+        extra_id = tokenizer.additional_special_tokens_ids[99 - i]
+        out.append(extra_id)
+        out.extend(tokenizer.encode(str(t)))
+    return out

@@ -48,7 +48,7 @@ def load_model_spot(path) -> ModelSPOT:
     return cast(ModelSPOT, ModelSPOT.from_pretrained(path))
 
 
-def get_spot_tokenizer() -> TokenizerSPOT:
+def load_tokenizer_spot() -> TokenizerSPOT:
     return TokenizerSPOT.from_pretrained("Salesforce/codet5-base")
 
 
@@ -89,6 +89,10 @@ T2 = TypeVar("T2")
 
 def not_none(x: Optional[T1]) -> T1:
     assert x is not None
+    return x
+
+
+def as_any(x) -> Any:
     return x
 
 

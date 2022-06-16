@@ -178,14 +178,14 @@ def test_type_normalization():
 import shutil
 
 from spot.data import SrcDataset, type_check_src, type_check_src_in_project
-from spot.utils import get_spot_tokenizer, proj_root
+from spot.utils import load_tokenizer_spot, proj_root
 
 
 def test_mypy_checking():
     simple_dataset = SrcDataset.from_repos(
         proj_root() / "data",
         [proj_root() / "data/code"],
-        get_spot_tokenizer(),
+        load_tokenizer_spot(),
         drop_comments=True,
         max_workers=10,
         label_ratio=1.0,
