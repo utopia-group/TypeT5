@@ -21,7 +21,6 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from sklearn.metrics import f1_score, accuracy_score
 from .train import _configure_optimizers
-import copy
 
 
 @dataclass
@@ -41,7 +40,11 @@ class CriticModel(T5PreTrainedModel):
         self.base_model_prefix = "t5enc"
 
         self.config = config
-        self.critic_dropout = nn.Dropout(config.dropout_rate)
+        # self.critic_classifier = nn.Sequential(
+        #     nn.Linear(config.d_model, config.d_model),
+        #     nn.Dropout(config.dropout_rate),
+        #     nn.Linear(config.d_model, 1),
+        # )
         self.critic_classifier = nn.Linear(config.d_model, 1)
         self.tokenizer = tokenizer = load_tokenizer_spot()
         self.extra_id_min = tokenizer.additional_special_tokens_ids[0]
@@ -52,12 +55,14 @@ class CriticModel(T5PreTrainedModel):
     def forward(
         self,
         input_ids: torch.LongTensor,
+        attention_mask: torch.FloatTensor,
         labels: Optional[torch.BoolTensor] = None,
+        pos_weight: Optional[float] = None,
         **kwargs,
     ):
         kwargs["return_dict"] = True
         kwargs["output_hidden_states"] = True
-        outputs = self.t5enc.forward(input_ids, **kwargs)
+        outputs = self.t5enc.forward(input_ids, attention_mask=attention_mask, **kwargs)
         assert isinstance(outputs, BaseModelOutputWithPastAndCrossAttentions)
         hidden_states = not_none(outputs.hidden_states)[-1]
         assert len(hidden_states.shape) == 3  # of shape (batch_size, seq_len, d_model)
@@ -68,14 +73,18 @@ class CriticModel(T5PreTrainedModel):
         n_preds = isextra.count_nonzero(dim=1).tolist()
         hidden_states = hidden_states[isextra, :]
         assert len(hidden_states.shape) == 2  # of shape (n_labels, d_model)
-        hidden_states = self.critic_dropout(hidden_states)
-        logits = self.critic_classifier(hidden_states).reshape(-1)
+        # rescale the hidden_states before feeding to the head, as done in the original T5 model
+        hidden_states = hidden_states * (self.config.d_model**-0.5)
+        logits = self.critic_classifier.forward(hidden_states).reshape(-1)
         loss = None
         if labels is not None:
-            loss = torch.binary_cross_entropy_with_logits(
-                logits,
-                labels.to(dtype=logits.dtype),
-            ).mean()
+            pos_weight = 1.0 if pos_weight is None else pos_weight
+            loss_f = torch.nn.BCEWithLogitsLoss(
+                pos_weight=torch.tensor(
+                    pos_weight, dtype=logits.dtype, device=logits.device
+                )
+            )
+            loss = loss_f(logits, labels.to(dtype=logits.dtype))
 
         return CriticOutput(logits, loss, n_preds)
 
@@ -96,33 +105,37 @@ class CriticModel(T5PreTrainedModel):
             shuffle=True,
         )
         device = self.device
-        preds = dict[int, list[float]]()
+        chunk2preds = dict[int, list[float]]()
         tqdm_bar = tqdm(total=len(chunks.data), desc="predict", **tqdm_args)
         self.eval()
+
         with torch.no_grad():
             for batch in loader:
                 batch_size = batch["input_ids"].shape[0]
-                out = self.forward(input_ids=batch["input_ids"].to(device))
-                pred_vec: list[float] = (out.logits.sigmoid()).tolist()
+                out = self.forward(
+                    input_ids=batch["input_ids"].to(device),
+                    attention_mask=batch["attention_mask"].to(device),
+                )
+                pred_vec: list[float] = out.logits.sigmoid().tolist()
                 pred_counter = 0
-                for i, c_id in enumerate(batch["chunk_id"]):
+                for n_preds, c_id in zip(out.n_preds, batch["chunk_id"]):
                     c_id = int(c_id)
-                    pred_counter_next = pred_counter + out.n_preds[i]
-                    preds[c_id] = pred_vec[pred_counter:pred_counter_next]
+                    pred_counter_next = pred_counter + n_preds
+                    chunk2preds[c_id] = pred_vec[pred_counter:pred_counter_next]
                     pred_counter = pred_counter_next
 
                 tqdm_bar.update(batch_size)
         tqdm_bar.close()
-        preds = [preds[int(c_id)] for c_id in chunks.data["chunk_id"]]
-        target = list(seq_flatten(to_critic_dataset(chunks)["labels"]))
-        pred_bools = [p >= 0.5 for p in seq_flatten(preds)]
+        preds_ordered = [chunk2preds[int(c_id)] for c_id in chunks.data["chunk_id"]]
+        targets = list(seq_flatten(to_critic_dataset(chunks)["labels"]))
+        pred_bools = [p >= 0.5 for p in seq_flatten(preds_ordered)]
 
         metrics = {
-            "Acc": accuracy_score(pred_bools, target),
-            "F1": f1_score(pred_bools, target),
+            "Acc": accuracy_score(pred_bools, targets),
+            "F1": f1_score(pred_bools, targets),
         }
 
-        return chunks, preds, metrics
+        return chunks, preds_ordered, metrics
 
 
 def stack_and_pad(xs: list[list[int]], pad_id: int) -> torch.LongTensor:
@@ -159,17 +172,26 @@ def train_critic_model(
     model_path = (
         "Salesforce/codet5-small" if use_small_model else "Salesforce/codet5-base"
     )
-    lit_model = TrainCriticModelWrapper(model_path)
-    model = lit_model.model
-    tokenizer: TokenizerSPOT = lit_model.model.tokenizer
-
+    tokenizer = load_tokenizer_spot()
     datasets: dict[str, Dataset] = {}
     with run_long_task("Preparing critic datasets", notify=False):
         for n in ["valid", "test", "train"]:
             cdata = critic_datasets[n].to_chunks(tokenizer, train_args.ctx_args)
             datasets[n] = to_critic_dataset(cdata)
 
+    # pos_weight = compute_pos_weight(
+    #     list(seq_flatten(datasets["train"]["labels"])),
+    #     list(seq_flatten(datasets["valid"]["labels"])),
+    # )
+    pos_weight = 1.0
+    assert math.isfinite(pos_weight), f"pos_weight = {pos_weight}"
+    model = CriticModel.from_pretrained(model_path)
+    assert isinstance(model, CriticModel)
+    lit_model = TrainCriticModelWrapper(model, pos_weight)
+
     wandb_logger = WandbLogger()  # assuming a run has already been initialized
+    wandb_logger.log_hyperparams({"pos_weight": pos_weight})
+    print(f"pos_weight = {pos_weight}")
 
     collate_fn = CriticCollator(tokenizer)
     dataloaders = dict[str, DataLoader]()
@@ -206,13 +228,14 @@ def train_critic_model(
         logger=wandb_logger,
         val_check_interval=val_interval,
         callbacks=(
-            [checkpoint_cb, EarlyStopping("valid/loss", mode="min", verbose=quicktest)]
+            [EarlyStopping("valid/loss", mode="min", verbose=quicktest)]
             if use_early_stop
             else []
         ),
         gradient_clip_val=1.0,
         gradient_clip_algorithm="norm",
         accumulate_grad_batches=None,
+        # track_grad_norm=2,
     )
 
     warnings.filterwarnings("ignore", "The dataloader.*does not have many workers.*")
@@ -238,14 +261,15 @@ def train_critic_model(
             print(
                 f"Loading best model with score {best_loss} from: {checkpoint_cb.best_model_path}"
             )
-            model = TrainCriticModelWrapper.load_from_checkpoint(
-                checkpoint_cb.best_model_path
-            ).model
-            lit_model.model = model
+            lit_model = TrainCriticModelWrapper.load_from_checkpoint(
+                checkpoint_cb.best_model_path,
+                model=model,
+            )
+            model = lit_model.model
             trainer.test(model=lit_model, dataloaders=dataloaders["test"])
         if save_dir.exists():
             shutil.rmtree(save_dir)
-        save_dir.mkdir(parents=True, exist_ok=True)
+        save_dir.mkdir(parents=True)
 
         model.save_pretrained(save_dir)
 
@@ -256,6 +280,12 @@ def train_critic_model(
         )
 
     return model, extra
+
+
+def compute_pos_weight(labels_train: list[bool], labels_valid: list[bool]):
+    return (labels_valid.count(True) * labels_train.count(False)) / (
+        labels_valid.count(False) * labels_train.count(True)
+    )
 
 
 def to_critic_dataset(cdata: ChunkedDataset) -> Dataset:
@@ -280,8 +310,11 @@ class CriticCollator:
 
     def __call__(self, batch: Sequence[dict]) -> dict:
         pad_id = not_none(self.tokenizer.pad_token_id)
+        input_ids = stack_and_pad([b["input_ids"] for b in batch], pad_id)
+        attention_mask = (input_ids != pad_id).float()
         return {
-            "input_ids": stack_and_pad([b["input_ids"] for b in batch], pad_id),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
             # "output_ids": stack_and_pad([b["output_ids"] for b in batch], pad_id),
             "labels": torch.BoolTensor([l for chunk in batch for l in chunk["labels"]]),
             "chunk_id": [chunk["chunk_id"] for chunk in batch],
@@ -291,12 +324,11 @@ class CriticCollator:
 class TrainCriticModelWrapper(pl.LightningModule):
     "A pytorch lightening module that handles training and evaluation of the Critic model."
 
-    def __init__(self, model_checkpoint: str | Path) -> None:
+    def __init__(self, model: CriticModel, pos_weight: float) -> None:
         super().__init__()
-        self.save_hyperparameters()
-        model = CriticModel.from_pretrained(model_checkpoint)
-        assert isinstance(model, CriticModel)
+        self.save_hyperparameters(ignore=["model"])
         self.model: CriticModel = model
+        self.pos_weight = pos_weight
 
     def configure_optimizers(self):
         return _configure_optimizers(self.model)
@@ -304,31 +336,42 @@ class TrainCriticModelWrapper(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         outputs = self.model.forward(
             input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
             labels=batch["labels"],
+            pos_weight=self.pos_weight,
         )
-        batch_size = batch["input_ids"].shape[0]
+        n_labels = batch["labels"].shape[0]
         loss = not_none(outputs.loss)
-        self.log("train/loss", loss.item(), batch_size=batch_size)
-        self.log("train/lr", self.lr_schedulers().get_last_lr()[0], batch_size=batch_size)  # type: ignore
+        self.log("train/loss", loss.item(), batch_size=n_labels)
+        self.log(
+            "train/lr",
+            as_any(self.lr_schedulers()).get_last_lr()[0],
+            batch_size=n_labels,
+        )
         return loss
 
     def _eval_step(self, batch, name: str):
         outputs = self.model.forward(
             input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
             labels=batch["labels"],
+            pos_weight=self.pos_weight,
         )
-        batch_size = batch["input_ids"].shape[0]
+        n_labels = batch["labels"].shape[0]
         loss = not_none(outputs.loss)
-        self.log(f"{name}/loss", loss.item(), batch_size=batch_size)
+        self.log(f"{name}/loss", loss.item(), batch_size=n_labels)
 
         preds = (outputs.logits >= 0).cpu()
         target = batch["labels"].cpu()
 
         acc = accuracy_score(preds, target)
-        self.log(f"{name}/accuracy", as_any(acc), batch_size=batch_size)
+        self.log(f"{name}/accuracy", as_any(acc), batch_size=n_labels)
 
         f1 = f1_score(preds, target)
-        self.log(f"{name}/f1", as_any(f1), batch_size=batch_size)
+        self.log(f"{name}/f1", as_any(f1), batch_size=n_labels)
+
+        n_pos_pred = preds.count_nonzero().item()
+        self.log(f"{name}/n_pos_pred", n_pos_pred, batch_size=n_labels)
 
     def validation_step(self, batch, batch_idx):
         self._eval_step(batch, "valid")

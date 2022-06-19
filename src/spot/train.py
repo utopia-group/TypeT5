@@ -14,8 +14,8 @@ from torch.optim import AdamW, Optimizer
 from torch.utils.data import DataLoader
 from transformers import DataCollatorForSeq2Seq, get_linear_schedule_with_warmup
 from transformers.trainer_pt_utils import get_parameter_names
+from transformers.modeling_outputs import Seq2SeqLMOutput
 
-import wandb
 from .data import (
     ChunkedDataset,
     CountedAcc,
@@ -183,6 +183,7 @@ def train_spot_model(
         gradient_clip_val=1.0,
         gradient_clip_algorithm="norm",
         accumulate_grad_batches=train_args.accumulate_grad_batches,
+        track_grad_norm=2,
     )
 
     warnings.filterwarnings("ignore", "The dataloader.*does not have many workers.*")
@@ -389,11 +390,13 @@ class TrainModelWrapper(pl.LightningModule):
                     self.model_saving_path / f"n_batches={len(self.batch_ids)}"
                 )
 
-        outputs = self.model(
+        outputs = self.model.forward(
             input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
             labels=batch["labels"],
         )
-        loss = outputs.loss
+        assert isinstance(outputs, Seq2SeqLMOutput)
+        loss = not_none(outputs.loss)
         self.log("train/loss", loss.item())
         self.log("train/lr", self.lr_schedulers().get_last_lr()[0])  # type: ignore
         return loss
@@ -401,6 +404,7 @@ class TrainModelWrapper(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         outputs = self.model(
             input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
             labels=batch["labels"],
         )
         loss = outputs.loss
@@ -411,7 +415,7 @@ def concat_batches(batches: list[dict], keys: list[str]) -> dict:
     return {k: torch.concat([b[k] for b in batches]) for k in keys}
 
 
-def _configure_optimizers(model: nn.Module):
+def _configure_optimizers(model: nn.Module, base_lr: float = 2e-5):
     no_decay = ["bias", "LayerNorm.weight"]
     grouped_params = [
         {
@@ -431,7 +435,7 @@ def _configure_optimizers(model: nn.Module):
             "weight_decay": 0.0,
         },
     ]
-    optimizer = AdamW(grouped_params, lr=2e-5)
+    optimizer = AdamW(grouped_params, lr=base_lr)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1, gamma=0.2)
     return [optimizer], [lr_scheduler]
 
