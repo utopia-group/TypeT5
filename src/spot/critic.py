@@ -1,5 +1,6 @@
 import warnings
 from datasets import Dataset
+from sklearn.decomposition import dict_learning
 from spot.data import ChunkedDataset, CtxArgs, SrcDataset
 from spot.type_check import normalize_type
 from .model import (
@@ -19,14 +20,13 @@ from .utils import *
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from sklearn.metrics import f1_score, accuracy_score
+from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
 from .train import _configure_optimizers
 
 
 @dataclass
 class CriticOutput:
     logits: torch.Tensor
-    loss: Optional[torch.Tensor]
     n_preds: list[int]
 
 
@@ -40,12 +40,13 @@ class CriticModel(T5PreTrainedModel):
         self.base_model_prefix = "t5enc"
 
         self.config = config
-        # self.critic_classifier = nn.Sequential(
-        #     nn.Linear(config.d_model, config.d_model),
-        #     nn.Dropout(config.dropout_rate),
-        #     nn.Linear(config.d_model, 1),
-        # )
-        self.critic_classifier = nn.Linear(config.d_model, 1)
+        self.critic_classifier = nn.Sequential(
+            nn.Linear(config.d_model, config.d_model),
+            nn.ReLU(inplace=True),
+            nn.Dropout(config.dropout_rate),
+            nn.Linear(config.d_model, 1),
+        )
+        # self.critic_classifier = nn.Linear(config.d_model, 1)
         self.tokenizer = tokenizer = load_tokenizer_spot()
         self.extra_id_min = tokenizer.additional_special_tokens_ids[0]
         self.extra_id_max = tokenizer.additional_special_tokens_ids[-1]
@@ -56,8 +57,6 @@ class CriticModel(T5PreTrainedModel):
         self,
         input_ids: torch.LongTensor,
         attention_mask: torch.FloatTensor,
-        labels: Optional[torch.BoolTensor] = None,
-        pos_weight: Optional[float] = None,
         **kwargs,
     ):
         kwargs["return_dict"] = True
@@ -74,21 +73,66 @@ class CriticModel(T5PreTrainedModel):
         hidden_states = hidden_states[isextra, :]
         assert len(hidden_states.shape) == 2  # of shape (n_labels, d_model)
         # rescale the hidden_states before feeding to the head, as done in the original T5 model
-        hidden_states = hidden_states * (self.config.d_model**-0.5)
+        # hidden_states = hidden_states * (self.config.d_model**-0.5)
         logits = self.critic_classifier.forward(hidden_states).reshape(-1)
-        loss = None
-        if labels is not None:
-            pos_weight = 1.0 if pos_weight is None else pos_weight
-            loss_f = torch.nn.BCEWithLogitsLoss(
-                pos_weight=torch.tensor(
-                    pos_weight, dtype=logits.dtype, device=logits.device
-                )
-            )
-            loss = loss_f(logits, labels.to(dtype=logits.dtype))
 
-        return CriticOutput(logits, loss, n_preds)
+        return CriticOutput(logits, n_preds)
 
-    def eval_on_dataset(
+    def eval_on_data(
+        self,
+        dataloader,
+        n_examples: int,
+        tqdm_args: dict = {},
+    ) -> tuple[dict[int, list[float]], dict]:
+        """Convinient method to preprocess the src according to the model's ctx_args and evaluate the (R0) accuracy."""
+        device = self.device
+        chunk2preds = dict[int, list[float]]()
+        tqdm_bar = tqdm(total=n_examples, desc="predict", **tqdm_args)
+        self.eval()
+
+        pred_bools = list[bool]()
+        label_bools = list[bool]()
+
+        with torch.no_grad():
+            for batch in dataloader:
+                batch_size = batch["input_ids"].shape[0]
+                with torch.autocast("cuda"):
+                    out = self.forward(
+                        input_ids=batch["input_ids"].to(device),
+                        attention_mask=batch["attention_mask"].to(device),
+                    )
+                p = (out.logits >= 0).cpu().tolist()
+                t = batch["is_correct"].cpu().tolist()
+                assert_eq(len(p), len(t))
+                pred_bools.extend(p)
+                label_bools.extend(t)
+                pred_vec: list[float] = out.logits.sigmoid().tolist()
+                pred_counter = 0
+                assert_eq(len(out.n_preds), len(batch["input_ids"]))
+                for n_preds, c_id in zip(out.n_preds, batch["chunk_id"]):
+                    c_id = int(c_id)
+                    pred_counter_next = pred_counter + n_preds
+                    chunk2preds[c_id] = pred_vec[pred_counter:pred_counter_next]
+                    pred_counter = pred_counter_next
+
+                tqdm_bar.update(batch_size)
+        tqdm_bar.close()
+
+        metrics = CriticModel.compute_metrics(pred_bools, label_bools)
+
+        return chunk2preds, metrics
+
+    @staticmethod
+    def compute_metrics(pred_bools, label_bools):
+        return {
+            "accuracy": accuracy_score(label_bools, pred_bools),
+            "F1": f1_score(label_bools, pred_bools),
+            "precision": precision_score(label_bools, pred_bools),
+            "recall": recall_score(label_bools, pred_bools),
+            "pos_rate": sum(pred_bools) / len(pred_bools),
+        }
+
+    def eval_on_src_dataset(
         self,
         src_data: SrcDataset,
         ctx_args: CtxArgs,
@@ -99,41 +143,14 @@ class CriticModel(T5PreTrainedModel):
         chunks = src_data.to_chunks(self.tokenizer, ctx_args, tqdm_args=tqdm_args)
         collator = CriticCollator(self.tokenizer)
         loader = dynamic_dataloader(
-            chunks.data,
+            to_critic_dataset(chunks),
             max_tokens=sampling_max_tokens,
             collate_fn=collator,
             shuffle=True,
         )
-        device = self.device
-        chunk2preds = dict[int, list[float]]()
-        tqdm_bar = tqdm(total=len(chunks.data), desc="predict", **tqdm_args)
-        self.eval()
-
-        with torch.no_grad():
-            for batch in loader:
-                batch_size = batch["input_ids"].shape[0]
-                out = self.forward(
-                    input_ids=batch["input_ids"].to(device),
-                    attention_mask=batch["attention_mask"].to(device),
-                )
-                pred_vec: list[float] = out.logits.sigmoid().tolist()
-                pred_counter = 0
-                for n_preds, c_id in zip(out.n_preds, batch["chunk_id"]):
-                    c_id = int(c_id)
-                    pred_counter_next = pred_counter + n_preds
-                    chunk2preds[c_id] = pred_vec[pred_counter:pred_counter_next]
-                    pred_counter = pred_counter_next
-
-                tqdm_bar.update(batch_size)
-        tqdm_bar.close()
+        n_exs = len(chunks.data)
+        chunk2preds, metrics = self.eval_on_data(loader, n_exs, tqdm_args=tqdm_args)
         preds_ordered = [chunk2preds[int(c_id)] for c_id in chunks.data["chunk_id"]]
-        targets = list(seq_flatten(to_critic_dataset(chunks)["labels"]))
-        pred_bools = [p >= 0.5 for p in seq_flatten(preds_ordered)]
-
-        metrics = {
-            "Acc": accuracy_score(pred_bools, targets),
-            "F1": f1_score(pred_bools, targets),
-        }
 
         return chunks, preds_ordered, metrics
 
@@ -180,14 +197,14 @@ def train_critic_model(
             datasets[n] = to_critic_dataset(cdata)
 
     # pos_weight = compute_pos_weight(
-    #     list(seq_flatten(datasets["train"]["labels"])),
-    #     list(seq_flatten(datasets["valid"]["labels"])),
+    #     list(seq_flatten(datasets["train"]["is_correct"])),
+    #     list(seq_flatten(datasets["valid"]["is_correct"])),
     # )
-    pos_weight = 1.0
+    pos_weight = compute_pos_weight(list(seq_flatten(datasets["train"]["is_correct"])))
     assert math.isfinite(pos_weight), f"pos_weight = {pos_weight}"
     model = CriticModel.from_pretrained(model_path)
     assert isinstance(model, CriticModel)
-    lit_model = TrainCriticModelWrapper(model, pos_weight)
+    lit_model = TrainCriticModelWrapper(model, pos_weight, running_dir)
 
     wandb_logger = WandbLogger()  # assuming a run has already been initialized
     wandb_logger.log_hyperparams({"pos_weight": pos_weight})
@@ -208,16 +225,7 @@ def train_critic_model(
         )
 
     ckpt_interval = max(1, len(dataloaders["train"]) // 8)
-    val_interval = 1 if quicktest else max(500, ckpt_interval)
-
-    checkpoint_cb = ModelCheckpoint(
-        dirpath=running_dir,
-        save_top_k=3,
-        monitor="valid/loss",
-        mode="min",
-        save_on_train_epoch_end=False,
-        verbose=quicktest,
-    )
+    val_interval = 1 if quicktest else ckpt_interval
 
     trainer = pl.Trainer(
         default_root_dir=str(running_dir),
@@ -241,32 +249,19 @@ def train_critic_model(
     warnings.filterwarnings("ignore", "The dataloader.*does not have many workers.*")
 
     with run_long_task(f"Training {model_name}"):
+        trainer.validate(lit_model, dataloaders["valid"])
         trainer.fit(
-            model=lit_model,
+            lit_model,
             train_dataloaders=dataloaders["train"],
             val_dataloaders=dataloaders["valid"],
         )
+        model = lit_model.model
 
     extra = dict[str, Any]()
     save_dir = datadir / "checkpoints/lit-saved" / model_name
 
-    final_eval = trainer.validate(model=lit_model, dataloaders=dataloaders["valid"])[0]
-
     try:
-        if (
-            use_early_stop
-            and (best_loss := checkpoint_cb.best_model_score) is not None
-            and best_loss < final_eval["valid/loss"]
-        ):
-            print(
-                f"Loading best model with score {best_loss} from: {checkpoint_cb.best_model_path}"
-            )
-            lit_model = TrainCriticModelWrapper.load_from_checkpoint(
-                checkpoint_cb.best_model_path,
-                model=model,
-            )
-            model = lit_model.model
-            trainer.test(model=lit_model, dataloaders=dataloaders["test"])
+        trainer.test(lit_model, dataloaders["test"])
         if save_dir.exists():
             shutil.rmtree(save_dir)
         save_dir.mkdir(parents=True)
@@ -282,7 +277,12 @@ def train_critic_model(
     return model, extra
 
 
-def compute_pos_weight(labels_train: list[bool], labels_valid: list[bool]):
+def compute_pos_weight(
+    labels_train: list[bool], labels_valid: list[bool] | None = None
+) -> float:
+    if labels_valid is None:
+        return labels_train.count(False) / labels_train.count(True)
+
     return (labels_valid.count(True) * labels_train.count(False)) / (
         labels_valid.count(False) * labels_train.count(True)
     )
@@ -291,7 +291,7 @@ def compute_pos_weight(labels_train: list[bool], labels_valid: list[bool]):
 def to_critic_dataset(cdata: ChunkedDataset) -> Dataset:
     new_data = dict()
     new_data["input_ids"] = cdata.data["input_ids"]
-    new_data["labels"] = labels = list[list[bool]]()
+    new_data["is_correct"] = labels = list[list[bool]]()
     for info in cdata.chunks_info:
         labels.append(
             [
@@ -310,13 +310,15 @@ class CriticCollator:
 
     def __call__(self, batch: Sequence[dict]) -> dict:
         pad_id = not_none(self.tokenizer.pad_token_id)
-        input_ids = stack_and_pad([b["input_ids"] for b in batch], pad_id)
+        input_ids = stack_and_pad([chunk["input_ids"] for chunk in batch], pad_id)
         attention_mask = (input_ids != pad_id).float()
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             # "output_ids": stack_and_pad([b["output_ids"] for b in batch], pad_id),
-            "labels": torch.BoolTensor([l for chunk in batch for l in chunk["labels"]]),
+            "is_correct": torch.BoolTensor(
+                [l for chunk in batch for l in chunk["is_correct"]]
+            ),
             "chunk_id": [chunk["chunk_id"] for chunk in batch],
         }
 
@@ -324,78 +326,95 @@ class CriticCollator:
 class TrainCriticModelWrapper(pl.LightningModule):
     "A pytorch lightening module that handles training and evaluation of the Critic model."
 
-    def __init__(self, model: CriticModel, pos_weight: float) -> None:
+    def __init__(
+        self, model: CriticModel, pos_weight: float, running_dir: Path
+    ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
         self.model: CriticModel = model
         self.pos_weight = pos_weight
+        self.running_dir = running_dir
+        self.best_loss = None
 
     def configure_optimizers(self):
         return _configure_optimizers(self.model)
 
     def training_step(self, batch, batch_idx):
-        outputs = self.model.forward(
+        labels = batch["is_correct"]
+        logits = self.model.forward(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
-            labels=batch["labels"],
-            pos_weight=self.pos_weight,
+        ).logits
+        n_labels = batch["is_correct"].shape[0]
+        loss_f = torch.nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor(
+                self.pos_weight, dtype=logits.dtype, device=logits.device
+            )
         )
-        n_labels = batch["labels"].shape[0]
-        loss = not_none(outputs.loss)
+        loss = loss_f.forward(logits, labels.to(dtype=logits.dtype))
         self.log("train/loss", loss.item(), batch_size=n_labels)
         self.log(
             "train/lr",
             as_any(self.lr_schedulers()).get_last_lr()[0],
             batch_size=n_labels,
         )
+        pos_rate = (logits >= 0).float().mean().item()
+        self.log("train/pos_rate", pos_rate, batch_size=n_labels)
         return loss
 
     def _eval_step(self, batch, name: str):
-        outputs = self.model.forward(
+        labels = batch["is_correct"]
+        logits = self.model.forward(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
-            labels=batch["labels"],
-            pos_weight=self.pos_weight,
+        ).logits
+        loss_f = torch.nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor(
+                self.pos_weight, dtype=logits.dtype, device=logits.device
+            )
         )
-        n_labels = batch["labels"].shape[0]
-        loss = not_none(outputs.loss)
+        loss = loss_f.forward(logits, labels.to(dtype=logits.dtype))
+        n_labels = batch["is_correct"].shape[0]
         self.log(f"{name}/loss", loss.item(), batch_size=n_labels)
 
-        preds = (outputs.logits >= 0).cpu()
-        target = batch["labels"].cpu()
+        preds = (logits >= 0).cpu()
+        targets = batch["is_correct"].cpu()
 
-        acc = accuracy_score(preds, target)
-        self.log(f"{name}/accuracy", as_any(acc), batch_size=n_labels)
+        return {
+            "loss": loss.item(),
+            "n_labels": n_labels,
+            "preds": preds,
+            "targets": targets,
+        }
 
-        f1 = f1_score(preds, target)
-        self.log(f"{name}/f1", as_any(f1), batch_size=n_labels)
-
-        n_pos_pred = preds.count_nonzero().item()
-        self.log(f"{name}/n_pos_pred", n_pos_pred, batch_size=n_labels)
+    def _eval_log_metrics(self, outputs, name: str):
+        preds = list(seq_flatten(o["preds"] for o in outputs))
+        targets = list(seq_flatten(o["targets"] for o in outputs))
+        metrics = CriticModel.compute_metrics(preds, targets)
+        for metric, value in metrics.items():
+            self.log(f"{name}/{metric}", value)
 
     def validation_step(self, batch, batch_idx):
-        self._eval_step(batch, "valid")
+        return self._eval_step(batch, "valid")
 
     def test_step(self, batch, batch_idx):
-        self._eval_step(batch, "test")
+        return self._eval_step(batch, "test")
 
+    def validation_epoch_end(self, outputs: list[dict]) -> None:
+        total_loss = sum(o["loss"] for o in outputs)
+        n_labels = sum(o["n_labels"] for o in outputs)
+        avg_loss = total_loss / n_labels
+        if self.best_loss is None or avg_loss < self.best_loss:
+            self.best_loss = avg_loss
+            self.model.save_pretrained(self.running_dir / "best_model")
 
-def evaluate_critic(
-    critic: CriticModel,
-    args: CtxArgs,
-    sampling_max_tokens: int,
-    r1_srcs: SrcDataset,
-    eval_cache: Optional[PickleCache] = None,
-    tqdm_args={},
-) -> tuple[ChunkedDataset, list[list[float]], dict]:
-    def cached(name, f):
-        if eval_cache is None:
-            return f()
-        return eval_cache.cached(name, f)
+        self._eval_log_metrics(outputs, "valid")
 
-    return cached(
-        f"critic_eval-{args}.pkl",
-        lambda: critic.eval_on_dataset(
-            r1_srcs, args, sampling_max_tokens, tqdm_args=tqdm_args
-        ),
-    )
+    def test_epoch_end(self, outputs: list[dict]) -> None:
+        self._eval_log_metrics(outputs, "test")
+
+    def on_fit_end(self):
+        self.model = as_any(
+            CriticModel.from_pretrained(self.running_dir / "best_model")
+        )
+        super().on_fit_end()
