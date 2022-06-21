@@ -16,6 +16,8 @@ from transformers import DataCollatorForSeq2Seq, get_linear_schedule_with_warmup
 from transformers.trainer_pt_utils import get_parameter_names
 from transformers.modeling_outputs import Seq2SeqLMOutput
 
+from spot.type_check import TypeCheckArgs
+
 from .data import (
     ChunkedDataset,
     CountedAcc,
@@ -48,7 +50,7 @@ class ModelTrainingArgs:
     train_max_tokens: int
     eval_max_tokens: int
     max_epochs: int
-    check_in_isolation: bool
+    tc_args: TypeCheckArgs
     accumulate_grad_batches: int | dict | None = None
 
 
@@ -221,12 +223,12 @@ def train_spot_model(
             device = torch.device(f"cuda:{gpus[0]}" if gpus else "cpu")
             wrapper = wrapper.to(device)
             extra["batch_ids"] = lit_model.batch_ids
-            extra["check_in_isolation"] = train_args.check_in_isolation
             with run_long_task("Generating R1 datasets", notify=False):
                 R1_src_datasets = R1_srcs_from_extra(
                     wrapper,
                     src_datasets,
                     extra,
+                    tc_args=train_args.tc_args,
                     ckpt_dir=running_dir / "models",
                     ckpt_interval=ckpt_interval,
                 )
@@ -247,12 +249,12 @@ def R1_srcs_from_extra(
     wrapper: ModelWrapper,
     src_datasets: dict[str, SrcDataset],
     extra: dict[str, Any],
+    tc_args: TypeCheckArgs,
     ckpt_dir: Optional[Path] = None,
     ckpt_interval: Optional[int] = None,
 ):
     tokenizer = wrapper.tokenizer
     batch_ids = extra["batch_ids"]
-    check_in_isolation = extra["check_in_isolation"]
     print(f"Generating R1 dataset: train")
 
     chunk_datasets = dict[str, ChunkedDataset]()
@@ -270,7 +272,7 @@ def R1_srcs_from_extra(
             chunks_info,
             chunk_datasets["train"].files,
             model_preds,
-            check_in_isolation=check_in_isolation,
+            tc_args=tc_args,
             max_workers=wrapper.args.max_workers,
         )
     else:
@@ -280,7 +282,7 @@ def R1_srcs_from_extra(
             src_datasets["train"],
             chunk_datasets["train"],
             batch_ids,
-            check_in_isolation=check_in_isolation,
+            tc_args=tc_args,
             ckpt_dir=ckpt_dir,
             ckpt_interval=ckpt_interval,
             max_workers=wrapper.args.max_workers,
@@ -297,7 +299,7 @@ def R1_srcs_from_extra(
             chunk_datasets[n].chunks_info,
             chunk_datasets[n].files,
             preds,
-            check_in_isolation=check_in_isolation,
+            tc_args=tc_args,
             max_workers=wrapper.args.max_workers,
         )
     return R1_src_datasets
@@ -309,7 +311,7 @@ def R1_srcs_from_ckpts(
     r0_src: SrcDataset,
     cdata: ChunkedDataset,
     chunk_ids: list[list[int]],
-    check_in_isolation: bool,
+    tc_args: TypeCheckArgs,
     ckpt_dir: Path,
     ckpt_interval: int,
     max_workers: int,
@@ -348,7 +350,7 @@ def R1_srcs_from_ckpts(
         chunks_info,
         cdata.files,
         model_preds,
-        check_in_isolation=check_in_isolation,
+        tc_args=tc_args,
         max_workers=max_workers,
         tqdm_args=tqdm_args,
     )
@@ -444,7 +446,7 @@ def evaluate_model(
     r0_wrapper: ModelWrapper,
     r1_wrapper: Optional[ModelWrapper],
     r0_srcs: SrcDataset,
-    check_in_isolation: bool,
+    tc_args: TypeCheckArgs,
     eval_cache: Optional[PickleCache] = None,
     tqdm_args={},
 ) -> list[tuple[DecodingArgs, DatasetPredResult]]:
@@ -463,20 +465,20 @@ def evaluate_model(
         return results
 
     r1_srcs = cached(
-        f"r1_srcs-{r0_wrapper.args}-iso={check_in_isolation}.pkl",
+        f"r1_srcs-{r0_wrapper.args}-{tc_args}.pkl",
         lambda: R1_srcs_from_preds(
             r1_wrapper.tokenizer,  # type: ignore
             r0_srcs,
             r0_result.chunks.chunks_info,
             r0_result.chunks.files,
             r0_result.predictions,
-            check_in_isolation=check_in_isolation,
+            tc_args=tc_args,
             max_workers=r0_wrapper.args.max_workers,
         ),
     )
 
     r1_result = cached(
-        f"r1_eval-{r1_wrapper.args}-iso={check_in_isolation}.pkl",
+        f"r1_eval-{r1_wrapper.args}-{tc_args}.pkl",
         lambda: r1_wrapper.eval_on_dataset(r1_srcs, tqdm_args=tqdm_args),
     )
     results.append((deepcopy(r1_wrapper.args), r1_result))

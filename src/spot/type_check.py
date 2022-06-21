@@ -191,6 +191,14 @@ class MypyFeedback(NamedTuple):
         return f"MypyFeedback('[{self.error_code}]{self.position.line}:{self.position.column}: {self.message})'"
 
 
+class TypeCheckArgs(NamedTuple):
+    no_feedback: bool = False
+    check_in_isolation: bool = False
+
+    def __repr__(self):
+        return repr_modified_args(self)
+
+
 @dataclass
 class MypyResult:
     # total number of errors in all files

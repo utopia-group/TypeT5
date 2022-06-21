@@ -14,7 +14,7 @@ from typing import *
 import dateparser
 from datasets import Dataset
 
-from spot.type_check import MypyResult, parse_type_str
+from spot.type_check import MypyResult, TypeCheckArgs, parse_type_str
 from spot.type_env import (
     AnnotCat,
     AnnotInfo,
@@ -562,7 +562,7 @@ class SrcDataset:
         file2preds: dict[Path, dict[int, str]],
         max_workers: int,
         tqdm_args: dict,
-        in_isolation: bool,
+        tc_args: TypeCheckArgs,
         include_all_errors: bool = False,
         mypy_path: Optional[Path] = None,
     ) -> "SrcDataset":
@@ -580,8 +580,16 @@ class SrcDataset:
 
         # first, collec type checker feedbacks
         try:
-            if in_isolation:
-                check_rs: list[SrcCheckResult] = process_map(
+            check_rs: list[SrcCheckResult]
+            if tc_args.no_feedback:
+                check_rs = [
+                    SrcCheckResult(
+                        feedbacks=[], new_code=code_to_check_from_preds(s, preds)
+                    )
+                    for s, preds in zip(src_list, list(file2preds.values()))
+                ]
+            elif tc_args.check_in_isolation:
+                check_rs = process_map(
                     type_check_src,
                     src_list,
                     list(file2preds.values()),
@@ -1162,7 +1170,7 @@ def R1_srcs_from_preds(
     chunks_info: list[SrcChunkInfo],
     src_files: list[Path],
     r0_preds: list[list[PythonType]],
-    check_in_isolation: bool,
+    tc_args: TypeCheckArgs,
     max_workers: int,
     tqdm_args: dict = {},
 ) -> SrcDataset:
@@ -1192,7 +1200,7 @@ def R1_srcs_from_preds(
     return r0_src.add_type_checker_feedback(
         tokenizer,
         file2preds1,
-        in_isolation=check_in_isolation,
+        tc_args=tc_args,
         max_workers=max_workers,
         tqdm_args=tqdm_args,
     )

@@ -237,38 +237,3 @@ def dynamic_dataloader(
         batch_sampler=batches,
         collate_fn=collate_fn,
     )
-
-
-@dataclass
-class CombinedModel:
-    r0_wrapper: ModelWrapper
-    r1_wrapper: ModelWrapper
-    check_in_isolation: bool
-
-    def eval_on_dataset(
-        self, dataset: SrcDataset, tqdm_args={}
-    ) -> tuple[DatasetPredResult, DatasetPredResult]:
-        r0_wrapper, r1_wrapper = self.r0_wrapper, self.r1_wrapper
-        r0_eval = r0_wrapper.eval_on_dataset(dataset, tqdm_args={"leave": False})
-        r1_srcs = R1_srcs_from_preds(
-            r1_wrapper.tokenizer,
-            dataset,
-            r0_eval.chunks.chunks_info,
-            r0_eval.chunks.files,
-            r0_eval.predictions,
-            max_workers=r0_wrapper.args.max_workers,
-            check_in_isolation=self.check_in_isolation,
-        )
-        r1_eval = r1_wrapper.eval_on_dataset(r1_srcs, tqdm_args={"leave": False})
-        return r0_eval, r1_eval
-
-
-def encode_model_outputs(
-    types: list[PythonType], tokenizer: TokenizerSPOT
-) -> list[int]:
-    out = list[int]()
-    for i, t in enumerate(types):
-        extra_id = tokenizer.additional_special_tokens_ids[99 - i]
-        out.append(extra_id)
-        out.extend(tokenizer.encode(str(t)))
-    return out
