@@ -1,6 +1,7 @@
 import warnings
 from datasets import Dataset
 from sklearn.decomposition import dict_learning
+from transformers import T5PreTrainedModel
 from spot.data import ChunkedDataset, CtxArgs, SrcDataset
 from spot.type_check import normalize_type
 from .model import (
@@ -8,7 +9,6 @@ from .model import (
     DataLoader,
 )
 from transformers.models.t5.modeling_t5 import (
-    T5PreTrainedModel,
     T5EncoderModel,
     BaseModelOutputWithPastAndCrossAttentions,
 )
@@ -30,53 +30,62 @@ class CriticOutput:
     n_preds: list[int]
 
 
-class CriticModel(T5PreTrainedModel):
-    # _keys_to_ignore_on_load_missing = [r"critic_classifier\."]
-    _keys_to_ignore_on_load_unexpected = [r"decoder\.", r"lm_head\."]
+class CriticModel(nn.Module):
+    def __init__(self, t5enc: T5EncoderModel):
+        super().__init__()
 
-    def __init__(self, config: T5Config):
-        super().__init__(config)
-        self.t5enc = T5EncoderModel(config)
-        self.base_model_prefix = "t5enc"
+        self.t5enc = t5enc
+        config = t5enc.config
 
-        self.config = config
-        self.critic_classifier = nn.Sequential(
+        # self.critic_classifier = nn.Sequential(
+        #     nn.Linear(config.d_model, config.d_model),
+        #     nn.ReLU(inplace=True),
+        #     nn.Dropout(config.dropout_rate),
+        #     nn.Linear(config.d_model, 1),
+        # )
+        self.critic_encoder = nn.Sequential(
             nn.Linear(config.d_model, config.d_model),
-            nn.ReLU(inplace=True),
-            nn.Dropout(config.dropout_rate),
-            nn.Linear(config.d_model, 1),
+            nn.LeakyReLU(),
         )
-        # self.critic_classifier = nn.Linear(config.d_model, 1)
+        self.critic_classifier = nn.Linear(config.d_model, 1)
         self.tokenizer = tokenizer = load_tokenizer_spot()
         self.extra_id_min = tokenizer.additional_special_tokens_ids[0]
         self.extra_id_max = tokenizer.additional_special_tokens_ids[-1]
-
-        self.post_init()
+        self.labels_trained = 0
 
     def forward(
         self,
         input_ids: torch.LongTensor,
         attention_mask: torch.FloatTensor,
+        prediction_spans: list[list[tuple[int, int]]],
         **kwargs,
     ):
         kwargs["return_dict"] = True
         kwargs["output_hidden_states"] = True
         outputs = self.t5enc.forward(input_ids, attention_mask=attention_mask, **kwargs)
         assert isinstance(outputs, BaseModelOutputWithPastAndCrossAttentions)
-        hidden_states = not_none(outputs.hidden_states)[-1]
+        hidden_states = not_none(outputs.last_hidden_state)
         assert len(hidden_states.shape) == 3  # of shape (batch_size, seq_len, d_model)
 
-        isextra = (self.extra_id_min <= input_ids).bitwise_and(
-            input_ids <= self.extra_id_max
-        )
-        n_preds = isextra.count_nonzero(dim=1).tolist()
-        hidden_states = hidden_states[isextra, :]
-        assert len(hidden_states.shape) == 2  # of shape (n_labels, d_model)
+        classifier_inputs = []
+        for row, spans in enumerate(prediction_spans):
+            for s in spans:
+                # print(self.tokenizer.decode(input_ids[row, s[0]:s[1]]))
+                hs = self.critic_encoder(
+                    hidden_states[row, s[0] : s[1], :]
+                )  # (span_len, d_model)
+                classifier_inputs.append(hs.mean(dim=0, keepdim=True))
+        c_inputs = torch.cat(classifier_inputs, dim=0)  # (n_labels, d_model)
+        assert len(c_inputs.shape) == 2  # of shape (n_labels, d_model)
         # rescale the hidden_states before feeding to the head, as done in the original T5 model
         # hidden_states = hidden_states * (self.config.d_model**-0.5)
-        logits = self.critic_classifier.forward(hidden_states).reshape(-1)
-
+        logits = self.critic_classifier.forward(c_inputs).reshape(-1)
+        n_preds = [len(x) for x in prediction_spans]
         return CriticOutput(logits, n_preds)
+
+    @property
+    def device(self):
+        return self.t5enc.device
 
     def eval_on_data(
         self,
@@ -100,6 +109,7 @@ class CriticModel(T5PreTrainedModel):
                     out = self.forward(
                         input_ids=batch["input_ids"].to(device),
                         attention_mask=batch["attention_mask"].to(device),
+                        prediction_spans=batch["prediction_spans"],
                     )
                 p = (out.logits >= 0).cpu().tolist()
                 t = batch["is_correct"].cpu().tolist()
@@ -140,6 +150,7 @@ class CriticModel(T5PreTrainedModel):
         tqdm_args: dict = {},
     ) -> tuple[ChunkedDataset, list[list[float]], dict]:
         """Convinient method to preprocess the src according to the model's ctx_args and evaluate the (R0) accuracy."""
+        assert src_data.predictions_inlined
         chunks = src_data.to_chunks(self.tokenizer, ctx_args, tqdm_args=tqdm_args)
         collator = CriticCollator(self.tokenizer)
         loader = dynamic_dataloader(
@@ -153,6 +164,32 @@ class CriticModel(T5PreTrainedModel):
         preds_ordered = [chunk2preds[int(c_id)] for c_id in chunks.data["chunk_id"]]
 
         return chunks, preds_ordered, metrics
+
+    def save(self, dir: Path):
+        dir.mkdir(exist_ok=True, parents=True)
+        torch.save(self, dir / "model.pt")
+
+    @staticmethod
+    def load(dir: Path, verify_trained: bool = True) -> "CriticModel":
+        model = torch.load(dir / "model.pt")
+        assert isinstance(model, CriticModel)
+        if verify_trained:
+            assert model.labels_trained > 0
+        return model
+
+    @staticmethod
+    def from_code_t5(path: Path | str) -> "CriticModel":
+        def msg_filter(record):
+            return (
+                not "Some weights of the model checkpoint at Salesforce/codet5-base were not used when initializing T5EncoderModel"
+                in record.msg
+            )
+
+        logging.getLogger("transformers.modeling_utils").addFilter(msg_filter)
+
+        t5_enc = as_any(T5EncoderModel.from_pretrained(path))
+        assert isinstance(t5_enc, T5EncoderModel)
+        return CriticModel(t5_enc)
 
 
 def stack_and_pad(xs: list[list[int]], pad_id: int) -> torch.LongTensor:
@@ -186,24 +223,20 @@ def train_critic_model(
         shutil.rmtree(running_dir)
     running_dir.mkdir(parents=True, exist_ok=True)
 
+    tokenizer = load_tokenizer_spot()
+    datasets: dict[str, Dataset] = {}
+    for n in ["valid", "test", "train"]:
+        sdata = critic_datasets[n].inline_predictions()
+        cdata = sdata.to_chunks(tokenizer, train_args.ctx_args)
+        datasets[n] = to_critic_dataset(cdata)
+
+    pos_weight = compute_pos_weight(list(seq_flatten(datasets["train"]["is_correct"])))
+    assert math.isfinite(pos_weight), f"pos_weight = {pos_weight}"
+
     model_path = (
         "Salesforce/codet5-small" if use_small_model else "Salesforce/codet5-base"
     )
-    tokenizer = load_tokenizer_spot()
-    datasets: dict[str, Dataset] = {}
-    with run_long_task("Preparing critic datasets", notify=False):
-        for n in ["valid", "test", "train"]:
-            cdata = critic_datasets[n].to_chunks(tokenizer, train_args.ctx_args)
-            datasets[n] = to_critic_dataset(cdata)
-
-    # pos_weight = compute_pos_weight(
-    #     list(seq_flatten(datasets["train"]["is_correct"])),
-    #     list(seq_flatten(datasets["valid"]["is_correct"])),
-    # )
-    pos_weight = compute_pos_weight(list(seq_flatten(datasets["train"]["is_correct"])))
-    assert math.isfinite(pos_weight), f"pos_weight = {pos_weight}"
-    model = CriticModel.from_pretrained(model_path)
-    assert isinstance(model, CriticModel)
+    model = CriticModel.from_code_t5(model_path)
     lit_model = TrainCriticModelWrapper(model, pos_weight, running_dir)
 
     wandb_logger = WandbLogger()  # assuming a run has already been initialized
@@ -248,14 +281,13 @@ def train_critic_model(
 
     warnings.filterwarnings("ignore", "The dataloader.*does not have many workers.*")
 
-    with run_long_task(f"Training {model_name}"):
-        trainer.validate(lit_model, dataloaders["valid"])
-        trainer.fit(
-            lit_model,
-            train_dataloaders=dataloaders["train"],
-            val_dataloaders=dataloaders["valid"],
-        )
-        model = lit_model.model
+    trainer.validate(lit_model, dataloaders["valid"])
+    trainer.fit(
+        lit_model,
+        train_dataloaders=dataloaders["train"],
+        val_dataloaders=dataloaders["valid"],
+    )
+    model = lit_model.model
 
     extra = dict[str, Any]()
     save_dir = datadir / "checkpoints/lit-saved" / model_name
@@ -266,7 +298,7 @@ def train_critic_model(
             shutil.rmtree(save_dir)
         save_dir.mkdir(parents=True)
 
-        model.save_pretrained(save_dir)
+        model.save(save_dir)
 
         shutil.rmtree(running_dir)
     except Exception as e:
@@ -289,9 +321,16 @@ def compute_pos_weight(
 
 
 def to_critic_dataset(cdata: ChunkedDataset) -> Dataset:
+    def as_tuple(span: slice):
+        return span.start, span.stop
+
     new_data = dict()
     new_data["input_ids"] = cdata.data["input_ids"]
     new_data["is_correct"] = labels = list[list[bool]]()
+    new_data["prediction_spans"] = [
+        [as_tuple(s) for s in not_none(info.inlined_spans)]
+        for info in cdata.chunks_info
+    ]
     for info in cdata.chunks_info:
         labels.append(
             [
@@ -319,6 +358,7 @@ class CriticCollator:
             "is_correct": torch.BoolTensor(
                 [l for chunk in batch for l in chunk["is_correct"]]
             ),
+            "prediction_spans": [chunk["prediction_spans"] for chunk in batch],
             "chunk_id": [chunk["chunk_id"] for chunk in batch],
         }
 
@@ -344,8 +384,10 @@ class TrainCriticModelWrapper(pl.LightningModule):
         logits = self.model.forward(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
+            prediction_spans=batch["prediction_spans"],
         ).logits
         n_labels = batch["is_correct"].shape[0]
+        self.model.labels_trained += len(labels)
         loss_f = torch.nn.BCEWithLogitsLoss(
             pos_weight=torch.tensor(
                 self.pos_weight, dtype=logits.dtype, device=logits.device
@@ -367,6 +409,7 @@ class TrainCriticModelWrapper(pl.LightningModule):
         logits = self.model.forward(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
+            prediction_spans=batch["prediction_spans"],
         ).logits
         loss_f = torch.nn.BCEWithLogitsLoss(
             pos_weight=torch.tensor(
@@ -406,15 +449,15 @@ class TrainCriticModelWrapper(pl.LightningModule):
         avg_loss = total_loss / n_labels
         if self.best_loss is None or avg_loss < self.best_loss:
             self.best_loss = avg_loss
-            self.model.save_pretrained(self.running_dir / "best_model")
+            self.model.save(self.running_dir / "best_model")
 
         self._eval_log_metrics(outputs, "valid")
 
     def test_epoch_end(self, outputs: list[dict]) -> None:
         self._eval_log_metrics(outputs, "test")
 
-    def on_fit_end(self):
-        self.model = as_any(
-            CriticModel.from_pretrained(self.running_dir / "best_model")
-        )
-        super().on_fit_end()
+    # def on_fit_end(self):
+    #     self.model = as_any(
+    #         CriticModel.from_pretrained(self.running_dir / "best_model")
+    #     )
+    #     super().on_fit_end()

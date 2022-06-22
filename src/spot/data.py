@@ -6,7 +6,7 @@ import random
 import shutil
 import subprocess
 import warnings
-from copy import copy
+import copy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import *
@@ -160,13 +160,14 @@ class TokenizedSrc:
     origin_code: str
     tokenized_code: list[int]  # with certain types masked out
     prev_types: list[PythonType] | None = None  # previously predicted types, if any
+    inlined_spans: list[slice] | None = None  # the spans of inlined previous types
 
     def truncate(self, max_tkns: int) -> "TokenizedSrc":
         n_types = 0
         for p in self.types_pos:
             if p < max_tkns:
                 n_types += 1
-        result = copy(self)
+        result = copy.copy(self)
         result.tokenized_code = self.tokenized_code[:max_tkns]
         result.types = self.types[:n_types]
         result.types_pos = self.types_pos[:n_types]
@@ -176,6 +177,57 @@ class TokenizedSrc:
         if self.prev_types is not None:
             result.prev_types = self.prev_types[:n_types]
         return result
+
+    def inline_prev_predictions(self, as_comment: bool) -> "TokenizedSrc":
+        "Inine the previous predictions into the code, either directly or as comments."
+        prev_types = self.prev_types
+        assert prev_types is not None
+        assert_eq(len(prev_types), len(self.types))
+
+        types_pos = list[int]()
+        tokenized_code = list[int]()
+        tokenizer = load_tokenizer_spot()
+        mask_id = tokenizer.mask_token_id
+        comment_start = tokenizer.encode("/* ", add_special_tokens=False)
+        comment_end = tokenizer.encode(" */", add_special_tokens=False)
+
+        inlined_spans = list[slice]()
+
+        i_types = 0
+        for tk in self.tokenized_code:
+            tokenized_code.append(tk)
+            if tk == mask_id:
+                span_start = len(tokenized_code)
+                types_pos.append(span_start - 1)
+                to_insert = tokenizer.encode(
+                    str(prev_types[i_types]), add_special_tokens=False
+                )
+                if as_comment:
+                    to_insert = comment_start + to_insert + comment_end
+                tokenized_code.extend(to_insert)
+                span_end = len(tokenized_code)
+                inlined_spans.append(slice(span_start, span_end))
+                assert_eq(tokenized_code[span_start:span_end], to_insert)
+                i_types += 1
+        assert_eq(i_types, len(prev_types))
+
+        return TokenizedSrc(
+            file=self.file,
+            repo=self.repo,
+            types=self.types,
+            types_pos=types_pos,
+            types_str=self.types_str,
+            types_tks=self.types_tks,
+            types_info=self.types_info,
+            origin_code=self.origin_code,
+            tokenized_code=tokenized_code,
+            prev_types=prev_types,
+            inlined_spans=inlined_spans,
+        )
+
+    @staticmethod
+    def inline_predictions(src: "TokenizedSrc", as_comment=False):
+        return src.inline_prev_predictions(as_comment=as_comment)
 
 
 class _TokenizedSrcHelper:
@@ -238,6 +290,7 @@ class _TokenizedSrcHelper:
         src: TokenizedSrc,
         current_code: str,
         feedbacks: list[MypyFeedback],
+        patch_predictions: bool = False,
     ) -> TokenizedSrc:
         try:
             m = cst.parse_module(current_code)
@@ -268,7 +321,9 @@ class _TokenizedSrcHelper:
                 types_str.append(src.types_str[li])
                 annots_info.append(a)
         pos_to_msg = {f.position: f.message for f in feedbacks}
-        new_code = patch_code_with_extra(current_code, preds_map, pos_to_msg)
+        new_code = patch_code_with_extra(
+            current_code, preds_map, pos_to_msg, patch_predictions
+        )
         code_segs = new_code.split(SpecialNames.TypeMask)
         assert len(code_segs) == len(types) + 1, f"{len(code_segs)} != {len(types)} + 1"
 
@@ -352,6 +407,7 @@ def chunk_srcs_per_file(
         types = list[PythonType]()
         types_info = list[AnnotInfo]()
         prev_types = list[PythonType]() if src.prev_types is not None else None
+        inlined_spans = list[slice]() if src.inlined_spans is not None else None
         for i, l_id in enumerate(label_ids):
             label_pos = src.types_pos[l_id] - ctx_start
             tks[label_pos] = special_tks[i]
@@ -361,6 +417,11 @@ def chunk_srcs_per_file(
             types_info.append(src.types_info[l_id])
             if prev_types is not None:
                 prev_types.append(not_none(src.prev_types)[l_id])
+            if inlined_spans is not None:
+                span0 = not_none(src.inlined_spans)[l_id]
+                inlined_spans.append(
+                    slice(span0.start - ctx_start, span0.stop - ctx_start)
+                )
         label_tkns.append(eos_id)
 
         assert len(label_ids) > 0
@@ -377,6 +438,7 @@ def chunk_srcs_per_file(
             src_ids=[src_id] * len(label_ids),
             label_ids=label_ids,
             prev_types=prev_types,
+            inlined_spans=inlined_spans,
         )
         chunks_info.append(meta)
 
@@ -406,6 +468,22 @@ class SrcDataset:
     repos_root: Path
     all_srcs: list[TokenizedSrc] = field(default_factory=list)
     extra_stats: dict = field(default_factory=dict)
+    predictions_inlined: bool = False
+
+    def inline_predictions(self, tqdm_args={}) -> "SrcDataset":
+        assert not self.predictions_inlined
+        new_srcs = pmap(
+            TokenizedSrc.inline_predictions,
+            self.all_srcs,
+            desc="inline_predictions",
+            tqdm_args=tqdm_args,
+        )
+        return SrcDataset(
+            repos_root=self.repos_root,
+            all_srcs=new_srcs,
+            extra_stats=copy.deepcopy(self.extra_stats),
+            predictions_inlined=True,
+        )
 
     def get_src_by_file(self, rel_path: Path) -> TokenizedSrc:
         assert isinstance(rel_path, Path)
@@ -1002,6 +1080,7 @@ class SrcChunkInfo:
     # maps each label to its label id in the corresponding TokenizedSrc
     label_ids: list[int]
     prev_types: list[PythonType] | None
+    inlined_spans: list[slice] | None
 
     def __repr__(self):
         return f"SrcChunkInfo(num_types={len(self.types)}, unique_src_ids={set(self.src_ids)})"
@@ -1150,13 +1229,17 @@ def output_ids_as_types(
 
 
 def patch_code_with_extra(
-    code: str, predictions: dict[CodeRange, str], errors: dict[CodePosition, str]
+    code: str,
+    predictions: dict[CodeRange, str],
+    errors: dict[CodePosition, str],
+    patch_predictions: bool,
 ) -> str:
     replaces = []
     # When the ranges overlap, we want to use the order: new_prediction -> prev_prediction -> errors
     for r, t in predictions.items():
         replaces.append((r, 1, SpecialNames.TypeMask))
-        replaces.append((CodeRange(r.start, r.start), 2, f"/* {t} */"))
+        if patch_predictions:
+            replaces.append((CodeRange(r.start, r.start), 2, f"/* {t} */"))
 
     for p, e in errors.items():
         replaces.append((CodeRange(p, p), 3, f"/* error: {e} */"))

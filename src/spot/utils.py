@@ -44,6 +44,9 @@ from transformers.models.t5.modeling_t5 import T5ForConditionalGeneration
 TokenizerSPOT = RobertaTokenizer
 ModelSPOT = T5ForConditionalGeneration
 
+T1 = TypeVar("T1")
+T2 = TypeVar("T2")
+
 
 def load_model_spot(path) -> ModelSPOT:
     return cast(ModelSPOT, ModelSPOT.from_pretrained(path))
@@ -51,6 +54,39 @@ def load_model_spot(path) -> ModelSPOT:
 
 def load_tokenizer_spot() -> TokenizerSPOT:
     return TokenizerSPOT.from_pretrained("Salesforce/codet5-base")
+
+
+DefaultDecoder = load_tokenizer_spot()
+
+
+def decode_tokens(tks, skip_special_tokens=False):
+    return DefaultDecoder.decode(tks, skip_special_tokens=skip_special_tokens)
+
+
+DefaultWorkers: int = 24
+
+
+def pmap(
+    f: Callable[..., T1],
+    *f_args: Any,
+    desc: str,
+    n_workers: int = DefaultWorkers,
+    tqdm_args: dict,
+) -> list[T1]:
+    """
+    Parallel map with progress displaying.
+    """
+    n = len(f_args[0])
+    assert_eq(n, *(len(xs) for xs in f_args))
+    chunksize = max(1, n // (10 * n_workers))
+    return process_map(
+        f,
+        *f_args,
+        chunksize=chunksize,
+        max_workers=n_workers,
+        desc=desc,
+        **tqdm_args,
+    )
 
 
 class SpecialNames:
@@ -82,10 +118,6 @@ def get_data_dir() -> Path:
         return Path(v)
     else:
         return proj_root() / "data"
-
-
-T1 = TypeVar("T1")
-T2 = TypeVar("T2")
 
 
 def not_none(x: Optional[T1]) -> T1:
@@ -350,7 +382,7 @@ def pushover_alert(
 @contextmanager
 def run_long_task(name: str, notify: bool = True):
     "When notify=False, will only push notifiations when encountering errors."
-
+    print(f"Starting task: {name}")
     try:
         start = time.time()
         yield

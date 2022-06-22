@@ -185,7 +185,7 @@ def train_spot_model(
         gradient_clip_val=1.0,
         gradient_clip_algorithm="norm",
         accumulate_grad_batches=train_args.accumulate_grad_batches,
-        track_grad_norm=2,
+        # track_grad_norm=2,
     )
 
     warnings.filterwarnings("ignore", "The dataloader.*does not have many workers.*")
