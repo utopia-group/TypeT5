@@ -71,7 +71,7 @@ def pmap(
     *f_args: Any,
     desc: str,
     n_workers: int = DefaultWorkers,
-    tqdm_args: dict,
+    tqdm_args: dict = {},
 ) -> list[T1]:
     """
     Parallel map with progress displaying.

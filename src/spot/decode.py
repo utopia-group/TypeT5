@@ -1,24 +1,27 @@
 import multiprocessing
 
 from spot.data import (
-    SrcCheckResult,
+    ChunkedDataset,
     SrcDataset,
     TokenizedSrc,
     code_to_check_from_preds,
-    type_check_src_in_project,
 )
 from spot.model import DatasetPredResult, ModelWrapper
-from spot.type_check import MypyChecker, MypyFeedback, MypyResult, PythonType
+from spot.type_check import (
+    MypyChecker,
+    MypyFeedback,
+    MypyResult,
+    PythonType,
+    normalize_type,
+)
 from spot.utils import *
 
 
-def sample_then_select(
-    wrapper: ModelWrapper, src_data: SrcDataset, n_samples: int
-) -> DatasetPredResult:
-    """
-    Sample the solutions for each file using top-p sampling or (diverse) beam search
-    and then select the best solution according to the type checker feedbacks.
-    """
+def sample_candidates(
+    wrapper: ModelWrapper,
+    src_data: SrcDataset,
+    n_samples: int,
+) -> tuple[ChunkedDataset, list[list[list[PythonType]]]]:
     tokenizer = wrapper.tokenizer
     ctx_args = wrapper.args.ctx_args
 
@@ -49,43 +52,71 @@ def sample_then_select(
             samples[sample_id][chunk_id] if do_sample else samples[chunk_id][sample_id]
         )
 
-    file2src = src_data.file2src(resolve=False)
+    pred_candidates = [
+        [get_preds(cid, sid) for sid in range(n_samples)] for cid in range(n_chunks)
+    ]  # of shape (n_chunks, n_samples, n_labels)
+    return chunks, pred_candidates
 
+
+def select_candidates_by_type_errors(
+    src_data: SrcDataset,
+    chunks: ChunkedDataset,
+    pred_candidates: list[list[list[PythonType]]],
+) -> DatasetPredResult:
+    file2src = src_data.file2src(resolve=False)
     srcs_to_check = src_data.srcs_with_labels()
+
     with src_data.prepare_typecheck_projects(srcs_to_check) as template_root:
 
         to_check = dict[tuple[int, int], tuple[TokenizedSrc, dict[int, str], Path]]()
-        for i in range(n_chunks):
+        for i in range(len(chunks.data)):
             info = chunks.chunks_info[i]
             file = chunks.files[info.src_ids[0]]
             src = file2src[file.relative_to(src_data.repos_root)]
             proj_root = template_root / src.repo
-            for j in range(n_samples):
-                preds = get_preds(i, j)
+            for j, candidates in enumerate(pred_candidates[i]):
                 preds_dict = {
-                    l_id: str(pred) for l_id, pred in zip(info.label_ids, preds)
+                    l_id: str(pred) for l_id, pred in zip(info.label_ids, candidates)
                 }
                 to_check[(i, j)] = (src, preds_dict, proj_root)
 
         to_check_values = to_check.values()
-        max_workers = wrapper.args.max_workers
-        check_rs: list[int] = process_map(
+        check_rs: list[int] = pmap(
             count_type_errors_in_project,
             [[x[0]] for x in to_check_values],
             [[x[1]] for x in to_check_values],
             [x[2] for x in to_check_values],
-            max_workers=max_workers,
             desc="map type_check_src_in_project",
-            chunksize=max(1, len(to_check_values) // (8 * max_workers)),
         )
 
-    check_rs_dict = dict(zip(to_check.keys(), check_rs))
-
+    n_errors = dict(zip(to_check.keys(), check_rs))
     final_preds = list[list[PythonType]]()
-    for i in range(n_chunks):
-        errors = [check_rs_dict[(i, j)] for j in range(n_samples)]
-        sample_id = int(np.argmin(errors))
-        final_preds.append(get_preds(i, sample_id))
+    for i in range(len(chunks.data)):
+        candidates = pred_candidates[i]
+        es = [n_errors[(i, j)] for j in range(len(candidates))]
+        sample_id = int(np.argmin(es))
+        final_preds.append(candidates[sample_id])
+    return DatasetPredResult(chunks, final_preds)
+
+
+def select_candidates_using_oracle(
+    chunks: ChunkedDataset,
+    pred_candidates: list[list[list[PythonType]]],
+) -> DatasetPredResult:
+    final_preds = list[list[PythonType]]()
+    for i in range(len(chunks.data)):
+        info = chunks.chunks_info[i]
+        candidates = pred_candidates[i]
+        n_errors = []
+        for preds in candidates:
+            ne = sum(
+                0 if normalize_type(p) == normalize_type(t) else 1
+                for p, t in zip(preds, info.types)
+            )
+            n_errors.append(ne)
+        sample_id = int(np.argmin(n_errors))
+        final_preds.append(candidates[sample_id])
+
     return DatasetPredResult(chunks, final_preds)
 
 
