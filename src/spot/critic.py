@@ -87,20 +87,18 @@ class CriticModel(nn.Module):
     def device(self):
         return self.t5enc.device
 
-    def eval_on_data(
+    def classify_data(
         self,
         dataloader,
         n_examples: int,
         tqdm_args: dict = {},
-    ) -> tuple[dict[int, list[float]], dict]:
-        """Convinient method to preprocess the src according to the model's ctx_args and evaluate the (R0) accuracy."""
+    ) -> dict[int, list[float]]:
+        """Run the critic model on the given dataloader and returns classification
+        probability for each prediction span."""
         device = self.device
         chunk2preds = dict[int, list[float]]()
         tqdm_bar = tqdm(total=n_examples, desc="predict", **tqdm_args)
         self.eval()
-
-        pred_bools = list[bool]()
-        label_bools = list[bool]()
 
         with torch.no_grad():
             for batch in dataloader:
@@ -111,11 +109,6 @@ class CriticModel(nn.Module):
                         attention_mask=batch["attention_mask"].to(device),
                         prediction_spans=batch["prediction_spans"],
                     )
-                p = (out.logits >= 0).cpu().tolist()
-                t = batch["is_correct"].cpu().tolist()
-                assert_eq(len(p), len(t))
-                pred_bools.extend(p)
-                label_bools.extend(t)
                 pred_vec: list[float] = out.logits.sigmoid().tolist()
                 pred_counter = 0
                 assert_eq(len(out.n_preds), len(batch["input_ids"]))
@@ -128,9 +121,7 @@ class CriticModel(nn.Module):
                 tqdm_bar.update(batch_size)
         tqdm_bar.close()
 
-        metrics = CriticModel.compute_metrics(pred_bools, label_bools)
-
-        return chunk2preds, metrics
+        return chunk2preds
 
     @staticmethod
     def compute_metrics(pred_bools, label_bools):
@@ -153,14 +144,24 @@ class CriticModel(nn.Module):
         assert src_data.predictions_inlined
         chunks = src_data.to_chunks(self.tokenizer, ctx_args, tqdm_args=tqdm_args)
         collator = CriticCollator(self.tokenizer)
+        dataset = to_critic_dataset(chunks)
         loader = dynamic_dataloader(
-            to_critic_dataset(chunks),
+            dataset,
             max_tokens=sampling_max_tokens,
             collate_fn=collator,
             shuffle=True,
         )
         n_exs = len(chunks.data)
-        chunk2preds, metrics = self.eval_on_data(loader, n_exs, tqdm_args=tqdm_args)
+        chunk2preds = self.classify_data(loader, n_exs, tqdm_args=tqdm_args)
+        chunk2labels: dict[int, list[bool]] = dict(
+            zip(dataset["chunk_id"], dataset["is_correct"])
+        )
+
+        pred_bools = [p >= 0.5 for cid in chunk2preds for p in chunk2preds[cid]]
+        label_bools = [l for cid in chunk2preds for l in chunk2labels[cid]]
+
+        metrics = CriticModel.compute_metrics(pred_bools, label_bools)
+
         preds_ordered = [chunk2preds[int(c_id)] for c_id in chunks.data["chunk_id"]]
 
         return chunks, preds_ordered, metrics
@@ -321,14 +322,11 @@ def compute_pos_weight(
 
 
 def to_critic_dataset(cdata: ChunkedDataset) -> Dataset:
-    def as_tuple(span: slice):
-        return span.start, span.stop
-
     new_data = dict()
     new_data["input_ids"] = cdata.data["input_ids"]
     new_data["is_correct"] = labels = list[list[bool]]()
     new_data["prediction_spans"] = [
-        [as_tuple(s) for s in not_none(info.inlined_spans)]
+        [(s.start, s.stop) for s in not_none(info.inlined_spans)]
         for info in cdata.chunks_info
     ]
     for info in cdata.chunks_info:
@@ -351,16 +349,18 @@ class CriticCollator:
         pad_id = not_none(self.tokenizer.pad_token_id)
         input_ids = stack_and_pad([chunk["input_ids"] for chunk in batch], pad_id)
         attention_mask = (input_ids != pad_id).float()
-        return {
+        result = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             # "output_ids": stack_and_pad([b["output_ids"] for b in batch], pad_id),
-            "is_correct": torch.BoolTensor(
-                [l for chunk in batch for l in chunk["is_correct"]]
-            ),
             "prediction_spans": [chunk["prediction_spans"] for chunk in batch],
             "chunk_id": [chunk["chunk_id"] for chunk in batch],
         }
+        if "is_correct" in batch[0]:
+            result["is_correct"] = torch.BoolTensor(
+                [l for chunk in batch for l in chunk["is_correct"]]
+            )
+        return result
 
 
 class TrainCriticModelWrapper(pl.LightningModule):

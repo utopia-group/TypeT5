@@ -159,30 +159,14 @@ class TokenizedSrc:
     types_info: list[AnnotInfo]
     origin_code: str
     tokenized_code: list[int]  # with certain types masked out
-    prev_types: list[PythonType] | None = None  # previously predicted types, if any
-    inlined_spans: list[slice] | None = None  # the spans of inlined previous types
-
-    def truncate(self, max_tkns: int) -> "TokenizedSrc":
-        n_types = 0
-        for p in self.types_pos:
-            if p < max_tkns:
-                n_types += 1
-        result = copy.copy(self)
-        result.tokenized_code = self.tokenized_code[:max_tkns]
-        result.types = self.types[:n_types]
-        result.types_pos = self.types_pos[:n_types]
-        result.types_str = self.types_str[:n_types]
-        result.types_tks = self.types_tks[:n_types]
-        result.types_info = self.types_info[:n_types]
-        if self.prev_types is not None:
-            result.prev_types = self.prev_types[:n_types]
-        return result
+    prev_types: dict[int, PythonType] | None = None  # previously predicted types
+    inlined_spans: dict[int, slice] | None = None  # the spans of inlined previous types
 
     def inline_prev_predictions(self, as_comment: bool) -> "TokenizedSrc":
         "Inine the previous predictions into the code, either directly or as comments."
         prev_types = self.prev_types
         assert prev_types is not None
-        assert_eq(len(prev_types), len(self.types))
+        assert len(prev_types) > 0
 
         types_pos = list[int]()
         tokenized_code = list[int]()
@@ -191,7 +175,7 @@ class TokenizedSrc:
         comment_start = tokenizer.encode("/* ", add_special_tokens=False)
         comment_end = tokenizer.encode(" */", add_special_tokens=False)
 
-        inlined_spans = list[slice]()
+        inlined_spans = dict[int, slice]()
 
         i_types = 0
         for tk in self.tokenized_code:
@@ -199,17 +183,19 @@ class TokenizedSrc:
             if tk == mask_id:
                 span_start = len(tokenized_code)
                 types_pos.append(span_start - 1)
-                to_insert = tokenizer.encode(
-                    str(prev_types[i_types]), add_special_tokens=False
-                )
-                if as_comment:
-                    to_insert = comment_start + to_insert + comment_end
-                tokenized_code.extend(to_insert)
-                span_end = len(tokenized_code)
-                inlined_spans.append(slice(span_start, span_end))
-                assert_eq(tokenized_code[span_start:span_end], to_insert)
+
+                if i_types in prev_types:
+                    to_insert = tokenizer.encode(
+                        str(prev_types[i_types]), add_special_tokens=False
+                    )
+                    if as_comment:
+                        to_insert = comment_start + to_insert + comment_end
+                    tokenized_code.extend(to_insert)
+                    span_end = len(tokenized_code)
+                    inlined_spans[i_types] = slice(span_start, span_end)
+                    assert_eq(tokenized_code[span_start:span_end], to_insert)
                 i_types += 1
-        assert_eq(i_types, len(prev_types))
+        assert_eq(i_types, len(self.types))
 
         return TokenizedSrc(
             file=self.file,
@@ -228,6 +214,25 @@ class TokenizedSrc:
     @staticmethod
     def inline_predictions(src: "TokenizedSrc", as_comment=False):
         return src.inline_prev_predictions(as_comment=as_comment)
+
+
+@dataclass
+class CtxArgs:
+    ctx_size: int
+    left_margin: int
+    right_margin: int
+    max_labels: int = 16
+
+    @property
+    def window_size(self) -> int:
+        return self.ctx_size - self.left_margin - self.right_margin
+
+    def as_tuple(self):
+        "Returns (left_margin, window_size, right_margin, max_labels)."
+        return self.left_margin, self.window_size, self.right_margin, self.max_labels
+
+    def __repr__(self):
+        return repr_modified_args(self)
 
 
 class _TokenizedSrcHelper:
@@ -342,9 +347,13 @@ class _TokenizedSrcHelper:
 
 
 def _compute_ctx(
-    src: TokenizedSrc, window_start: int, ctx_args: "CtxArgs"
+    src: TokenizedSrc, label_range: tuple[int, int], ctx_args: "CtxArgs"
 ) -> tuple[list[int], tuple[int, int]]:
     src_len = len(src.tokenized_code)
+    assert label_range[0] < len(
+        src.types_pos
+    ), f"label_range={label_range}, len(types_pos)={len(src.types_pos)}"
+    window_start = src.types_pos[label_range[0]]
     left_margin_start = max(0, window_start - ctx_args.left_margin)
     left_margin_size = window_start - left_margin_start
 
@@ -359,7 +368,7 @@ def _compute_ctx(
 
     label_pos = 0
     assert len(src.types) > 0
-    for i in range(len(src.types)):
+    for i in range(label_range[0], label_range[1]):
         label_pos = src.types_pos[i] - window_start
         if 0 <= label_pos < max_window_size:
             label_ids.append(i)
@@ -378,6 +387,70 @@ def _compute_ctx(
     return label_ids, (left_margin_start, right_margin_end)
 
 
+def src_to_chunks_(
+    chunks: list,
+    chunks_info: list,
+    src: TokenizedSrc,
+    src_id: int,
+    label_range: tuple[int, int],
+    ctx_args: "CtxArgs",
+    tokenizer: TokenizerSPOT,
+) -> None:
+    assert 0 <= label_range[0]
+    assert label_range[1] <= len(
+        src.types
+    ), f"label_range: {label_range}, len(types): {len(src.types)}"
+
+    special_tks = [tokenizer.additional_special_tokens_ids[99 - i] for i in range(100)]
+    bos_id, eos_id = not_none(tokenizer.bos_token_id), not_none(tokenizer.eos_token_id)
+
+    label_ids, (ctx_start, ctx_end) = _compute_ctx(src, label_range, ctx_args)
+    tks = src.tokenized_code[ctx_start:ctx_end]
+    label_tkns = [bos_id]
+    types = list[PythonType]()
+    types_info = list[AnnotInfo]()
+    prev_types = list[PythonType]() if src.prev_types is not None else None
+    inlined_spans = list[slice]() if src.inlined_spans is not None else None
+    for i, l_id in enumerate(label_ids):
+        label_pos = src.types_pos[l_id] - ctx_start
+        tks[label_pos] = special_tks[i]
+        label_tkns.append(special_tks[i])
+        label_tkns.extend(src.types_tks[l_id])
+        types.append(src.types[l_id])
+        types_info.append(src.types_info[l_id])
+        if prev_types is not None:
+            prev_types.append(not_none(src.prev_types)[l_id])
+        if inlined_spans is not None:
+            span0 = not_none(src.inlined_spans)[l_id]
+            inlined_spans.append(slice(span0.start - ctx_start, span0.stop - ctx_start))
+    label_tkns.append(eos_id)
+
+    assert len(label_ids) > 0
+    assert len(tks) <= ctx_args.ctx_size
+    this_chunk = {
+        "input_ids": tks,
+        "labels": label_tkns,
+        "n_labels": len(label_ids),
+    }
+    chunks.append(this_chunk)
+
+    meta = SrcChunkInfo(
+        types,
+        types_info,
+        src_ids=[src_id] * len(label_ids),
+        label_ids=label_ids,
+        prev_types=prev_types,
+        inlined_spans=inlined_spans,
+    )
+    chunks_info.append(meta)
+
+    new_label_range = (label_ids[-1] + 1, label_range[1])
+    if new_label_range[0] < label_range[1]:
+        src_to_chunks_(
+            chunks, chunks_info, src, src_id, new_label_range, ctx_args, tokenizer
+        )
+
+
 def chunk_srcs_per_file(
     repos_root: Path,
     srcs: Sequence[TokenizedSrc],
@@ -387,74 +460,34 @@ def chunk_srcs_per_file(
 ) -> "ChunkedDataset":
     """Turn each file into a single chunk when possible, or break it down into multiple chunks."""
 
-    chunks: dict[str, list] = {
+    chunks = list[dict]()
+    chunks_info: list[SrcChunkInfo] = []
+
+    for src_id, src in enumerate(tqdm(srcs, desc="chunk_srcs_per_file", **tqdm_args)):
+        if len(src.types) == 0:
+            continue
+        labels_range = 0, len(src.types)
+        src_to_chunks_(
+            chunks, chunks_info, src, src_id, labels_range, ctx_args, tokenizer
+        )
+
+    data: dict[str, list] = {
         "input_ids": [],
         "labels": [],
         "n_labels": [],
         "chunk_id": [],
     }
-    chunks_info: list[SrcChunkInfo] = []
-
-    special_tks = [tokenizer.additional_special_tokens_ids[99 - i] for i in range(100)]
-    bos_id, eos_id = not_none(tokenizer.bos_token_id), not_none(tokenizer.eos_token_id)
-
     chunk_id = 0
-
-    def src_to_chunks(src: TokenizedSrc, src_id: int, window_start: int) -> None:
-        label_ids, (ctx_start, ctx_end) = _compute_ctx(src, window_start, ctx_args)
-        tks = src.tokenized_code[ctx_start:ctx_end]
-        label_tkns = [bos_id]
-        types = list[PythonType]()
-        types_info = list[AnnotInfo]()
-        prev_types = list[PythonType]() if src.prev_types is not None else None
-        inlined_spans = list[slice]() if src.inlined_spans is not None else None
-        for i, l_id in enumerate(label_ids):
-            label_pos = src.types_pos[l_id] - ctx_start
-            tks[label_pos] = special_tks[i]
-            label_tkns.append(special_tks[i])
-            label_tkns.extend(src.types_tks[l_id])
-            types.append(src.types[l_id])
-            types_info.append(src.types_info[l_id])
-            if prev_types is not None:
-                prev_types.append(not_none(src.prev_types)[l_id])
-            if inlined_spans is not None:
-                span0 = not_none(src.inlined_spans)[l_id]
-                inlined_spans.append(
-                    slice(span0.start - ctx_start, span0.stop - ctx_start)
-                )
-        label_tkns.append(eos_id)
-
-        assert len(label_ids) > 0
-        assert len(tks) <= ctx_args.ctx_size
-        chunks["input_ids"].append(tks)
-        chunks["labels"].append(label_tkns)
-        chunks["n_labels"].append(len(label_ids))
-        nonlocal chunk_id
-        chunks["chunk_id"].append(chunk_id)
+    for chunk in chunks:
+        data["input_ids"].append(chunk["input_ids"])
+        data["labels"].append(chunk["labels"])
+        data["n_labels"].append(chunk["n_labels"])
+        data["chunk_id"].append(chunk_id)
         chunk_id += 1
-        meta = SrcChunkInfo(
-            types,
-            types_info,
-            src_ids=[src_id] * len(label_ids),
-            label_ids=label_ids,
-            prev_types=prev_types,
-            inlined_spans=inlined_spans,
-        )
-        chunks_info.append(meta)
-
-        if len(src.types) > label_ids[-1] + 1:
-            new_start = src.types_pos[label_ids[-1] + 1]
-            src_to_chunks(src, src_id, new_start)
-
-    for src_id, src in enumerate(tqdm(srcs, desc="chunk_srcs_per_file", **tqdm_args)):
-        if len(src.types) == 0:
-            continue
-        window_start = src.types_pos[0]
-        src_to_chunks(src, src_id, window_start)
 
     files = [(repos_root / s.file).resolve() for s in srcs]
     return ChunkedDataset(
-        data=Dataset.from_dict(chunks),
+        data=Dataset.from_dict(data),
         chunks_info=chunks_info,
         files=files,
         file2src={f: s.origin_code for f, s in zip(files, srcs)},
@@ -485,6 +518,12 @@ class SrcDataset:
             predictions_inlined=True,
         )
 
+    def file2id(self) -> dict[Path, int]:
+        return {s.file: i for i, s in enumerate(self.all_srcs)}
+
+    def id2src(self) -> dict[int, TokenizedSrc]:
+        return {i: s for i, s in enumerate(self.all_srcs)}
+
     def get_src_by_file(self, rel_path: Path) -> TokenizedSrc:
         assert isinstance(rel_path, Path)
         for src in self.all_srcs:
@@ -510,33 +549,6 @@ class SrcDataset:
     def __getitem__(self, ids: slice | Iterable):
         return SrcDataset(
             self.repos_root, get_subset(self.all_srcs, ids), {"subset_ids": ids}
-        )
-
-    def filter_files(
-        self,
-        min_labels_per_file: int = 3,
-        max_labels_per_file: int = 100,
-        min_tokens_per_file: int = 250,
-        max_tokens_per_file: int = 4000,
-    ) -> None:
-        origin_labels = sum(len(s.types) for s in self.srcs_with_labels())
-        origin_tokens = sum(len(s.tokenized_code) for s in self.srcs_with_labels())
-        srcs = [
-            s.truncate(max_tokens_per_file)
-            for s in self.all_srcs
-            if min_labels_per_file <= len(s.types) <= max_labels_per_file
-            and min_tokens_per_file <= len(s.tokenized_code)
-        ]
-        new_labels = sum(len(s.types) for s in srcs)
-        new_tokens = sum(len(s.tokenized_code) for s in srcs)
-        labels_ratio = new_labels / origin_labels
-        tkns_ratio = new_tokens / origin_tokens
-        self.all_srcs = srcs
-        self.add_stats(
-            {
-                "labels_kept_after_filtering": labels_ratio,
-                "tkns_kept_after_filtering": tkns_ratio,
-            }
         )
 
     def to_chunks(
@@ -607,30 +619,27 @@ class SrcDataset:
 
     def type_check_each_file_in_project(
         self,
-        file2preds: dict[Path, dict[int, str]],
-        max_workers: int,
+        file2preds: Iterable[tuple[Path, dict[int, str]]],
         mypy_path=None,
         include_all_errors: bool = False,
         tqdm_args={},
     ) -> list["SrcCheckResult"]:
         file2src = self.file2src(resolve=False)
         repos_root = self.repos_root
-        src_list = [file2src[f.relative_to(repos_root)] for f in file2preds]
+        src_list = [file2src[f.relative_to(repos_root)] for f, _ in file2preds]
 
         with self.prepare_typecheck_projects(src_list) as template_root:
             project_roots = [template_root / f.repo for f in src_list]
 
-            check_rs: list[SrcCheckResult] = process_map(
+            check_rs: list[SrcCheckResult] = pmap(
                 type_check_src_in_project,
                 src_list,
-                list(file2preds.values()),
+                [p for _, p in file2preds],
                 project_roots,
                 [include_all_errors for _ in src_list],
                 [mypy_path for _ in src_list],
-                max_workers=max_workers,
                 desc="map type_check_src_in_project",
-                chunksize=max(1, len(src_list) // (8 * max_workers)),
-                **tqdm_args,
+                tqdm_args=tqdm_args,
             )
         return check_rs
 
@@ -679,8 +688,7 @@ class SrcDataset:
                 )
             else:
                 check_rs = self.type_check_each_file_in_project(
-                    file2preds,
-                    max_workers,
+                    file2preds.items(),
                     mypy_path,
                     include_all_errors=include_all_errors,
                     tqdm_args=tqdm_args,
@@ -717,7 +725,7 @@ class SrcDataset:
             should_print=False,
         )
 
-        # then, patch the srcs with the feedbacks and predictions to from new srcs
+        # then, patch the srcs with the feedbacks and predictions to form new srcs
         helper = _TokenizedSrcHelper(tokenizer)
         new_srcs = process_map(
             helper.feedbacks_to_tokenized_src,
@@ -1048,25 +1056,6 @@ def mask_type_annots(
         "annots_info": annots_info,
         "cst_code": cst_code,
     }
-
-
-@dataclass
-class CtxArgs:
-    ctx_size: int
-    left_margin: int
-    right_margin: int
-    max_labels: int = 16
-
-    @property
-    def window_size(self) -> int:
-        return self.ctx_size - self.left_margin - self.right_margin
-
-    def as_tuple(self):
-        "Returns (left_margin, window_size, right_margin, max_labels)."
-        return self.left_margin, self.window_size, self.right_margin, self.max_labels
-
-    def __repr__(self):
-        return repr_modified_args(self)
 
 
 @dataclass

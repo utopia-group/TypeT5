@@ -56,11 +56,11 @@ def load_tokenizer_spot() -> TokenizerSPOT:
     return TokenizerSPOT.from_pretrained("Salesforce/codet5-base")
 
 
-DefaultDecoder = load_tokenizer_spot()
+DefaultTokenizer = load_tokenizer_spot()
 
 
 def decode_tokens(tks, skip_special_tokens=False):
-    return DefaultDecoder.decode(tks, skip_special_tokens=skip_special_tokens)
+    return DefaultTokenizer.decode(tks, skip_special_tokens=skip_special_tokens)
 
 
 DefaultWorkers: int = 24
@@ -70,7 +70,7 @@ def pmap(
     f: Callable[..., T1],
     *f_args: Any,
     desc: str,
-    n_workers: int = DefaultWorkers,
+    max_workers: int = DefaultWorkers,
     tqdm_args: dict = {},
 ) -> list[T1]:
     """
@@ -78,12 +78,12 @@ def pmap(
     """
     n = len(f_args[0])
     assert_eq(n, *(len(xs) for xs in f_args))
-    chunksize = max(1, n // (10 * n_workers))
+    chunksize = max(1, n // (10 * max_workers))
     return process_map(
         f,
         *f_args,
         chunksize=chunksize,
-        max_workers=n_workers,
+        max_workers=max_workers,
         desc=desc,
         **tqdm_args,
     )
@@ -599,3 +599,14 @@ def repr_modified_args(instance) -> str:
         return f"{type_name}({', '.join(f'{k}={v}' for k, v in ma.items())})"
     else:
         return repr(ma)
+
+
+def merge_dicts(dicts: Sequence[dict[T1, Any]]) -> dict[T1, list]:
+    assert len(dicts) > 0
+    keys = dicts[0].keys()
+    result = {k: [] for k in keys}
+    for d in dicts:
+        assert_eq(keys, d.keys())
+        for k in keys:
+            result[k].append(d[k])
+    return result

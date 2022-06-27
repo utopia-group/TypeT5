@@ -1,12 +1,21 @@
 import multiprocessing
 
+from datasets import Dataset
+from spot.critic import CriticCollator, CriticModel
+
 from spot.data import (
+    _TokenizedSrcHelper,
     ChunkedDataset,
+    CtxArgs,
+    SrcCheckResult,
+    SrcChunkInfo,
     SrcDataset,
     TokenizedSrc,
     code_to_check_from_preds,
+    src_to_chunks_,
+    type_check_src_in_project,
 )
-from spot.model import DatasetPredResult, ModelWrapper
+from spot.model import DatasetPredResult, DecodingArgs, ModelWrapper, dynamic_dataloader
 from spot.type_check import (
     MypyChecker,
     MypyFeedback,
@@ -86,7 +95,7 @@ def select_candidates_by_type_errors(
             [[x[0]] for x in to_check_values],
             [[x[1]] for x in to_check_values],
             [x[2] for x in to_check_values],
-            desc="map type_check_src_in_project",
+            desc="map count_type_errors_in_project",
         )
 
     n_errors = dict(zip(to_check.keys(), check_rs))
@@ -118,6 +127,122 @@ def select_candidates_using_oracle(
         final_preds.append(candidates[sample_id])
 
     return DatasetPredResult(chunks, final_preds)
+
+
+def select_candidates_using_critic(
+    critic: CriticModel,
+    src_data: SrcDataset,
+    chunks: ChunkedDataset,
+    pred_candidates: list[list[list[PythonType]]],
+    dec_args: DecodingArgs,
+    tqdm_args: dict = {},
+    use_logp: bool = False,
+) -> DatasetPredResult:
+    file2src = src_data.file2src(resolve=False)
+    srcs_to_check = src_data.srcs_with_labels()
+
+    with src_data.prepare_typecheck_projects(srcs_to_check) as template_root:
+
+        to_check = dict[tuple[int, int], tuple[TokenizedSrc, dict[int, str], Path]]()
+        for i in range(len(chunks.data)):
+            info = chunks.chunks_info[i]
+            file = chunks.files[info.src_ids[0]]
+            src = file2src[file.relative_to(src_data.repos_root)]
+            proj_root = template_root / src.repo
+            for j, candidates in enumerate(pred_candidates[i]):
+                preds_dict = {
+                    l_id: str(pred) for l_id, pred in zip(info.label_ids, candidates)
+                }
+                to_check[(i, j)] = (src, preds_dict, proj_root)
+
+        to_check_values = to_check.values()
+        check_rs: list[SrcCheckResult] = pmap(
+            type_check_src_in_project,
+            [x[0] for x in to_check_values],
+            [x[1] for x in to_check_values],
+            [x[2] for x in to_check_values],
+            desc="map type_check_src_in_project",
+            tqdm_args=tqdm_args,
+        )
+
+    file2id = src_data.file2id()
+    src_ids = [file2id[x[0].file] for x in to_check_values]
+    critic_inputs_metas = pmap(
+        to_critic_inputs,
+        [x[0] for x in to_check_values],
+        src_ids,
+        [x[1] for x in to_check_values],
+        check_rs,
+        [dec_args.ctx_args] * len(to_check_values),
+        desc="map to_critic_inputs",
+    )
+    all_inputs = [x for xs, _ in critic_inputs_metas for x in xs]
+    all_meta = [x for _, xs in critic_inputs_metas for x in xs]
+    for i, (x, info) in enumerate(zip(all_inputs, all_meta)):
+        x["chunk_id"] = i
+        x["prediction_spans"] = [
+            (s.start, s.stop) for s in not_none(info.inlined_spans)
+        ]
+
+    critic_dataset = Dataset.from_dict(merge_dicts(all_inputs))
+
+    dataloader = dynamic_dataloader(
+        critic_dataset,
+        max_tokens=dec_args.sampling_max_tokens,
+        collate_fn=CriticCollator(DefaultTokenizer),
+    )
+    chunk2preds = critic.classify_data(dataloader, len(all_inputs), tqdm_args=tqdm_args)
+    # the number of correct predictions judged by the critic
+    critic_scores = list[float]()
+    for inputs, metas in critic_inputs_metas:
+        total_score = 0.0
+        n_preds = 0
+        for x, meta in zip(inputs, metas):
+            preds = chunk2preds[x["chunk_id"]]
+            assert_eq(len(preds), len(not_none(meta.prev_types)))
+            if use_logp:
+                total_score += sum(math.log(p) for p in preds)
+            else:
+                total_score += sum(preds)
+            n_preds += len(preds)
+        critic_scores.append(total_score / n_preds)
+
+    scores_map = dict(zip(to_check.keys(), critic_scores))
+    final_preds = list[list[PythonType]]()
+    for i in range(len(chunks.data)):
+        candidates = pred_candidates[i]
+        cand_scores = [scores_map[(i, j)] for j in range(len(candidates))]
+        sample_id = int(np.argmax(cand_scores))
+        final_preds.append(candidates[sample_id])
+    return DatasetPredResult(chunks, final_preds)
+
+
+def to_critic_inputs(
+    src: TokenizedSrc,
+    src_id: int,
+    preds: dict[int, PythonType],
+    check_r: SrcCheckResult,
+    ctx_args: CtxArgs,
+):
+    """
+    Patch each src with the type checker feedbacks and inline the previous predicitons,
+    then break the src into one (if short enough) or more chunks.
+    """
+    errors, current_code = check_r
+    fdbks = [] if isinstance(errors, str) else errors
+    helper = _TokenizedSrcHelper(DefaultTokenizer)
+    new_src = helper.feedbacks_to_tokenized_src(
+        src, current_code, fdbks, patch_predictions=False
+    )
+    new_src.prev_types = preds
+    new_src = TokenizedSrc.inline_predictions(new_src)
+    chunks = list[dict]()
+    chunks_info = list[SrcChunkInfo]()
+    labels_range = min(preds.keys()), max(preds.keys()) + 1
+    src_to_chunks_(
+        chunks, chunks_info, new_src, src_id, labels_range, ctx_args, DefaultTokenizer
+    )
+    return chunks, chunks_info
 
 
 def collect_type_errors_from_predictions(
