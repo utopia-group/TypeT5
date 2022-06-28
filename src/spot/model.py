@@ -59,6 +59,7 @@ class DecodingArgs:
 class DatasetPredResult:
     chunks: ChunkedDataset
     predictions: list[list[PythonType]]
+    extra_info: list[dict] | None = None
 
     @property
     def accuracies(self) -> dict:

@@ -12,21 +12,20 @@ from spot.data import (
     CtxArgs,
     PythonType,
     SrcDataset,
-    code_to_check_from_preds,
 )
 from spot.model import DatasetPredResult, DecodingArgs
 from spot.type_check import normalize_type
 from spot.utils import *
 
 
-def visualize_chunks(chunks: ChunkedDataset, height="500px") -> widgets.VBox:
+def visualize_chunks(chunks: list[dict]) -> widgets.VBox:
     def show(i):
-        d = chunks.data[i]
-        print("Labels:", chunks.tokenizer.decode(d["labels"]))
+        d = chunks[i]
+        print("Labels:", decode_tokens(d["labels"]))
         print("============== code =================")
-        print(chunks.tokenizer.decode(d["input_ids"]))
+        print(decode_tokens(d["input_ids"]))
 
-    return interactive_sized(show, {"i": (0, len(chunks.data) - 1)}, height=height)
+    return widgets.interactive(show, i=(0, len(chunks) - 1))
 
 
 def display_as_widget(x) -> widgets.Output:
@@ -37,7 +36,8 @@ def display_as_widget(x) -> widgets.Output:
 
 def visualize_preds_on_code(
     dataset: ChunkedDataset,
-    preds: list[list[str]],
+    preds: list[list[Any]],
+    preds_extra: dict[str, list[list[Any]]],
 ) -> widgets.VBox:
     assert_eq(len(dataset.data), len(preds))
 
@@ -61,6 +61,8 @@ def visualize_preds_on_code(
             ]
             meta_data["prev_correct"] = prev_correct
         meta_data["predictions"] = pred_types
+        for k, v in preds_extra.items():
+            meta_data[k] = v[i]
         code_tks = inline_predictions(
             dataset.data[i]["input_ids"], typpes_enc, tokenizer
         )
@@ -71,7 +73,6 @@ def visualize_preds_on_code(
 
         code = widgets.HTML(
             "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30); }'>"
-            + str(label_types)
             + colorize_code_html(html.escape(code_dec))
             + "</pre>"
         )

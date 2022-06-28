@@ -66,6 +66,10 @@ class PythonType:
     def Any() -> "PythonType":
         return PythonType(("Any",))
 
+    @staticmethod
+    def from_str(s: str) -> "PythonType":
+        return parse_type_str(s)
+
 
 _type_name_map = {
     "list": "List",

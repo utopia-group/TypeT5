@@ -211,6 +211,10 @@ class TokenizedSrc:
             inlined_spans=inlined_spans,
         )
 
+    def print_code(self):
+        "Print out the (decoded) token sequence"
+        return print(decode_tokens(self.tokenized_code))
+
     @staticmethod
     def inline_predictions(src: "TokenizedSrc", as_comment=False):
         return src.inline_prev_predictions(as_comment=as_comment)

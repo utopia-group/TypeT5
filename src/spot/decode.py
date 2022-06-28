@@ -100,12 +100,14 @@ def select_candidates_by_type_errors(
 
     n_errors = dict(zip(to_check.keys(), check_rs))
     final_preds = list[list[PythonType]]()
+    extra_info = list[dict]()
     for i in range(len(chunks.data)):
         candidates = pred_candidates[i]
         es = [n_errors[(i, j)] for j in range(len(candidates))]
         sample_id = int(np.argmin(es))
         final_preds.append(candidates[sample_id])
-    return DatasetPredResult(chunks, final_preds)
+        extra_info.append({"n_errors": es[sample_id]})
+    return DatasetPredResult(chunks, final_preds, extra_info)
 
 
 def select_candidates_using_oracle(
@@ -113,6 +115,7 @@ def select_candidates_using_oracle(
     pred_candidates: list[list[list[PythonType]]],
 ) -> DatasetPredResult:
     final_preds = list[list[PythonType]]()
+    extra_info = list[dict]()
     for i in range(len(chunks.data)):
         info = chunks.chunks_info[i]
         candidates = pred_candidates[i]
@@ -125,8 +128,9 @@ def select_candidates_using_oracle(
             n_errors.append(ne)
         sample_id = int(np.argmin(n_errors))
         final_preds.append(candidates[sample_id])
+        extra_info.append({"n_errors_oracle": n_errors[sample_id]})
 
-    return DatasetPredResult(chunks, final_preds)
+    return DatasetPredResult(chunks, final_preds, extra_info)
 
 
 def select_candidates_using_critic(
@@ -165,6 +169,20 @@ def select_candidates_using_critic(
             tqdm_args=tqdm_args,
         )
 
+    all_fdbks = [r.feedbacks for r in check_rs if isinstance(r.feedbacks, list)]
+    success_rate = len(all_fdbks) / len(check_rs)
+    print(f"Type checking success rate: {success_rate:.2%}")
+
+    n_errors_map = dict[tuple[int, int], int]()
+    for k, v in zip(to_check.keys(), [r.feedbacks for r in check_rs]):
+        if isinstance(v, list):
+            n_errors_map[k] = len(v)
+        else:
+            n_errors_map[k] = 0
+
+    avg_n_fdbks = sum(n_errors_map.values()) / len(n_errors_map)
+    print(f"Average number of feedbacks per check: {avg_n_fdbks:.2f}")
+
     file2id = src_data.file2id()
     src_ids = [file2id[x[0].file] for x in to_check_values]
     critic_inputs_metas = pmap(
@@ -193,28 +211,41 @@ def select_candidates_using_critic(
     )
     chunk2preds = critic.classify_data(dataloader, len(all_inputs), tqdm_args=tqdm_args)
     # the number of correct predictions judged by the critic
+    critic_preds = list[list[float]]()
     critic_scores = list[float]()
     for inputs, metas in critic_inputs_metas:
-        total_score = 0.0
-        n_preds = 0
+        all_preds = []
         for x, meta in zip(inputs, metas):
             preds = chunk2preds[x["chunk_id"]]
             assert_eq(len(preds), len(not_none(meta.prev_types)))
-            if use_logp:
-                total_score += sum(math.log(p) for p in preds)
-            else:
-                total_score += sum(preds)
-            n_preds += len(preds)
-        critic_scores.append(total_score / n_preds)
+            all_preds.extend(preds)
+        critic_preds.append(all_preds)
+        score = (
+            np.mean([math.log(p) for p in all_preds])
+            if use_logp
+            else np.mean(all_preds)
+        )
+        critic_scores.append(score)
 
     scores_map = dict(zip(to_check.keys(), critic_scores))
+    preds_map = dict(zip(to_check.keys(), critic_preds))
     final_preds = list[list[PythonType]]()
+    extra_info = list[dict]()
+    final_errors = 0
     for i in range(len(chunks.data)):
         candidates = pred_candidates[i]
         cand_scores = [scores_map[(i, j)] for j in range(len(candidates))]
         sample_id = int(np.argmax(cand_scores))
+        final_errors += n_errors_map[(i, sample_id)]
         final_preds.append(candidates[sample_id])
-    return DatasetPredResult(chunks, final_preds)
+        extra_info.append(
+            {
+                "critic_score": cand_scores[sample_id],
+                "critic_preds": preds_map[(i, sample_id)],
+            }
+        )
+    print("Average number of errors after selection:", final_errors / len(chunks.data))
+    return DatasetPredResult(chunks, final_preds, extra_info)
 
 
 def to_critic_inputs(

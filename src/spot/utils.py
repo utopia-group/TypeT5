@@ -66,11 +66,22 @@ def decode_tokens(tks, skip_special_tokens=False):
 DefaultWorkers: int = 24
 
 
+@contextmanager
+def with_default_workers(workers: int):
+    global DefaultWorkers
+    old_workers = DefaultWorkers
+    DefaultWorkers = workers
+    try:
+        yield
+    finally:
+        DefaultWorkers = old_workers
+
+
 def pmap(
     f: Callable[..., T1],
     *f_args: Any,
     desc: str,
-    max_workers: int = DefaultWorkers,
+    max_workers: int | None = None,
     tqdm_args: dict = {},
 ) -> list[T1]:
     """
@@ -78,6 +89,15 @@ def pmap(
     """
     n = len(f_args[0])
     assert_eq(n, *(len(xs) for xs in f_args))
+
+    if max_workers is None:
+        max_workers = DefaultWorkers
+    if max_workers <= 1:
+        outs = list[T1]()
+        for i in tqdm(range(n), desc=desc, **tqdm_args):
+            outs.append(f(*(a[i] for a in f_args)))
+        return outs
+
     chunksize = max(1, n // (10 * max_workers))
     return process_map(
         f,
