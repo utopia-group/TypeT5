@@ -43,14 +43,12 @@ class CriticModel(nn.Module):
         #     nn.Dropout(config.dropout_rate),
         #     nn.Linear(config.d_model, 1),
         # )
-        self.critic_encoder = nn.Sequential(
-            nn.Linear(config.d_model, config.d_model),
-            nn.LeakyReLU(),
-        )
+        # self.critic_encoder = nn.Sequential(
+        #     nn.Linear(config.d_model, config.d_model),
+        #     nn.LeakyReLU(),
+        # )
         self.critic_classifier = nn.Linear(config.d_model, 1)
-        self.tokenizer = tokenizer = load_tokenizer_spot()
-        self.extra_id_min = tokenizer.additional_special_tokens_ids[0]
-        self.extra_id_max = tokenizer.additional_special_tokens_ids[-1]
+        self.tokenizer = load_tokenizer_spot()
         self.labels_trained = 0
 
     def forward(
@@ -70,13 +68,15 @@ class CriticModel(nn.Module):
         classifier_inputs = []
         for row, spans in enumerate(prediction_spans):
             for s in spans:
-                # print(self.tokenizer.decode(input_ids[row, s[0]:s[1]]))
-                hs = self.critic_encoder(
-                    hidden_states[row, s[0] : s[1], :]
-                )  # (span_len, d_model)
-                classifier_inputs.append(hs.mean(dim=0, keepdim=True))
+                hs = hidden_states[row, s[0] - 1 : s[0], :]
+                classifier_inputs.append(hs)
+                # hs = self.critic_encoder(
+                #     hidden_states[row, s[0] : s[1], :]
+                # )  # (span_len, d_model)
+                # classifier_inputs.append(hs.mean(dim=0, keepdim=True))
         c_inputs = torch.cat(classifier_inputs, dim=0)  # (n_labels, d_model)
         assert len(c_inputs.shape) == 2  # of shape (n_labels, d_model)
+
         # rescale the hidden_states before feeding to the head, as done in the original T5 model
         # hidden_states = hidden_states * (self.config.d_model**-0.5)
         logits = self.critic_classifier.forward(c_inputs).reshape(-1)
@@ -227,11 +227,12 @@ def train_critic_model(
     tokenizer = load_tokenizer_spot()
     datasets: dict[str, Dataset] = {}
     for n in ["valid", "test", "train"]:
-        sdata = critic_datasets[n].inline_predictions()
+        sdata = critic_datasets[n]
         cdata = sdata.to_chunks(tokenizer, train_args.ctx_args)
         datasets[n] = to_critic_dataset(cdata)
 
-    pos_weight = compute_pos_weight(list(seq_flatten(datasets["train"]["is_correct"])))
+    # pos_weight = compute_pos_weight(list(seq_flatten(datasets["train"]["is_correct"])))
+    pos_weight = 1.0
     assert math.isfinite(pos_weight), f"pos_weight = {pos_weight}"
 
     model_path = (

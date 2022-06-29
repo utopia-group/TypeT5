@@ -36,8 +36,9 @@ from IPython.display import display
 from libcst.metadata import CodePosition, CodeRange
 from sklearn.metrics import confusion_matrix
 
-from tqdm.auto import tqdm
-from tqdm.contrib.concurrent import process_map, thread_map
+# from tqdm.auto import tqdm
+from tqdm import tqdm
+from tqdm.contrib.concurrent import process_map
 from transformers.models.roberta.tokenization_roberta import RobertaTokenizer
 from transformers.models.t5.modeling_t5 import T5ForConditionalGeneration
 
@@ -105,6 +106,7 @@ def pmap(
         chunksize=chunksize,
         max_workers=max_workers,
         desc=desc,
+        tqdm_class=tqdm,
         **tqdm_args,
     )
 

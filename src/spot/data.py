@@ -165,7 +165,7 @@ class TokenizedSrc:
     def inline_prev_predictions(self, as_comment: bool) -> "TokenizedSrc":
         "Inine the previous predictions into the code, either directly or as comments."
         prev_types = self.prev_types
-        assert prev_types is not None
+        assert isinstance(prev_types, dict), f"prev_types has type: {type(prev_types)}"
         assert len(prev_types) > 0
 
         types_pos = list[int]()
@@ -196,6 +196,7 @@ class TokenizedSrc:
                     assert_eq(tokenized_code[span_start:span_end], to_insert)
                 i_types += 1
         assert_eq(i_types, len(self.types))
+        assert prev_types.keys() == inlined_spans.keys()
 
         return TokenizedSrc(
             file=self.file,
@@ -313,8 +314,8 @@ class _TokenizedSrcHelper:
         ), f"String diffferences: {show_string_diff(current_code, m_code)}"
         current_annots, _ = collect_user_annotations(m)
         preds_map = dict[CodeRange, str]()
-        prev_types = list[PythonType]()
         types = list[PythonType]()
+        prev_types = dict[int, PythonType]()
         types_str = list[str]()
         annots_info = list[AnnotInfo]()
         path2label_id = {info.path: i for i, info in enumerate(src.types_info)}
@@ -324,8 +325,8 @@ class _TokenizedSrcHelper:
                 assert (r := a.annot_range) is not None
                 assert (annot := a.annot) is not None
                 prev_type = preds_map[r] = m.code_for_node(annot.annotation)
-                prev_types.append(parse_type_str(prev_type))
                 li = path2label_id[a.path]
+                prev_types[li] = parse_type_str(prev_type)
                 types.append(src.types[li])
                 types_str.append(src.types_str[li])
                 annots_info.append(a)
@@ -559,7 +560,7 @@ class SrcDataset:
         self,
         tokenizer: TokenizerSPOT,
         ctx_args: "CtxArgs",
-        tqdm_args: dict = {"leave": False},
+        tqdm_args: dict = {},
     ) -> "ChunkedDataset":
         srcs = self.srcs_with_labels()
         chunks = chunk_srcs_per_file(
@@ -667,7 +668,6 @@ class SrcDataset:
 
         file2src = self.file2src()
         src_list = [file2src[f.resolve()] for f in file2preds]
-        chunksize = max(1, len(src_list) // (8 * max_workers))
 
         # first, collec type checker feedbacks
         try:
@@ -680,15 +680,14 @@ class SrcDataset:
                     for s, preds in zip(src_list, list(file2preds.values()))
                 ]
             elif tc_args.check_in_isolation:
-                check_rs = process_map(
+                check_rs = pmap(
                     type_check_src,
                     src_list,
                     list(file2preds.values()),
                     [mypy_path for _ in src_list],
                     max_workers=max_workers,
                     desc="map type_check_src",
-                    chunksize=chunksize,
-                    **tqdm_args,
+                    tqdm_args=tqdm_args,
                 )
             else:
                 check_rs = self.type_check_each_file_in_project(
@@ -731,15 +730,14 @@ class SrcDataset:
 
         # then, patch the srcs with the feedbacks and predictions to form new srcs
         helper = _TokenizedSrcHelper(tokenizer)
-        new_srcs = process_map(
+        new_srcs = pmap(
             helper.feedbacks_to_tokenized_src,
             src_list,
             code_list,
             feedback_list,
             max_workers=max_workers,
             desc="feedbacks_to_tokenized_src",
-            chunksize=chunksize,
-            **tqdm_args,
+            tqdm_args=tqdm_args,
         )
         result.all_srcs = new_srcs
         # assert_eq(len(new_srcs), len(file2preds))
@@ -789,14 +787,13 @@ class SrcDataset:
                 "drop_comments": drop_comments,
             }
         )
-        masked_srcs: list[dict] = process_map(
+        masked_srcs: list[dict | None] = pmap(
             mask_type_annots,
             [(f, code[0]) for f, code in srcs.items()],
             [drop_comments] * len(srcs),
             max_workers=max_workers,
             desc="mask_type_annots",
-            chunksize=max(1, len(srcs) // (8 * max_workers)),
-            **tqdm_args,
+            tqdm_args=tqdm_args,
         )
         filtered_srcs = []
 
@@ -816,13 +813,12 @@ class SrcDataset:
         random.setstate(rands)
 
         helper = _TokenizedSrcHelper(tokenizer)
-        tk_srcs: list[TokenizedSrc] = process_map(
+        tk_srcs: list[TokenizedSrc] = pmap(
             helper.dict_to_tokenized_src,
             filtered_srcs,
             max_workers=max_workers,
             desc="dict_to_tokenized_src",
-            chunksize=max(1, len(filtered_srcs) // (8 * max_workers)),
-            **tqdm_args,
+            tqdm_args=tqdm_args,
         )
 
         for f, g in groupby(tk_srcs, lambda s: s.file).items():

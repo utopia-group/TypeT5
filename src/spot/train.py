@@ -316,7 +316,7 @@ def R1_srcs_from_ckpts(
     ckpt_interval: int,
     max_workers: int,
     device,
-    tqdm_args={"leave": False},
+    tqdm_args={},
 ):
     # TODO: find out why some chunks are missing
     # assert_eq(sum(len(x) for x in chunk_ids), len(cdata.chunks_info))

@@ -39,12 +39,12 @@ def sample_candidates(
         assert wrapper.args.num_beams is not None, "num_beams needs to be set"
         assert n_samples <= wrapper.args.num_beams
 
-    chunks = src_data.to_chunks(tokenizer, ctx_args, tqdm_args={"disable": True})
+    chunks = src_data.to_chunks(tokenizer, ctx_args)
     n_chunks = len(chunks.data)
 
     if do_sample:
         samples = [
-            wrapper.predict(chunks.data, tqdm_args={"leave": False})
+            wrapper.predict(chunks.data, tqdm_args={})
             for _ in tqdm(range(n_samples), desc="Sampling")
         ]  # of shape (n_samples, n_chunks, n_labels)
     else:
@@ -71,6 +71,7 @@ def select_candidates_by_type_errors(
     src_data: SrcDataset,
     chunks: ChunkedDataset,
     pred_candidates: list[list[list[PythonType]]],
+    only_same_file_error: bool = False,
 ) -> DatasetPredResult:
     file2src = src_data.file2src(resolve=False)
     srcs_to_check = src_data.srcs_with_labels()
@@ -95,6 +96,7 @@ def select_candidates_by_type_errors(
             [[x[0]] for x in to_check_values],
             [[x[1]] for x in to_check_values],
             [x[2] for x in to_check_values],
+            [only_same_file_error for _ in to_check_values],
             desc="map count_type_errors_in_project",
         )
 
@@ -133,8 +135,21 @@ def select_candidates_using_oracle(
     return DatasetPredResult(chunks, final_preds, extra_info)
 
 
+def select_first_candidates(
+    chunks: ChunkedDataset,
+    pred_candidates: list[list[list[PythonType]]],
+) -> DatasetPredResult:
+    final_preds = list[list[PythonType]]()
+    for i in range(len(chunks.data)):
+        preds = pred_candidates[i][0]
+        final_preds.append(preds)
+
+    return DatasetPredResult(chunks, final_preds, None)
+
+
 def select_candidates_using_critic(
     critic: CriticModel,
+    no_feedback: bool,
     src_data: SrcDataset,
     chunks: ChunkedDataset,
     pred_candidates: list[list[list[PythonType]]],
@@ -160,14 +175,20 @@ def select_candidates_using_critic(
                 to_check[(i, j)] = (src, preds_dict, proj_root)
 
         to_check_values = to_check.values()
-        check_rs: list[SrcCheckResult] = pmap(
-            type_check_src_in_project,
-            [x[0] for x in to_check_values],
-            [x[1] for x in to_check_values],
-            [x[2] for x in to_check_values],
-            desc="map type_check_src_in_project",
-            tqdm_args=tqdm_args,
-        )
+        if no_feedback:
+            check_rs = [
+                SrcCheckResult("no_feedback=True", x[0].origin_code)
+                for x in to_check_values
+            ]
+        else:
+            check_rs: list[SrcCheckResult] = pmap(
+                type_check_src_in_project,
+                [x[0] for x in to_check_values],
+                [x[1] for x in to_check_values],
+                [x[2] for x in to_check_values],
+                desc="map type_check_src_in_project",
+                tqdm_args=tqdm_args,
+            )
 
     all_fdbks = [r.feedbacks for r in check_rs if isinstance(r.feedbacks, list)]
     success_rate = len(all_fdbks) / len(check_rs)
@@ -304,15 +325,13 @@ def collect_type_errors_from_predictions(
             for l_id, pred in zip(info.label_ids, chunk_preds[i]):
                 pred_dict[l_id] = str(pred)
 
-        check_rs: list[MypyResult | str] = process_map(
+        check_rs: list[MypyResult | str] = pmap(
             collect_type_errors_in_project,
             [[file2src[f] for f in d.keys()] for d in to_check.values()],
             [[preds for preds in d.values()] for d in to_check.values()],
             [root for root in to_check.keys()],
             max_workers=max_workers,
             desc="map type_check_src_in_project",
-            chunksize=max(1, len(to_check) // (8 * max_workers)),
-            leave=False,
         )
         feebacks = [
             (f, e)
@@ -328,11 +347,11 @@ def count_type_errors_in_project(
     srcs: list[TokenizedSrc],
     preds_list: list[dict[int, str]],
     proj_root: Path,
-    only_errors_in_srcs: bool = False,
+    only_same_file_error: bool = False,
 ) -> int:
     r = collect_type_errors_in_project(srcs, preds_list, proj_root)
     if isinstance(r, MypyResult):
-        if only_errors_in_srcs:
+        if only_same_file_error:
             file_errors = [
                 r.error_dict.get(s.file.relative_to(s.repo), []) for s in srcs
             ]

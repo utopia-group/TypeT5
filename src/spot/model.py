@@ -65,6 +65,25 @@ class DatasetPredResult:
     def accuracies(self) -> dict:
         return preds_to_accuracies(self.predictions, self.chunks)
 
+    def group_by_repo(self) -> dict[Path, "DatasetPredResult"]:
+        chunk2repo = list[Path]()
+        for i, info in enumerate(self.chunks.chunks_info):
+            sid = info.src_ids[0]
+            file = self.chunks.files[sid]
+            repo = self.chunks.file2repo[file]
+            chunk2repo.append(repo)
+
+        group2ids = groupby(range(len(chunk2repo)), lambda i: chunk2repo[i])
+        result = dict()
+        chunk_ids = self.chunks.data["chunk_id"]
+        for repo, ids in group2ids.items():
+            result[repo] = DatasetPredResult(
+                self.chunks[(chunk_ids[i] for i in ids)],
+                [self.predictions[i] for i in ids],
+                None if self.extra_info is None else [self.extra_info[i] for i in ids],
+            )
+        return result
+
 
 @dataclass
 class ModelWrapper:
