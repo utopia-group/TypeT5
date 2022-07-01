@@ -569,6 +569,11 @@ def show_count(c: int):
 
 
 class GroupedAccCounter(Generic[T1]):
+    """
+    A counter class that keeps track of the number of correct and total predictions
+    for key of type `T1`.
+    """
+
     def __init__(self) -> None:
         self.correct_counter = Counter[T1]()
         self.total_counter = Counter[T1]()

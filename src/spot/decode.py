@@ -118,7 +118,7 @@ def select_candidates_using_oracle(
 ) -> DatasetPredResult:
     final_preds = list[list[PythonType]]()
     extra_info = list[dict]()
-    for i in range(len(chunks.data)):
+    for i in tqdm(range(len(chunks.data)), desc="select_candidates_using_oracle"):
         info = chunks.chunks_info[i]
         candidates = pred_candidates[i]
         n_errors = []
@@ -138,13 +138,19 @@ def select_candidates_using_oracle(
 def select_first_candidates(
     chunks: ChunkedDataset,
     pred_candidates: list[list[list[PythonType]]],
-) -> DatasetPredResult:
+) -> DatasetPredResult[None]:
     final_preds = list[list[PythonType]]()
     for i in range(len(chunks.data)):
         preds = pred_candidates[i][0]
         final_preds.append(preds)
 
-    return DatasetPredResult(chunks, final_preds, None)
+    return DatasetPredResult(chunks, final_preds, [])
+
+
+@dataclass
+class CriticAssesInfo:
+    candidate_scores: list[float]
+    candidate_label_scores: list[list[float]]
 
 
 def select_candidates_using_critic(
@@ -155,8 +161,8 @@ def select_candidates_using_critic(
     pred_candidates: list[list[list[PythonType]]],
     dec_args: DecodingArgs,
     tqdm_args: dict = {},
-    use_logp: bool = False,
-) -> DatasetPredResult:
+    score_transform: Callable[[float], float] = lambda x: x,
+) -> DatasetPredResult[CriticAssesInfo]:
     file2src = src_data.file2src(resolve=False)
     srcs_to_check = src_data.srcs_with_labels()
 
@@ -230,7 +236,9 @@ def select_candidates_using_critic(
         max_tokens=dec_args.sampling_max_tokens,
         collate_fn=CriticCollator(DefaultTokenizer),
     )
-    chunk2preds = critic.classify_data(dataloader, len(all_inputs), tqdm_args=tqdm_args)
+    chunk2preds = critic.classify_data(
+        dataloader, len(critic_dataset), tqdm_args=tqdm_args
+    )
     # the number of correct predictions judged by the critic
     critic_preds = list[list[float]]()
     critic_scores = list[float]()
@@ -241,32 +249,24 @@ def select_candidates_using_critic(
             assert_eq(len(preds), len(not_none(meta.prev_types)))
             all_preds.extend(preds)
         critic_preds.append(all_preds)
-        score = (
-            np.mean([math.log(p) for p in all_preds])
-            if use_logp
-            else np.mean(all_preds)
-        )
+        score = np.mean([score_transform(p) for p in all_preds])
         critic_scores.append(score)
 
     scores_map = dict(zip(to_check.keys(), critic_scores))
     preds_map = dict(zip(to_check.keys(), critic_preds))
     final_preds = list[list[PythonType]]()
-    extra_info = list[dict]()
+    extra_info = list[CriticAssesInfo]()
     final_errors = 0
     for i in range(len(chunks.data)):
         candidates = pred_candidates[i]
         cand_scores = [scores_map[(i, j)] for j in range(len(candidates))]
+        cand_preds = [preds_map[(i, j)] for j in range(len(candidates))]
         sample_id = int(np.argmax(cand_scores))
         final_errors += n_errors_map[(i, sample_id)]
         final_preds.append(candidates[sample_id])
-        extra_info.append(
-            {
-                "critic_score": cand_scores[sample_id],
-                "critic_preds": preds_map[(i, sample_id)],
-            }
-        )
+        extra_info.append(CriticAssesInfo(cand_scores, cand_preds))
     print("Average number of errors after selection:", final_errors / len(chunks.data))
-    return DatasetPredResult(chunks, final_preds, extra_info)
+    return DatasetPredResult[CriticAssesInfo](chunks, final_preds, extra_info)
 
 
 def to_critic_inputs(

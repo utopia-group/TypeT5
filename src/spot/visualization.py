@@ -17,6 +17,28 @@ from spot.model import DatasetPredResult, DecodingArgs
 from spot.type_check import normalize_type
 from spot.utils import *
 
+from io import StringIO
+from IPython.display import HTML
+from ipywidgets.embed import embed_minimal_html
+
+
+def display_persist(widget) -> None:
+    """
+    Persist a widget as HTML content using `embed_minimal_html` and display
+    it in the notebook. This helps keeping the content accessable after the
+    kernel is restarted.
+    """
+    if isinstance(widget, widgets.Widget):
+        try:
+            page = StringIO()
+            embed_minimal_html(page, widget)
+            display(HTML(page.getvalue()))
+        except Exception as e:
+            logging.warn(f"Failed to render widget as HTML: {e}")
+            display(widget)
+    else:
+        display(widget)
+
 
 def visualize_chunks(chunks: list[dict]) -> widgets.VBox:
     def show(i):
@@ -222,7 +244,7 @@ def visualize_dicts(dicts: Sequence[dict], titles: Sequence[str] | None = None):
     def display_acc(round):
         d = dicts[round]
         prev = None if round == 0 else dicts[round - 1]
-        return pretty_display_dict(show_dict_with_change(d, prev))
+        return dict_widget(show_dict_with_change(d, prev))
 
     tabs = [display_acc(i) for i in range(len(dicts))]
     if titles is None:
@@ -317,7 +339,7 @@ def string_to_html(s: str) -> str:
     return f"<div style='white-space: pre-wrap; line-height: 1.2; font-family: monospace, monospace;'>{s}</div>"
 
 
-def pretty_display_dict(d: dict, float_precision: int = 5):
+def dict_widget(d: dict, float_precision: int = 5):
     outputs = list[widgets.Widget]()
     for expand in [False, True]:
         max_level = 1000 if expand else 0
@@ -337,7 +359,7 @@ def pretty_display_dict(d: dict, float_precision: int = 5):
 def visualize_counts(
     values: Counter[str] | dict[str, Counter[str]],
     x_name: str,
-    top_k: int | list[str] = 15,
+    top_k: int | Iterable[str] = 15,
     title: str | None = None,
 ):
     if isinstance(values, Counter):

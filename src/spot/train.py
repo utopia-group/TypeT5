@@ -37,7 +37,7 @@ from .model import (
 from .type_env import PythonType
 from .utils import *
 from .visualization import (
-    pretty_display_dict,
+    dict_widget,
     string_widget,
     visualize_sequence_tabs,
 )

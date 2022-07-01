@@ -97,7 +97,7 @@ class CriticModel(nn.Module):
         probability for each prediction span."""
         device = self.device
         chunk2preds = dict[int, list[float]]()
-        tqdm_bar = tqdm(total=n_examples, desc="predict", **tqdm_args)
+        tqdm_bar = tqdm(total=n_examples, desc="classify_data", **tqdm_args)
         self.eval()
 
         with torch.no_grad():

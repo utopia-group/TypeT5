@@ -56,16 +56,16 @@ class DecodingArgs:
 
 
 @dataclass
-class DatasetPredResult:
+class DatasetPredResult(Generic[T1]):
     chunks: ChunkedDataset
     predictions: list[list[PythonType]]
-    extra_info: list[dict] | None = None
+    extra_info: list[T1] = field(default_factory=list)
 
     @property
     def accuracies(self) -> dict:
         return preds_to_accuracies(self.predictions, self.chunks)
 
-    def group_by_repo(self) -> dict[Path, "DatasetPredResult"]:
+    def group_by_repo(self) -> dict[Path, "DatasetPredResult[T1]"]:
         chunk2repo = list[Path]()
         for i, info in enumerate(self.chunks.chunks_info):
             sid = info.src_ids[0]
@@ -80,7 +80,7 @@ class DatasetPredResult:
             result[repo] = DatasetPredResult(
                 self.chunks[(chunk_ids[i] for i in ids)],
                 [self.predictions[i] for i in ids],
-                None if self.extra_info is None else [self.extra_info[i] for i in ids],
+                [self.extra_info[i] for i in ids] if self.extra_info else [],
             )
         return result
 
