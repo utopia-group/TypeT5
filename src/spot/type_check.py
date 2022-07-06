@@ -196,6 +196,11 @@ class MypyFeedback(NamedTuple):
 
 
 class TypeCheckArgs(NamedTuple):
+    """
+    If in_isolation is True, then each file is treated as a single-file project.
+    This can lead to better performance but is less precise.
+    """
+
     no_feedback: bool = False
     check_in_isolation: bool = False
 

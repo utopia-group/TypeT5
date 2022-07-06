@@ -456,6 +456,7 @@ def evaluate_model(
         return eval_cache.cached(name, f)
 
     results = list[tuple[DecodingArgs, DatasetPredResult]]()
+    assert not r0_srcs.predictions_inlined
     r0_result = cached(
         f"r0_eval-{r0_wrapper.args}.pkl",
         lambda: r0_wrapper.eval_on_dataset(r0_srcs, tqdm_args=tqdm_args),
@@ -476,6 +477,7 @@ def evaluate_model(
             max_workers=r0_wrapper.args.max_workers,
         ),
     )
+    r1_srcs = r1_srcs.inline_predictions(True)
 
     r1_result = cached(
         f"r1_eval-{r1_wrapper.args}-{tc_args}.pkl",

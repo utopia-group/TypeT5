@@ -217,7 +217,7 @@ class TokenizedSrc:
         return print(decode_tokens(self.tokenized_code))
 
     @staticmethod
-    def inline_predictions(src: "TokenizedSrc", as_comment=False):
+    def inline_predictions(src: "TokenizedSrc", as_comment: bool):
         return src.inline_prev_predictions(as_comment=as_comment)
 
 
@@ -508,11 +508,12 @@ class SrcDataset:
     extra_stats: dict = field(default_factory=dict)
     predictions_inlined: bool = False
 
-    def inline_predictions(self, tqdm_args={}) -> "SrcDataset":
+    def inline_predictions(self, as_comment: bool, tqdm_args={}) -> "SrcDataset":
         assert not self.predictions_inlined
         new_srcs = pmap(
             TokenizedSrc.inline_predictions,
             self.all_srcs,
+            [as_comment] * len(self.all_srcs),
             desc="inline_predictions",
             tqdm_args=tqdm_args,
         )
@@ -661,9 +662,6 @@ class SrcDataset:
         """Add the predictions to the corresponding files, call the type checker to
         collect the feedbacks, and then patch the feedbacks as well as the original
         predictions to form the new inputs.
-
-        If in_isolation is True, then each file is treated as a single-file project.
-        This can lead to better performance but is less precise.
         """
 
         file2src = self.file2src()

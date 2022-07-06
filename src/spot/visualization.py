@@ -1,6 +1,6 @@
 import html
 import re
-from typing import Sequence
+from typing import Sequence, overload
 
 import colored
 import ipywidgets as widgets
@@ -56,21 +56,108 @@ def display_as_widget(x) -> widgets.Output:
     return out
 
 
+def visualize_chunk(
+    input_ids: list[int],
+    pred_types: list[PythonType],
+    label_types: list[PythonType],
+):
+    def id_replace(id: int) -> str:
+        p = pred_types[id]
+        t = label_types[id]
+        correct = normalize_type(p) == normalize_type(t)
+        id_str = f"prediction-{id}"
+        if correct:
+            return f"<span id='{id_str}' style='color: green;'>{str(p)}</span>"
+        else:
+            return f"<span id='{id_str}' style='color: red;'>{str(p)} (Gold: {str(t)})</span>"
+
+    code_dec = DefaultTokenizer.decode(input_ids, skip_special_tokens=False)
+    code = colorize_code_html(html.escape(code_dec))
+    code = code_inline_extra_ids(code, id_replace)
+    return widgets.HTML(
+        "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30);'>"
+        + code
+        + "</pre>"
+    )
+
+
+def colorize_code_html(code: str, comment_color: str = "orange") -> str:
+    "Highlight the special comments in the type checker-augmented python code."
+    output = list[str]()
+    in_comment = False
+    for i in range(len(code)):
+        c = code[i]
+        prev = code[i - 1] if i > 0 else None
+        next = code[i + 1] if i < len(code) - 1 else None
+        if not in_comment and c == "/" and next == "*":
+            output.append(f"<span style='color: {comment_color}'>")
+            in_comment = True
+        output.append(c)
+        if in_comment and prev == "*" and c == "/":
+            output.append("</span>")
+            in_comment = False
+
+    return "".join(output)
+
+
+def code_inline_extra_ids(code: str, id2replace: Callable[[int], str]):
+    def replace(m: re.Match[str]):
+        mi = re.match(r"&lt;extra_id_(\d+)&gt;", m[0])
+        assert mi is not None
+        id = int(mi.group(1))
+        return id2replace(id)
+
+    return re.sub(r"(&lt;extra_id_\d+&gt;)", replace, code)
+
+
+def export_preds_on_code(
+    dataset: ChunkedDataset,
+    preds: list[list[Any]],
+    preds_extra: dict[str, list[list[Any]]],
+    export_to: Path,
+):
+    if export_to.exists():
+        shutil.rmtree(export_to)
+    (export_to / "chunks").mkdir(parents=True)
+    for i in tqdm(range(len(dataset.data)), desc="Exporting"):
+        page = visualize_chunk(
+            dataset.data[i]["input_ids"], preds[i], dataset.chunks_info[i].types
+        )
+        assert isinstance(page.value, str)
+        write_file(export_to / "chunks" / f"chunk{i}.html", page.value)
+
+    chunk_accs = list[CountedAcc]()
+    tq = tqdm(total=len(preds), desc="Computing accuracies")
+    for info, ps in zip(dataset.chunks_info, preds):
+        n_correct = sum(
+            normalize_type(p) == normalize_type(t) for p, t in zip(ps, info.types)
+        )
+        chunk_accs.append(CountedAcc(n_correct, len(ps)))
+        tq.update()
+    tq.close()
+
+    chunk_sorted = sorted(range(len(chunk_accs)), key=lambda i: chunk_accs[i].acc)
+    links = "\n".join(
+        f"<li><a href='chunks/chunk{i}.html#prediction-0'>chunk{i} (Acc: {chunk_accs[i]})</a></li>"
+        for i in chunk_sorted
+    )
+    index = f""" Chunks sorted by accuracy (from low to high).
+    <ol> {links} </ol>
+    """
+    write_file(export_to / "index.html", index)
+    return None
+
+
 def visualize_preds_on_code(
     dataset: ChunkedDataset,
     preds: list[list[Any]],
     preds_extra: dict[str, list[list[Any]]],
-) -> widgets.VBox:
+):
     assert_eq(len(dataset.data), len(preds))
 
     def show_chunk(i: int):
         assert_eq(int(dataset.data[i]["chunk_id"]), i)
         pred_types = preds[i]
-        tokenizer = dataset.tokenizer
-        typpes_enc = [
-            tokenizer.encode(str(t), add_special_tokens=False) for t in pred_types
-        ]
-
         meta_data = dict[str, list]()
         label_types = dataset.chunks_info[i].types
         meta_data["label_types"] = label_types
@@ -85,19 +172,11 @@ def visualize_preds_on_code(
         meta_data["predictions"] = pred_types
         for k, v in preds_extra.items():
             meta_data[k] = v[i]
-        code_tks = inline_predictions(
-            dataset.data[i]["input_ids"], typpes_enc, tokenizer
-        )
-        code_dec = tokenizer.decode(code_tks, skip_special_tokens=False)
-        code_dec = code_inline_extra_ids(code_dec, label_types)
+
         src_ids = sorted(list(set(dataset.chunks_info[i].src_ids)))
         files = [dataset.files[sid] for sid in src_ids]
 
-        code = widgets.HTML(
-            "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30); }'>"
-            + colorize_code_html(html.escape(code_dec))
-            + "</pre>"
-        )
+        code = visualize_chunk(dataset.data[i]["input_ids"], pred_types, label_types)
 
         rows = [
             in_scroll_pane(display_as_widget(pd.DataFrame(meta_data)), height="100px"),
@@ -117,25 +196,6 @@ def visualize_preds_on_code(
     slider.observe(on_slider_change, names="value")  # type: ignore
 
     return widgets.VBox([slider, panel])
-
-
-def inline_predictions(
-    input_tks: Sequence[int],
-    predictions: Sequence[Sequence[int]],
-    tokenizer: TokenizerSPOT,
-) -> list[int]:
-    """Inline the model predictions into the input code and then decode"""
-    out_tks = list[int]()
-    extra_id = 0
-    next_special = tokenizer.additional_special_tokens_ids[99 - extra_id]
-    for tk in input_tks:
-        out_tks.append(tk)
-        if tk == next_special:
-            out_tks.extend(predictions[extra_id])
-            extra_id += 1
-            next_special = tokenizer.additional_special_tokens_ids[99 - extra_id]
-    assert extra_id == len(predictions), f"{extra_id} != {len(predictions)}"
-    return out_tks
 
 
 def visualize_sequence(
@@ -277,43 +337,6 @@ def visualize_conf_matrix(results: dict[str, DatasetPredResult], top_k: int = 15
     return visualize_sequence_tabs(tabs, titles=list(results.keys()))
 
 
-def colorize_code_html(code: str) -> str:
-    "Highlight the special comments in the type checker-augmented python code."
-    output = list[str]()
-    in_comment = False
-    for i in range(len(code)):
-        c = code[i]
-        prev = code[i - 1] if i > 0 else None
-        next = code[i + 1] if i < len(code) - 1 else None
-        if not in_comment and c == "/" and next == "*":
-            output.append("<span style='color: rgb(106, 153, 85)'>")
-            in_comment = True
-        output.append(c)
-        if in_comment and prev == "*" and c == "/":
-            output.append("</span>")
-            in_comment = False
-    new_code = "".join(output)
-
-    def replace(m: re.Match[str]):
-        ml = re.match(r"&lt;label;([^;]+);label&gt;", m[0])
-        assert ml is not None
-        l = ml.group(1)
-        return f"<span style='color: rgb(78, 201, 176)'>({l})</span>"
-
-    return re.sub(r"(&lt;label;[^;]+;label&gt;)", replace, new_code)
-
-
-def code_inline_extra_ids(code: str, preds: list):
-    def replace(m: re.Match[str]):
-        mi = re.match(r"<extra_id_(\d+)>", m[0])
-        assert mi is not None
-        id = int(mi.group(1))
-        label = str(preds[id])
-        return f"<label;{label};label>"
-
-    return re.sub(r"(<extra_id_\d+>)", replace, code)
-
-
 def code_inline_type_masks(code: str, preds: list, label_color: Optional[str] = None):
     i = 0
     if label_color is not None:
@@ -407,6 +430,9 @@ def show_feedback_stats(dataset: SrcDataset):
     stats["total_feedbacks"] = sum(len(l) for l in fb_list)
     num_labels = sum(len(s.types) for s in dataset.all_srcs)
     stats["feedbacks_per_label"] = stats["total_feedbacks"] / num_labels
+    stats["fraction_files_with_feedbacks"] = float(
+        np.mean([1 if len(l) > 0 else 0 for l in fb_list])
+    )
     stats["top_feedbacks"] = plot_feedback_distribution(seq_flatten(fb_list))
     pretty_print_dict(stats)
     fdbk_srcs = [(f, src) for src, fs in zip(dataset.all_srcs, fb_list) for f in fs]

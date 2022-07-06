@@ -152,6 +152,10 @@ class CriticAssesInfo:
     candidate_scores: list[float]
     candidate_label_scores: list[list[float]]
 
+    @property
+    def best_candidate(self) -> int:
+        return int(np.argmax(self.candidate_scores))
+
 
 def select_candidates_using_critic(
     critic: CriticModel,
@@ -287,7 +291,7 @@ def to_critic_inputs(
         src, current_code, fdbks, patch_predictions=False
     )
     new_src.prev_types = preds
-    new_src = TokenizedSrc.inline_predictions(new_src)
+    new_src = TokenizedSrc.inline_predictions(new_src, as_comment=False)
     chunks = list[dict]()
     chunks_info = list[SrcChunkInfo]()
     labels_range = min(preds.keys()), max(preds.keys()) + 1
