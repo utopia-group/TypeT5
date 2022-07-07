@@ -14,7 +14,12 @@ from typing import *
 import dateparser
 from datasets import Dataset
 
-from spot.type_check import MypyResult, TypeCheckArgs, parse_type_str
+from spot.type_check import (
+    MypyResult,
+    TypeCheckArgs,
+    parse_type_str,
+    remove_top_optional,
+)
 from spot.type_env import (
     AnnotCat,
     AnnotInfo,
@@ -1282,9 +1287,13 @@ def type_accuracies(
     types_cat: Sequence[AnnotCat],
     types_pos: Sequence[int],
     normalize_types=True,
+    allow_implicit_none=False,
 ) -> dict[str, Any]:
     assert_eq(len(pred_types), len(label_types), len(types_cat), len(types_pos))
 
+    if allow_implicit_none:
+        pred_types = [remove_top_optional(t) for t in pred_types]
+        label_types = [remove_top_optional(t) for t in label_types]
     if normalize_types:
         pred_types = [normalize_type(ty) for ty in pred_types]
         label_types = [normalize_type(ty) for ty in label_types]
@@ -1332,14 +1341,29 @@ def type_accuracies(
 
 
 def preds_to_accuracies(
-    preds: Sequence[Sequence[PythonType]], dataset: ChunkedDataset, normalize_types=True
+    preds: Sequence[Sequence[PythonType]],
+    dataset: ChunkedDataset,
+    normalize_types=True,
 ):
     cats = [an.cat for info in dataset.chunks_info for an in info.annots_info]
     labels = [ty for info in dataset.chunks_info for ty in info.types]
     poses = [i for info in dataset.chunks_info for i in range(len(info.types))]
-    return type_accuracies(
-        list(seq_flatten(preds)), labels, cats, poses, normalize_types=normalize_types
-    )
+    results = [
+        type_accuracies(
+            list(seq_flatten(preds)),
+            labels,
+            cats,
+            poses,
+            normalize_types=normalize_types,
+            allow_implicit_none=allow,
+        )
+        for allow in [False, True]
+    ]
+    result = dict[str, Any]()
+    result["partial_acc (ImNone)"] = results[1]["partial_acc"]
+    result["full_acc (ImNone)"] = results[1]["full_acc"]
+    result.update(results[0])
+    return result
 
 
 def _turn_off_tokenizer_warning(tokenizer: TokenizerSPOT):

@@ -55,6 +55,9 @@ class PythonType:
         else:
             return self.head[-1]
 
+    def is_any(self) -> bool:
+        return self.head_name() == "Any"
+
     def is_union(self) -> bool:
         """Check whether the type is a union type."""
         return self.head_name() == "Union" or self.head_name() == "<|>"
@@ -105,10 +108,24 @@ def normalize_type(typ: PythonType) -> PythonType:
                 arg_set.add(arg)
         union_args = tuple(sorted(arg_set))
         return PythonType(("Union",), union_args)
+    if all(a.is_any() for a in n_args):
+        # if all arguments are Any, we can drop them all
+        n_args = tuple()
+
     return PythonType(
         normalize_type_head(typ.head),
         tuple(n_args),
     )
+
+
+def remove_top_optional(t: PythonType) -> PythonType:
+    """
+    Remove the top-level Optional. i.e., convert Optional[T] to T.
+    """
+    if t.is_optional() and len(t.args) == 1:
+        return t.args[0]
+    else:
+        return t
 
 
 def parse_type_str(typ_str: str) -> PythonType:
@@ -398,7 +415,7 @@ class IncrementalChekcer:
 
         return out
 
-    def recheck_project(self) -> MypyResult | str:
+    def recheck_project(self) -> MypyResult:
         # TODO: remove this workaround once (https://github.com/python/mypy/issues/12697) is fixed.
         time.sleep(
             self.wait_before_check
@@ -412,7 +429,7 @@ class IncrementalChekcer:
                 ".",
             ]
         )
-
+        assert isinstance(out, MypyResult), f"Recheck failed: {out}"
         return out
 
     def _run_mypy(self, cmd: list[str]) -> MypyResult | str:
