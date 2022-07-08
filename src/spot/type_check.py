@@ -58,6 +58,9 @@ class PythonType:
     def is_any(self) -> bool:
         return self.head_name() == "Any"
 
+    def is_none(self) -> bool:
+        return self.head_name() == "None"
+
     def is_union(self) -> bool:
         """Check whether the type is a union type."""
         return self.head_name() == "Union" or self.head_name() == "<|>"
@@ -124,6 +127,12 @@ def remove_top_optional(t: PythonType) -> PythonType:
     """
     if t.is_optional() and len(t.args) == 1:
         return t.args[0]
+    elif t.is_union():
+        new_args = tuple(a for a in t.args if not a.is_none())
+        if len(new_args) == 1:
+            return new_args[0]
+        else:
+            return PythonType(("Union",), tuple(new_args))
     else:
         return t
 

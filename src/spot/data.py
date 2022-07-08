@@ -167,6 +167,44 @@ class TokenizedSrc:
     prev_types: dict[int, PythonType] | None = None  # previously predicted types
     inlined_spans: dict[int, slice] | None = None  # the spans of inlined previous types
 
+    def inline_single_prediction(
+        self, label_id: int, ty: PythonType, as_comment: bool
+    ) -> "TokenizedSrc":
+        tokenizer = DefaultTokenizer
+        mask_id = tokenizer.mask_token_id
+        to_insert = tokenizer.encode(str(ty), add_special_tokens=False)
+        if as_comment:
+            comment_start = tokenizer.encode("/* ", add_special_tokens=False)
+            comment_end = tokenizer.encode(" */", add_special_tokens=False)
+            to_insert = comment_start + to_insert + comment_end
+
+        l_pos = self.types_pos[label_id]
+        assert_eq(self.tokenized_code[l_pos], mask_id)
+
+        new_code = (
+            self.tokenized_code[:l_pos] + to_insert + self.tokenized_code[l_pos + 1 :]
+        )
+        # inlined_span = slice(l_pos, l_pos + len(to_insert))
+        offset = len(to_insert) - 1
+        new_types_pos = [
+            pos + offset if i > label_id else pos
+            for i, pos in enumerate(self.types_pos)
+        ]
+
+        return TokenizedSrc(
+            file=self.file,
+            repo=self.repo,
+            types=self.types,
+            types_pos=new_types_pos,
+            types_str=self.types_str,
+            types_tks=self.types_tks,
+            types_info=self.types_info,
+            origin_code=self.origin_code,
+            tokenized_code=new_code,
+            prev_types=None,  # don't need them for now
+            inlined_spans=None,  # don't need them for now
+        )
+
     def inline_prev_predictions(self, as_comment: bool) -> "TokenizedSrc":
         "Inine the previous predictions into the code, either directly or as comments."
         prev_types = self.prev_types
@@ -175,7 +213,7 @@ class TokenizedSrc:
 
         types_pos = list[int]()
         tokenized_code = list[int]()
-        tokenizer = load_tokenizer_spot()
+        tokenizer = DefaultTokenizer
         mask_id = tokenizer.mask_token_id
         comment_start = tokenizer.encode("/* ", add_special_tokens=False)
         comment_end = tokenizer.encode(" */", add_special_tokens=False)
@@ -395,6 +433,25 @@ def _compute_ctx(
     assert len(label_ids) <= ctx_args.max_labels
 
     return label_ids, (left_margin_start, right_margin_end)
+
+
+def chunk_from_src(
+    src: TokenizedSrc, src_id: int, label_id: int, ctx_args: CtxArgs, tokenizer
+) -> tuple[dict, "SrcChunkInfo"]:
+    """Helper function to extract a single chunk from a source file."""
+    chunks = list[dict]()
+    chunks_info = list[SrcChunkInfo]()
+    src_to_chunks_(
+        chunks,
+        chunks_info,
+        src,
+        src_id,
+        (label_id, label_id + 1),
+        ctx_args,
+        tokenizer,
+    )
+    assert_eq(len(chunks), len(chunks_info), 1)
+    return chunks[0], chunks_info[0]
 
 
 def src_to_chunks_(
@@ -866,7 +923,7 @@ def code_to_check_from_preds(src: TokenizedSrc, preds: dict[int, str]):
         assert k in range(len(src.types)), f"Prediction index out of range: {k}"
     for i, info in enumerate(src.types_info):
         r = not_none(info.annot_range)
-        pred = preds.get(i, "Any")
+        pred = str(preds.get(i, "Any"))
         changes.append((r, 1, pred))
     new_code = replace_strs_by_pos(code, changes)
     return new_code
@@ -1291,12 +1348,13 @@ def type_accuracies(
 ) -> dict[str, Any]:
     assert_eq(len(pred_types), len(label_types), len(types_cat), len(types_pos))
 
-    if allow_implicit_none:
-        pred_types = [remove_top_optional(t) for t in pred_types]
-        label_types = [remove_top_optional(t) for t in label_types]
     if normalize_types:
         pred_types = [normalize_type(ty) for ty in pred_types]
         label_types = [normalize_type(ty) for ty in label_types]
+
+    if allow_implicit_none:
+        pred_types = [remove_top_optional(t) for t in pred_types]
+        label_types = [remove_top_optional(t) for t in label_types]
 
     def i_to_range(i):
         if i == 0:
@@ -1348,6 +1406,32 @@ def preds_to_accuracies(
     cats = [an.cat for info in dataset.chunks_info for an in info.annots_info]
     labels = [ty for info in dataset.chunks_info for ty in info.types]
     poses = [i for info in dataset.chunks_info for i in range(len(info.types))]
+    results = [
+        type_accuracies(
+            list(seq_flatten(preds)),
+            labels,
+            cats,
+            poses,
+            normalize_types=normalize_types,
+            allow_implicit_none=allow,
+        )
+        for allow in [False, True]
+    ]
+    result = dict[str, Any]()
+    result["partial_acc (ImNone)"] = results[1]["partial_acc"]
+    result["full_acc (ImNone)"] = results[1]["full_acc"]
+    result.update(results[0])
+    return result
+
+
+def src_preds_to_accuracies(
+    preds: Sequence[Sequence[PythonType]],
+    srcs: Sequence[TokenizedSrc],
+    normalize_types=True,
+):
+    cats = [an.cat for s in srcs for an in s.types_info]
+    labels = [ty for s in srcs for ty in s.types]
+    poses = [i for s in srcs for i in range(len(s.types))]
     results = [
         type_accuracies(
             list(seq_flatten(preds)),

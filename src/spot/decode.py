@@ -1,6 +1,8 @@
+from copy import deepcopy
 import multiprocessing
 
 from datasets import Dataset
+import torch
 from spot.critic import CriticCollator, CriticModel
 
 from spot.data import (
@@ -11,6 +13,7 @@ from spot.data import (
     SrcChunkInfo,
     SrcDataset,
     TokenizedSrc,
+    chunk_from_src,
     code_to_check_from_preds,
     src_to_chunks_,
     type_check_src_in_project,
@@ -24,6 +27,85 @@ from spot.type_check import (
     normalize_type,
 )
 from spot.utils import *
+
+
+def incr_inference_with_feedback(
+    wrapper: ModelWrapper,
+    src_data: SrcDataset,
+    beam_width: int,
+    print_times: bool = True,
+):
+    """
+    Perform inference one type at a time.
+    """
+    ctx_args = wrapper.args.ctx_args
+    srcs_to_check = src_data.srcs_with_labels()
+
+    def updated_dict(d, k, v):
+        d = deepcopy(d)
+        d[k] = v
+        return d
+
+    def infer_src(
+        src: TokenizedSrc,
+        src_id: int,
+        executor: ProcessPoolExecutor,
+        template_root,
+        prog: tqdm,
+    ):
+        src = deepcopy(src)
+        device = wrapper.model.device
+        num_return_sequences = beam_width
+        proj_root = template_root / src.repo
+        assignment = dict[int, PythonType]()
+        for lid in range(len(src.types_info)):
+            with t_logger.log_time("chunk_from_src"):
+                chunk, info = chunk_from_src(
+                    src, src_id, lid, ctx_args, DefaultTokenizer
+                )
+                batch = dict()
+                batch["input_ids"] = torch.tensor([chunk["input_ids"]], device=device)
+                batch["n_labels"] = [chunk["n_labels"]]
+            # get the list of types return by beam search
+            with t_logger.log_time("predict_on_batch"):
+                preds = list(
+                    seq_flatten(wrapper.predict_on_batch(batch, num_return_sequences))
+                )
+            # now try each of them and use the one that worked best
+            with t_logger.log_time("count_type_errors_in_project"):
+                new_assignments = [updated_dict(assignment, lid, t) for t in preds]
+                check_rs = executor.map(
+                    count_type_errors_in_project,
+                    [[src]] * beam_width,
+                    [[a] for a in new_assignments],
+                    [proj_root] * beam_width,
+                )
+                check_rs = list(check_rs)
+            with t_logger.log_time("inline_single_prediction"):
+                best_i = int(np.argmin(check_rs))
+                assignment = new_assignments[best_i]
+                src = src.inline_single_prediction(lid, preds[best_i], as_comment=False)
+            prog.update()
+        return src, list(assignment.values())
+
+    t_logger = TimeLogger()
+    n_workers = min(wrapper.args.max_workers, beam_width)
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        with src_data.prepare_typecheck_projects(srcs_to_check) as template_root:
+            with tqdm(
+                total=sum(len(s.types_info) for s in srcs_to_check),
+                desc="incr_inference_with_feedback",
+            ) as prog:
+                srcs = list[TokenizedSrc]()
+                predictions = list[list[PythonType]]()
+                for i, src in enumerate(srcs_to_check):
+                    src, preds = infer_src(src, i, executor, template_root, prog)
+                    srcs.append(src)
+                    predictions.append(preds)
+
+    if print_times:
+        display(t_logger.as_dataframe())
+    return srcs, predictions
 
 
 def sample_candidates(
