@@ -29,22 +29,69 @@ from spot.type_check import (
 from spot.utils import *
 
 
+class IncrSelector:
+    "A strategy for selecting the best candidate time at each time step."
+    pass
+
+
+class SelectByOracle(IncrSelector):
+    "Select the first candidate that matches the ground truth (if any)."
+    pass
+
+
+class SelectByCounting(IncrSelector):
+    "Select the first candidate that has the least type errors."
+    pass
+
+
+@dataclass
+class SelectByCritic(IncrSelector):
+    "Select the best candidate according to the critic's evaluation."
+    critic: CriticModel
+    score_transform: Callable[[float], float] = lambda x: x
+
+
 def incr_inference_with_feedback(
     wrapper: ModelWrapper,
     src_data: SrcDataset,
     beam_width: int,
+    selector: IncrSelector,
     print_times: bool = True,
+    log_to: Path | None = None,
 ):
     """
-    Perform inference one type at a time.
+    Perform incremental inference, one type at a time.
+    The best type at each time step is selected using the strategy specified
+    by `selector`.
     """
     ctx_args = wrapper.args.ctx_args
+    sampling_max_tokens = wrapper.args.sampling_max_tokens
     srcs_to_check = src_data.srcs_with_labels()
+    if log_to is not None:
+        shutil.rmtree(log_to, ignore_errors=True)
+        log_to.mkdir(parents=True)
 
     def updated_dict(d, k, v):
         d = deepcopy(d)
         d[k] = v
         return d
+
+    def maybe_log(src_id, lid, name, fn) -> None:
+        if log_to is None or lid >= 10:
+            return
+        with (log_to / f"src-{src_id}.txt").open("a") as file:
+            file.write(f"<========== (label_id={lid}) {name} ==========>\n")
+            content = fn()
+            content = content if isinstance(content, str) else str(content)
+            file.write(content)
+            file.write("\n")
+
+    def pretty_show_predictions(types, types_tensor):
+        tokens = [
+            decode_tokens(tks, skip_special_tokens=True)
+            for tks in types_tensor.tolist()
+        ]
+        return "\n".join([f"{types[i]}     ({tokens[i]})" for i in range(len(types))])
 
     def infer_src(
         src: TokenizedSrc,
@@ -68,23 +115,106 @@ def incr_inference_with_feedback(
                 batch["n_labels"] = [chunk["n_labels"]]
             # get the list of types return by beam search
             with t_logger.log_time("predict_on_batch"):
-                preds = list(
-                    seq_flatten(wrapper.predict_on_batch(batch, num_return_sequences))
+                maybe_log(
+                    src_id, lid, "input_ids", lambda: decode_tokens(chunk["input_ids"])
                 )
-            # now try each of them and use the one that worked best
-            with t_logger.log_time("count_type_errors_in_project"):
+                types, types_tensor = wrapper.predict_on_batch(
+                    batch, num_return_sequences
+                )
+                preds = list(seq_flatten(types))
+                unique_ids = get_unique_ids(preds)
+                preds = [preds[i] for i in unique_ids]
+                types_tensor = types_tensor[unique_ids, :]
+                maybe_log(
+                    src_id,
+                    lid,
+                    "predictions",
+                    lambda: pretty_show_predictions(preds, types_tensor),
+                )
                 new_assignments = [updated_dict(assignment, lid, t) for t in preds]
-                check_rs = executor.map(
-                    count_type_errors_in_project,
-                    [[src]] * beam_width,
-                    [[a] for a in new_assignments],
-                    [proj_root] * beam_width,
-                )
-                check_rs = list(check_rs)
-            with t_logger.log_time("inline_single_prediction"):
-                best_i = int(np.argmin(check_rs))
-                assignment = new_assignments[best_i]
-                src = src.inline_single_prediction(lid, preds[best_i], as_comment=False)
+                N = len(new_assignments)
+
+            # now try each of them and use the one that worked best
+            if isinstance(selector, SelectByCounting):
+                # count the number of type errors
+                with t_logger.log_time("count_type_errors_in_project"):
+                    check_rs = executor.map(
+                        count_type_errors_in_project,
+                        [[src]] * N,
+                        [[a] for a in new_assignments],
+                        [proj_root] * N,
+                    )
+                    check_rs = list(check_rs)
+                    maybe_log(src_id, lid, "n_errors", lambda: check_rs)
+                    best_i = int(np.argmin(check_rs))
+            elif isinstance(selector, SelectByOracle):
+                truth = normalize_type(src.types[lid])
+                maybe_log(src_id, lid, "truth (normalized)", lambda: truth)
+                normal_options = [normalize_type(a[lid]) for a in new_assignments]
+                maybe_log(src_id, lid, "options (normalized)", lambda: normal_options)
+                is_correct = [opt == truth for opt in normal_options]
+                maybe_log(src_id, lid, "is_correct", lambda: is_correct)
+                best_i = int(np.argmax(is_correct))
+            elif isinstance(selector, SelectByCritic):
+                # use the one with the highest critic score
+                with t_logger.log_time("type_check_src_in_project"):
+                    check_rs = executor.map(
+                        type_check_src_in_project,
+                        [src] * N,
+                        [a for a in new_assignments],
+                        [proj_root] * N,
+                    )
+                    check_rs = list(check_rs)
+                with t_logger.log_time("Running critic"):
+                    critic_inputs_metas = executor.map(
+                        to_critic_inputs,
+                        [src] * N,
+                        [src_id] * N,
+                        new_assignments,
+                        check_rs,
+                        [ctx_args] * N,
+                        [(lid, lid + 1)] * N,
+                    )
+                    critic_inputs_metas = list(critic_inputs_metas)
+                    # there should only be one chunk for each src
+                    all_inputs = [get_single(xs) for xs, _ in critic_inputs_metas]
+                    all_meta = [get_single(xs) for _, xs in critic_inputs_metas]
+                    assert_eq(len(all_inputs), len(all_meta), N)
+                    maybe_log(
+                        src_id,
+                        lid,
+                        "critic_inputs[0]",
+                        lambda: decode_tokens(all_inputs[0]["input_ids"]),
+                    )
+                    maybe_log(
+                        src_id,
+                        lid,
+                        "critic_inputs[-1]",
+                        lambda: decode_tokens(all_inputs[-1]["input_ids"]),
+                    )
+                    for i, (x, info) in enumerate(zip(all_inputs, all_meta)):
+                        x["chunk_id"] = i
+                        x["prediction_spans"] = [
+                            (s.start, s.stop) for s in not_none(info.inlined_spans)
+                        ]
+                    critic_dataset = Dataset.from_dict(merge_dicts(all_inputs))
+                    dataloader = dynamic_dataloader(
+                        critic_dataset,
+                        max_tokens=sampling_max_tokens,
+                        collate_fn=CriticCollator(DefaultTokenizer),
+                    )
+                    chunk2preds = selector.critic.classify_data(
+                        dataloader, len(critic_dataset), tqdm_args={"disable": True}
+                    )
+                    scores = [get_single(chunk2preds[i]) for i in range(N)]
+                    maybe_log(src_id, lid, "scores", lambda: scores)
+                    scores = [selector.score_transform(s) for s in scores]
+                    best_i = int(np.argmax(scores))
+            else:
+                raise NotImplementedError(f"Unknown selector type: {type(selector)}")
+
+            assignment = new_assignments[best_i]
+            src = src.inline_single_prediction(lid, preds[best_i], as_comment=False)
             prog.update()
         return src, list(assignment.values())
 
@@ -94,7 +224,7 @@ def incr_inference_with_feedback(
         with src_data.prepare_typecheck_projects(srcs_to_check) as template_root:
             with tqdm(
                 total=sum(len(s.types_info) for s in srcs_to_check),
-                desc="incr_inference_with_feedback",
+                desc=f"incr_inference [{type(selector).__name__}]",
             ) as prog:
                 srcs = list[TokenizedSrc]()
                 predictions = list[list[PythonType]]()
@@ -361,6 +491,7 @@ def to_critic_inputs(
     preds: dict[int, PythonType],
     check_r: SrcCheckResult,
     ctx_args: CtxArgs,
+    labels_range: tuple[int, int] | None = None,
 ):
     """
     Patch each src with the type checker feedbacks and inline the previous predicitons,
@@ -376,7 +507,8 @@ def to_critic_inputs(
     new_src = TokenizedSrc.inline_predictions(new_src, as_comment=False)
     chunks = list[dict]()
     chunks_info = list[SrcChunkInfo]()
-    labels_range = min(preds.keys()), max(preds.keys()) + 1
+    if labels_range is None:
+        labels_range = min(preds.keys()), max(preds.keys()) + 1
     src_to_chunks_(
         chunks, chunks_info, new_src, src_id, labels_range, ctx_args, DefaultTokenizer
     )

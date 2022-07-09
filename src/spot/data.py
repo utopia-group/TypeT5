@@ -683,7 +683,7 @@ class SrcDataset:
                     new_path.write_text(new_code)
             yield template_root
         finally:
-            shutil.rmtree(MypyChecker.temp_dir(), ignore_errors=True)
+            shutil.rmtree(template_root, ignore_errors=True)
 
     def type_check_each_file_in_project(
         self,

@@ -317,18 +317,20 @@ class MypyChecker:
                 cwd=cwd,
             )
         finally:
-            os.remove(cwd / "code.py")
+            shutil.rmtree(cwd)
         return MypyChecker.parse_mypy_output(out, cmd, cwd)
+
+    CheckerId = 0
 
     @staticmethod
     def clear_temp_cache():
-        cwd = proj_root() / "mypy_temp"
+        cwd = MypyChecker.temp_dir()
         if cwd.exists():
             shutil.rmtree(cwd)
 
     @staticmethod
     def temp_dir():
-        return proj_root() / "mypy_temp"
+        return proj_root() / f"mypy_temp-{MypyChecker.CheckerId}"
 
     @staticmethod
     def parse_mypy_output(

@@ -6,6 +6,7 @@ from typing import NamedTuple, overload
 import numpy as np
 from datasets.arrow_dataset import Dataset
 from mypy_extensions import mypyc_attr
+from torch import Tensor
 from torch.utils.data import DataLoader, RandomSampler
 from transformers.data.data_collator import DataCollatorForSeq2Seq
 
@@ -101,7 +102,7 @@ class ModelWrapper:
         self,
         batch: dict,
         num_return_sequences: int | None = None,
-    ) -> list[list[PythonType]]:
+    ) -> tuple[list[list[PythonType]], Tensor]:
         """Run the model on the given batch and return the predicted types for each row."""
         model = self.model
         n_labels = batch["n_labels"]
@@ -135,10 +136,11 @@ class ModelWrapper:
             assert_eq(n_rows, num_return_sequences * len(n_labels))
         else:
             num_return_sequences = 1
-        return [
+        types = [
             decode_row(output_ids[i, :], n_labels[i // num_return_sequences])
             for i in range(n_rows)
         ]
+        return types, output_ids
 
     @overload
     def predict(
@@ -175,7 +177,7 @@ class ModelWrapper:
         for batch in loader:
             n_chunks = batch["input_ids"].shape[0]
             batch["input_ids"] = batch["input_ids"].to(device)
-            preds = self.predict_on_batch(batch, num_return_sequences)
+            preds, _ = self.predict_on_batch(batch, num_return_sequences)
             for i, c_id in enumerate(batch["chunk_id"]):
                 c_id = int(c_id)
                 if num_return_sequences is None:

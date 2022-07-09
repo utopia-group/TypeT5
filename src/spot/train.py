@@ -24,6 +24,7 @@ from .data import (
     R1_srcs_from_preds,
     SrcChunkInfo,
     SrcDataset,
+    preds_to_accuracies,
 )
 from .model import (
     CtxArgs,
@@ -252,7 +253,13 @@ def R1_srcs_from_extra(
     tc_args: TypeCheckArgs,
     ckpt_dir: Optional[Path] = None,
     ckpt_interval: Optional[int] = None,
-):
+) -> dict[str, SrcDataset]:
+    """
+    Generate the R1 dataset using the extra info recorded during training.
+    The training set is generated using the predictions recorded during training
+    (or loaded from the different model checkpoints).
+    """
+
     tokenizer = wrapper.tokenizer
     batch_ids = extra["batch_ids"]
     print(f"Generating R1 dataset: train")
@@ -302,6 +309,35 @@ def R1_srcs_from_extra(
             tc_args=tc_args,
             max_workers=wrapper.args.max_workers,
         )
+    return R1_src_datasets
+
+
+def R1_srcs_from_model(
+    wrapper: ModelWrapper,
+    src_datasets: dict[str, SrcDataset],
+    tc_args: TypeCheckArgs,
+) -> dict[str, SrcDataset]:
+    R1_src_datasets = dict[str, SrcDataset]()
+    tokenizer = wrapper.tokenizer
+    chunk_datasets = {
+        n: src_datasets[n].to_chunks(tokenizer, wrapper.args.ctx_args)
+        for n in ["train", "valid", "test"]
+    }
+    for n, cdata in chunk_datasets.items():
+        print(f"Generating R1 dataset: {n}")
+        preds = wrapper.predict(cdata.data, {})
+
+        R1_src_datasets[n] = R1_srcs_from_preds(
+            DefaultTokenizer,
+            src_datasets[n],
+            chunk_datasets[n].chunks_info,
+            chunk_datasets[n].files,
+            preds,
+            tc_args=tc_args,
+            max_workers=wrapper.args.max_workers,
+        )
+        r0_accs = preds_to_accuracies(preds, cdata)
+        R1_src_datasets[n].add_stats({"r0_full_acc": r0_accs["full_acc"]})
     return R1_src_datasets
 
 

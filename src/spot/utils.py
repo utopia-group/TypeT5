@@ -457,8 +457,8 @@ class PickleCache:
 
 def assert_eq(*xs: T1) -> None:
     assert len(xs) > 1
-    for x, y in zip(xs, xs[1:]):
-        assert x == y, f"{x} != {y}"
+    for i, (x, y) in enumerate(zip(xs, xs[1:])):
+        assert x == y, f"{x} != {y} at index {i}"
 
 
 def scalar_stats(xs) -> dict[str, Any]:
@@ -637,3 +637,19 @@ def merge_dicts(dicts: Sequence[dict[T1, Any]]) -> dict[T1, list]:
         for k in keys:
             result[k].append(d[k])
     return result
+
+
+def get_single(xs: Sequence[T1]) -> T1:
+    assert len(xs) == 1
+    return xs[0]
+
+
+def get_unique_ids(xs: Sequence[T1]) -> list[int]:
+    """Get the indices of the unique elements in xs while preserving the order."""
+    seen = set()
+    ids = []
+    for i, x in enumerate(xs):
+        if x not in seen:
+            seen.add(x)
+            ids.append(i)
+    return ids

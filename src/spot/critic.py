@@ -21,7 +21,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
-from .train import _configure_optimizers
+from .train import TrainingConfig, _configure_optimizers
 
 
 @dataclass
@@ -124,9 +124,14 @@ class CriticModel(nn.Module):
         return chunk2preds
 
     @staticmethod
-    def compute_metrics(pred_bools, label_bools):
+    def compute_metrics(pred_scores, label_bools):
+        pred_bools = [x >= 0.5 for x in pred_scores]
+        avg_error = float(
+            np.mean([abs(x - float(y)) for x, y in zip(pred_scores, label_bools)])
+        )
         return {
             "accuracy": accuracy_score(label_bools, pred_bools),
+            "avg_error": avg_error,
             "F1": f1_score(label_bools, pred_bools),
             "precision": precision_score(label_bools, pred_bools),
             "recall": recall_score(label_bools, pred_bools),
@@ -157,10 +162,10 @@ class CriticModel(nn.Module):
             zip(dataset["chunk_id"], dataset["is_correct"])
         )
 
-        pred_bools = [p >= 0.5 for cid in chunk2preds for p in chunk2preds[cid]]
+        pred_scores = [p for cid in chunk2preds for p in chunk2preds[cid]]
         label_bools = [l for cid in chunk2preds for l in chunk2labels[cid]]
 
-        metrics = CriticModel.compute_metrics(pred_bools, label_bools)
+        metrics = CriticModel.compute_metrics(pred_scores, label_bools)
 
         preds_ordered = [chunk2preds[int(c_id)] for c_id in chunks.data["chunk_id"]]
 
@@ -197,6 +202,12 @@ def stack_and_pad(xs: list[list[int]], pad_id: int) -> torch.LongTensor:
     max_len = max(len(x) for x in xs)
     xs = [x + [pad_id] * (max_len - len(x)) for x in xs]
     return torch.LongTensor(xs)
+
+
+def get_critic_name(no_feedback: bool, new_data: bool, config: TrainingConfig) -> str:
+    feedback_tag = "no_feedback-" if no_feedback else ""
+    data_tag = "new_data-" if new_data else ""
+    return "critic-model--" + feedback_tag + data_tag + config.as_name()
 
 
 class CriticTrainArgs(NamedTuple):
@@ -354,8 +365,8 @@ class CriticCollator:
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             # "output_ids": stack_and_pad([b["output_ids"] for b in batch], pad_id),
-            "prediction_spans": [chunk["prediction_spans"] for chunk in batch],
             "chunk_id": [chunk["chunk_id"] for chunk in batch],
+            "prediction_spans": [chunk["prediction_spans"] for chunk in batch],
         }
         if "is_correct" in batch[0]:
             result["is_correct"] = torch.BoolTensor(
@@ -421,20 +432,20 @@ class TrainCriticModelWrapper(pl.LightningModule):
         n_labels = batch["is_correct"].shape[0]
         self.log(f"{name}/loss", loss.item(), batch_size=n_labels)
 
-        preds = (logits >= 0).cpu()
+        scores = torch.sigmoid(logits).cpu()
         targets = batch["is_correct"].cpu()
 
         return {
             "loss": loss.item(),
             "n_labels": n_labels,
-            "preds": preds,
+            "scores": scores,
             "targets": targets,
         }
 
     def _eval_log_metrics(self, outputs, name: str):
-        preds = list(seq_flatten(o["preds"] for o in outputs))
+        scores = list(seq_flatten(o["scores"] for o in outputs))
         targets = list(seq_flatten(o["targets"] for o in outputs))
-        metrics = CriticModel.compute_metrics(preds, targets)
+        metrics = CriticModel.compute_metrics(scores, targets)
         for metric, value in metrics.items():
             self.log(f"{name}/{metric}", value)
 
