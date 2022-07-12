@@ -4,6 +4,7 @@ code_output
 temp
 wandb
 checkpoints
+caches
 
 build/
 __pycache__

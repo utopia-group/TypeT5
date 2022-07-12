@@ -1,21 +1,21 @@
-import enum
-import logging
+import random
 from collections import Counter
 from copy import copy, deepcopy
+from typing import NamedTuple, overload
 
 import numpy as np
-import torch
-from datasets import Dataset
+from datasets.arrow_dataset import Dataset
 from mypy_extensions import mypyc_attr
-from torch.utils.data import DataLoader
-from transformers import DataCollatorForSeq2Seq
-from transformers.trainer import Trainer
+from torch import Tensor
+from torch.utils.data import DataLoader, RandomSampler
+from transformers.data.data_collator import DataCollatorForSeq2Seq
 
 from spot.data import (
     ChunkedDataset,
     CtxArgs,
     R1_srcs_from_preds,
     SrcDataset,
+    TokenizedSrc,
     output_ids_as_types,
     patch_code_with_extra,
     preds_to_accuracies,
@@ -27,33 +27,63 @@ from spot.utils import *
 @dataclass
 class DecodingArgs:
     ctx_args: CtxArgs
-    sampling_batch_size: int
+    sampling_max_tokens: int
     max_workers: int
-    generation_max_length: int = 128
+    max_tokens_per_type: int = 10
     do_sample: bool = False
     top_p: float = 0.9
+    num_beams: Optional[int] = None
+    num_beam_groups: Optional[int] = None
+    length_penalty: float = 1.0
+    diversity_penalty: float | None = None
 
     def scale_ctx_size(self, factor: float) -> "DecodingArgs":
+        result = deepcopy(self)
+        assert result.ctx_args is not None
         """Scale the context size of the model by the given factor, while keeping the window size the same.
         Also scale down the sampling batch size accordingly."""
         ctx_size = round(self.ctx_args.ctx_size * factor)
         right_margin = round(self.ctx_args.right_margin * factor)
         left_margin = ctx_size - right_margin - self.ctx_args.window_size
-        result = deepcopy(self)
         result.ctx_args.ctx_size = ctx_size
         result.ctx_args.left_margin = left_margin
         result.ctx_args.right_margin = right_margin
-        result.sampling_batch_size = round(self.sampling_batch_size / factor**2)
+        result.sampling_max_tokens = round(self.sampling_max_tokens / factor**2)
 
         return result
 
+    def __repr__(self) -> str:
+        return repr_modified_args(self)
+
 
 @dataclass
-class ModelTrainingArgs:
-    train_batch_size: int
-    eval_batch_size: int
-    max_epochs: int
-    accumulate_grad_batches: int | dict | None = None
+class DatasetPredResult(Generic[T1]):
+    chunks: ChunkedDataset
+    predictions: list[list[PythonType]]
+    extra_info: list[T1] = field(default_factory=list)
+
+    @property
+    def accuracies(self) -> dict:
+        return preds_to_accuracies(self.predictions, self.chunks)
+
+    def group_by_repo(self) -> dict[Path, "DatasetPredResult[T1]"]:
+        chunk2repo = list[Path]()
+        for i, info in enumerate(self.chunks.chunks_info):
+            sid = info.src_ids[0]
+            file = self.chunks.files[sid]
+            repo = self.chunks.file2repo[file]
+            chunk2repo.append(repo)
+
+        group2ids = groupby(range(len(chunk2repo)), lambda i: chunk2repo[i])
+        result = dict()
+        chunk_ids = self.chunks.data["chunk_id"]
+        for repo, ids in group2ids.items():
+            result[repo] = DatasetPredResult(
+                self.chunks[(chunk_ids[i] for i in ids)],
+                [self.predictions[i] for i in ids],
+                [self.extra_info[i] for i in ids] if self.extra_info else [],
+            )
+        return result
 
 
 @dataclass
@@ -61,7 +91,7 @@ class ModelWrapper:
     model: ModelSPOT
     tokenizer: TokenizerSPOT
     args: DecodingArgs
-    monitor: TaskMonitor
+    monitor: TaskMonitor = EmptyLoggingMonitor()
 
     def scale_ctx_size(self, factor) -> "ModelWrapper":
         r = copy(self)
@@ -71,49 +101,94 @@ class ModelWrapper:
     def predict_on_batch(
         self,
         batch: dict,
-        do_sample=None,
-    ) -> list[list[PythonType]]:
+        num_return_sequences: int | None = None,
+    ) -> tuple[list[list[PythonType]], Tensor]:
         """Run the model on the given batch and return the predicted types for each row."""
         model = self.model
+        n_labels = batch["n_labels"]
+        max_labels = max(n_labels)
+
+        div_pen = self.args.diversity_penalty
+        if self.args.num_beam_groups is not None:
+            assert (
+                div_pen is not None and div_pen > 0
+            ), "num_beam_groups requires diversity_penalty > 0"
+
         output_ids = model.generate(
             inputs=batch["input_ids"],
-            do_sample=self.args.do_sample if do_sample is None else do_sample,
+            do_sample=self.args.do_sample,
             top_p=self.args.top_p,
-            max_length=self.args.generation_max_length,
+            num_beams=self.args.num_beams,
+            num_return_sequences=num_return_sequences,
+            num_beam_groups=self.args.num_beam_groups,
+            max_length=self.args.max_tokens_per_type * max_labels,
+            diversity_penalty=div_pen,
+            length_penalty=self.args.length_penalty,
+            renormalize_logits=True,
         ).cpu()  # type: ignore
         assert len(output_ids.shape) == 2
 
-        n_chunks = output_ids.shape[0]
-        preds = list[list[PythonType]]()
-        n_labels = batch["n_labels"]
-        for i in range(n_chunks):
-            row = output_ids[i, :]
-            types = output_ids_as_types(row, self.tokenizer, n_labels[i])
-            preds.append(types)
-        return preds
+        def decode_row(row, n_labels) -> list[PythonType]:
+            return output_ids_as_types(row, self.tokenizer, n_labels)
 
-    def predict(self, dataset: Dataset, tqdm_args: dict) -> list[list[PythonType]]:
-        """Run the  model on the given dataset and return the predicted types for each row."""
+        n_rows = output_ids.shape[0]
+        if num_return_sequences is not None:
+            assert_eq(n_rows, num_return_sequences * len(n_labels))
+        else:
+            num_return_sequences = 1
+        types = [
+            decode_row(output_ids[i, :], n_labels[i // num_return_sequences])
+            for i in range(n_rows)
+        ]
+        return types, output_ids
+
+    @overload
+    def predict(
+        self, dataset: Dataset, tqdm_args: dict = {}, num_return_sequences: None = None
+    ) -> list[list[PythonType]]:
+        ...
+
+    @overload
+    def predict(
+        self, dataset: Dataset, tqdm_args: dict, num_return_sequences: int
+    ) -> list[list[list[PythonType]]]:
+        ...
+
+    def predict(
+        self,
+        dataset: Dataset,
+        tqdm_args: dict = {},
+        num_return_sequences: Optional[int] = None,
+    ):
+        """Run the  model on the given dataset and return the predicted types
+        (or multiple sequences of predicted types if num_return_sequences is not none) for each row."""
         model = self.model
         collator = DataCollatorForSeq2Seq(self.tokenizer, model)
-        loader = DataLoader(
+        loader = dynamic_dataloader(
             dataset,  # type: ignore
-            shuffle=False,
-            batch_size=self.args.sampling_batch_size,
+            max_tokens=self.args.sampling_max_tokens,
             collate_fn=collator,
+            shuffle=True,
         )
         device = model.device
-        pred_types = list[list[PythonType]]()
+        # we use this dict to keep the order of the chunks since it may be permuted by dynamic_dataloader
+        pred_types = dict[int, list]()
         tqdm_bar = tqdm(total=len(dataset), desc="predict", **tqdm_args)
-        chunk_id = 0
         for batch in loader:
             n_chunks = batch["input_ids"].shape[0]
             batch["input_ids"] = batch["input_ids"].to(device)
-            preds = self.predict_on_batch(batch)
-            pred_types.extend(preds)
-            chunk_id += n_chunks
+            preds, _ = self.predict_on_batch(batch, num_return_sequences)
+            for i, c_id in enumerate(batch["chunk_id"]):
+                c_id = int(c_id)
+                if num_return_sequences is None:
+                    pred_types[c_id] = preds[i]
+                else:
+                    pred_types[c_id] = preds[
+                        i * num_return_sequences : (i + 1) * num_return_sequences
+                    ]
             tqdm_bar.update(n_chunks)
-        return pred_types
+        tqdm_bar.close()
+        return [pred_types[int(c_id)] for c_id in dataset["chunk_id"]]
 
     def save_pretrained(self, path: Path):
         """Save the model to the given path along with its tokenizer and args."""
@@ -129,7 +204,7 @@ class ModelWrapper:
     @staticmethod
     def from_pretrained(path: Path) -> "ModelWrapper":
         """Load a pretrained model from the given path."""
-        model = ModelSPOT.from_pretrained(str(path))
+        model = cast(ModelSPOT, ModelSPOT.from_pretrained(str(path)))
         tokenizer = TokenizerSPOT.from_pretrained(str(path))
         with open(path / "args.pkl", "rb") as f:
             args = pickle.load(f)
@@ -141,40 +216,46 @@ class ModelWrapper:
         )
 
     def eval_on_dataset(
-        self, src_data: SrcDataset, tqdm_args={}
-    ) -> tuple[dict, ChunkedDataset, list[list[PythonType]]]:
+        self,
+        src_data: SrcDataset,
+        max_labels: Optional[int] = None,
+        tqdm_args: dict = {},
+    ) -> DatasetPredResult:
         """Convinient method to preprocess the src according to the model's ctx_args and evaluate the (R0) accuracy."""
-        chunks = src_data.to_chunks(
-            self.tokenizer,
-            self.args.ctx_args,
-            max_workers=self.args.max_workers,
-            tqdm_args=tqdm_args,
+        ctx_args = self.args.ctx_args
+        if max_labels is not None:
+            ctx_args = copy(ctx_args)
+            ctx_args.max_labels = max_labels
+
+        chunks = src_data.to_chunks(self.tokenizer, ctx_args, tqdm_args=tqdm_args)
+        preds = self.predict(
+            chunks.data, num_return_sequences=None, tqdm_args=tqdm_args
         )
-        preds = self.predict(chunks.data, tqdm_args=tqdm_args)
-        accs = preds_to_accuracies(preds, chunks, normalize_types=True)
-        accs_strict = preds_to_accuracies(preds, chunks, normalize_types=False)
-        accs["partial_acc_strict"] = accs_strict["partial_acc"]
-        accs["full_acc_strict"] = accs_strict["full_acc"]
-        return (accs, chunks, preds)
+        return DatasetPredResult(chunks, preds)
 
 
-@dataclass
-class CombinedModel:
-    r0_wrapper: ModelWrapper
-    r1_wrapper: ModelWrapper
+def dynamic_dataloader(
+    dataset: Dataset,
+    max_tokens: int,
+    collate_fn,
+    shuffle: bool = False,
+):
+    ex_sizes = [len(x) for x in dataset["input_ids"]]
+    ids = list(range(len(ex_sizes)))
+    if shuffle:
+        random.shuffle(ids)
+    ids.sort(key=lambda x: ex_sizes[x], reverse=True)
+    batches = list[list[int]]()
+    while len(ids) > 0:
+        w = ex_sizes[ids[0]]
+        n = max(1, max_tokens // w)
+        batches.append(ids[:n])
+        ids = ids[n:]
+    if shuffle:
+        random.shuffle(batches)
 
-    def eval_on_dataset(self, dataset: SrcDataset, tqdm_args={}) -> tuple[dict, dict]:
-        r0_wrapper, r1_wrapper = self.r0_wrapper, self.r1_wrapper
-        r0_accs, r0_chunks, r0_preds = r0_wrapper.eval_on_dataset(
-            dataset, tqdm_args={"leave": False}
-        )
-        r1_srcs = R1_srcs_from_preds(
-            r1_wrapper.tokenizer,
-            dataset,
-            r0_chunks.chunks_info,
-            r0_chunks.files,
-            r0_preds,
-            max_workers=r0_wrapper.args.max_workers,
-        )
-        r1_accs, _, _ = r1_wrapper.eval_on_dataset(r1_srcs, tqdm_args={"leave": False})
-        return r0_accs, r1_accs
+    return DataLoader(
+        cast(Any, dataset),
+        batch_sampler=batches,
+        collate_fn=collate_fn,
+    )

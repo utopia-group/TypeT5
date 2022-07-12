@@ -1,5 +1,8 @@
 import ast
+import difflib
+import io
 import logging
+import math
 import os
 import pickle
 import shutil
@@ -8,7 +11,7 @@ from abc import ABC, abstractmethod
 from asyncio import current_task
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
@@ -17,6 +20,7 @@ from typing import (
     Generator,
     Generic,
     Iterable,
+    NamedTuple,
     Optional,
     Sequence,
     TypeVar,
@@ -24,19 +28,87 @@ from typing import (
     cast,
 )
 
+import ipywidgets as widgets
 import libcst as cst
 import numpy as np
 import pandas as pd
 from IPython.display import display
 from libcst.metadata import CodePosition, CodeRange
 from sklearn.metrics import confusion_matrix
-from tqdm.auto import tqdm
-from tqdm.contrib.concurrent import process_map, thread_map
-from transformers import RobertaTokenizer
-from transformers.models.t5 import T5ForConditionalGeneration
+
+# from tqdm.auto import tqdm
+from tqdm import tqdm
+from tqdm.contrib.concurrent import process_map
+from transformers.models.roberta.tokenization_roberta import RobertaTokenizer
+from transformers.models.t5.modeling_t5 import T5ForConditionalGeneration
 
 TokenizerSPOT = RobertaTokenizer
 ModelSPOT = T5ForConditionalGeneration
+
+T1 = TypeVar("T1")
+T2 = TypeVar("T2")
+
+
+def load_model_spot(path) -> ModelSPOT:
+    return cast(ModelSPOT, ModelSPOT.from_pretrained(path))
+
+
+def load_tokenizer_spot() -> TokenizerSPOT:
+    return TokenizerSPOT.from_pretrained("Salesforce/codet5-base")
+
+
+DefaultTokenizer = load_tokenizer_spot()
+
+
+def decode_tokens(tks, skip_special_tokens=False):
+    return DefaultTokenizer.decode(tks, skip_special_tokens=skip_special_tokens)
+
+
+DefaultWorkers: int = 24
+
+
+@contextmanager
+def with_default_workers(workers: int):
+    global DefaultWorkers
+    old_workers = DefaultWorkers
+    DefaultWorkers = workers
+    try:
+        yield
+    finally:
+        DefaultWorkers = old_workers
+
+
+def pmap(
+    f: Callable[..., T1],
+    *f_args: Any,
+    desc: str,
+    max_workers: int | None = None,
+    tqdm_args: dict = {},
+) -> list[T1]:
+    """
+    Parallel map with progress displaying.
+    """
+    n = len(f_args[0])
+    assert_eq(n, *(len(xs) for xs in f_args))
+
+    if max_workers is None:
+        max_workers = DefaultWorkers
+    if max_workers <= 1:
+        outs = list[T1]()
+        for i in tqdm(range(n), desc=desc, **tqdm_args):
+            outs.append(f(*(a[i] for a in f_args)))
+        return outs
+
+    chunksize = max(1, n // (10 * max_workers))
+    return process_map(
+        f,
+        *f_args,
+        chunksize=chunksize,
+        max_workers=max_workers,
+        desc=desc,
+        tqdm_class=tqdm,
+        **tqdm_args,
+    )
 
 
 class SpecialNames:
@@ -63,8 +135,11 @@ def proj_root() -> Path:
     return Path(__file__).parent.parent.parent
 
 
-T1 = TypeVar("T1")
-T2 = TypeVar("T2")
+def get_data_dir() -> Path:
+    if (v := os.getenv("datadir")) is not None:
+        return Path(v)
+    else:
+        return proj_root() / "data"
 
 
 def not_none(x: Optional[T1]) -> T1:
@@ -72,7 +147,11 @@ def not_none(x: Optional[T1]) -> T1:
     return x
 
 
-def seq_flatten(xs: Sequence[Sequence[T1]]) -> Generator[T1, None, None]:
+def as_any(x) -> Any:
+    return x
+
+
+def seq_flatten(xs: Iterable[Iterable[T1]]) -> Generator[T1, None, None]:
     return (item for sublist in xs for item in sublist)
 
 
@@ -105,6 +184,21 @@ def confusion_matrix_top_k(y_preds, y_true, k):
     cm = confusion_matrix(y_true, y_preds, labels=labels, normalize=None)
     cm = cm / np.array([counts]).T
     return {"labels": labels, "matrix": cm}
+
+
+import matplotlib.pyplot as plt
+from sklearn.metrics import ConfusionMatrixDisplay
+
+
+def display_conf_matrix(conf_matrix: dict):
+    cm = conf_matrix["matrix"]
+    labels = conf_matrix["labels"]
+    n_labels = len(labels)
+    fig, ax = plt.subplots(figsize=(n_labels, n_labels))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+    disp.plot(cmap="Reds", values_format=".2f", ax=ax, colorbar=False)
+    plt.title("Normalized confusion matrix")
+    plt.show()
 
 
 def groupby(iterable: Iterable[T1], keyfunc: Callable[[T1], T2]) -> dict[T2, list[T1]]:
@@ -293,7 +387,7 @@ def pushover_alert(
         conn.request(
             "POST",
             "/1/messages.json",
-            urllib.parse.urlencode(
+            urllib.parse.urlencode(  # type: ignore
                 {
                     "token": config["token"],
                     "user": config["user"],
@@ -310,7 +404,7 @@ def pushover_alert(
 @contextmanager
 def run_long_task(name: str, notify: bool = True):
     "When notify=False, will only push notifiations when encountering errors."
-
+    print(f"Starting task: {name}")
     try:
         start = time.time()
         yield
@@ -334,12 +428,12 @@ class PickleCache:
         if not path.exists():
             value = func()
             path.parent.mkdir(parents=True, exist_ok=True)
-            print(f"[PickleCache] Saving to cache: '{path}'")
+            logging.info(f"[PickleCache] Saving to cache: '{path}'")
             with path.open("wb") as f:
                 pickle.dump(value, f)
             return value
         else:
-            print(f"[PickleCache] Loading from cache: '{path}'")
+            logging.info(f"[PickleCache] Loading from cache: '{path}'")
             with path.open("rb") as f:
                 return pickle.load(f)
 
@@ -352,6 +446,8 @@ class PickleCache:
         path = self.cache_dir / rel_path
         if path.exists():
             path.unlink()
+        else:
+            logging.warning(f"[PickleCache] File not found: '{path}'")
 
     def clear(self):
         if self.cache_dir.exists():
@@ -361,12 +457,13 @@ class PickleCache:
             logging.warning(f"No cache found at: {self.cache_dir}, skip clearing.")
 
 
-def assert_eq(left: T1, right: T1) -> None:
-    if left != right:
-        raise AssertionError(f"{left} != {right}")
+def assert_eq(*xs: T1) -> None:
+    assert len(xs) > 1
+    for i, (x, y) in enumerate(zip(xs, xs[1:])):
+        assert x == y, f"{x} != {y} at index {i}"
 
 
-def scalar_stats(xs) -> dict[str, float]:
+def scalar_stats(xs) -> dict[str, Any]:
     x = np.array(xs)
     return {
         "mean": x.mean(),
@@ -422,18 +519,139 @@ def pretty_print_dict(
                 print(f"{k}:")
                 if isinstance(v, list):
                     v = {f"[{i}]": e for i, e in enumerate(v)}
-                pretty_print_accuracies(
-                    v, level=level + 1, max_show_level=max_show_level
-                )
+                pretty_print_dict(v, level=level + 1, max_show_level=max_show_level)
         else:
             print(f"{k}: {v}")
 
 
-def pretty_print_accuracies(
-    accs: dict[str, Any],
+def pretty_show_dict(
+    d: dict,
     level: int = 0,
     max_show_level: int = 1000,
-):
-    pretty_print_dict(
-        accs, level=level, max_show_level=max_show_level, float_precision=4
-    )
+    float_precision: int = 5,
+) -> str:
+    with redirect_stdout(io.StringIO()) as s:
+        pretty_print_dict(d, level, max_show_level, float_precision)
+        return s.getvalue()
+
+
+def show_string_diff(str1, str2) -> str:
+    diffs = difflib.unified_diff(str1.splitlines(), str2.splitlines())
+    return "\n".join(diffs)
+
+
+def add_line_numbers(code: str):
+    lines = code.split("\n")
+    ln_digits = int(math.log(len(lines), 10)) + 1
+    format_s = "{ln:" + str(ln_digits) + "d}|  {line}"
+    return "\n".join(format_s.format(ln=i + 1, line=l) for i, l in enumerate(lines))
+
+
+class CountedAcc(NamedTuple):
+    n_correct: int
+    n_total: int
+
+    @property
+    def acc(self):
+        return safe_div(self.n_correct, self.n_total)
+
+    def __str__(self):
+        acc = safe_div(self.n_correct, self.n_total)
+        return f"{acc:.2%} (count={show_count(self.n_total)})"
+
+    def __repr__(self):
+        acc = safe_div(self.n_correct, self.n_total)
+        return f"CountedAcc({acc:.2%}, count={self.n_total})"
+
+
+def show_count(c: int):
+    if c < 1000:
+        return str(c)
+    return f"{c / 1000:.1f}k"
+
+
+class GroupedAccCounter(Generic[T1]):
+    """
+    A counter class that keeps track of the number of correct and total predictions
+    for key of type `T1`.
+    """
+
+    def __init__(self) -> None:
+        self.correct_counter = Counter[T1]()
+        self.total_counter = Counter[T1]()
+
+    def count(self, key: T1, n_correct: int | bool, total: int) -> None:
+        self.correct_counter[key] += int(n_correct)
+        self.total_counter[key] += total
+
+    def grouped_accs(
+        self, key=lambda x: x, sort_by=lambda x: x
+    ) -> dict[Any, CountedAcc]:
+        return {
+            str(key(k)): CountedAcc(self.correct_counter[k], self.total_counter[k])
+            for k in sorted(self.total_counter.keys(), key=sort_by)
+        }
+
+    def overall_acc(self) -> CountedAcc:
+        return CountedAcc(
+            sum(self.correct_counter.values()), sum(self.total_counter.values())
+        )
+
+
+def safe_div(a, b):
+    if b == 0:
+        return float("nan")
+    return a / b
+
+
+def get_modified_args(instance, recursive: bool = False) -> dict[str, Any] | Any:
+    """Collect only the arguments that differ from the default value, or return the value
+    itself if `instance` does not contain `__annotations__`."""
+    if not hasattr(instance, "__annotations__"):
+        return instance
+
+    cls = type(instance)
+    delta = dict[str, Any]()
+    # collect all values that are different from the default
+    for attr in instance.__annotations__:
+        v = getattr(instance, attr)
+        if hasattr(cls, attr) and getattr(cls, attr) == v:
+            continue
+        delta[attr] = get_modified_args(v) if recursive else v
+    return delta
+
+
+def repr_modified_args(instance) -> str:
+    ma = get_modified_args(instance, False)
+    if isinstance(ma, dict):
+        type_name = type(instance).__name__
+        return f"{type_name}({', '.join(f'{k}={v}' for k, v in ma.items())})"
+    else:
+        return repr(ma)
+
+
+def merge_dicts(dicts: Sequence[dict[T1, Any]]) -> dict[T1, list]:
+    assert len(dicts) > 0
+    keys = dicts[0].keys()
+    result = {k: [] for k in keys}
+    for d in dicts:
+        assert_eq(keys, d.keys())
+        for k in keys:
+            result[k].append(d[k])
+    return result
+
+
+def get_single(xs: Sequence[T1]) -> T1:
+    assert len(xs) == 1
+    return xs[0]
+
+
+def get_unique_ids(xs: Sequence[T1]) -> list[int]:
+    """Get the indices of the unique elements in xs while preserving the order."""
+    seen = set()
+    ids = []
+    for i, x in enumerate(xs):
+        if x not in seen:
+            seen.add(x)
+            ids.append(i)
+    return ids

@@ -3,6 +3,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from spot.type_check import MypyResult
 
 from spot.type_env import (
     AnnotCat,
@@ -63,25 +64,26 @@ code_1_patch = {
 
 def test_annotation_applying():
     old_annots = collect_annots_info(parsed)
-    old_map = {a.path: a.annot for a in old_annots}
+    old_map = {a.path: a.annot for a in old_annots if a.annot is not None}
     new_parsed = apply_annotations(parsed, code_1_patch)
     new_annots = collect_annots_info(new_parsed)
-    new_map = {a.path: a.annot for a in new_annots}
+    new_map = {a.path: a.annot for a in new_annots if a.annot is not None}
 
     for k, v in code_1_patch.items():
-        assert old_map[k].annotation.value != new_map[k].annotation.value
-        assert new_map[k].annotation.value == v.annotation.value
+        assert old_map[k].annotation.value != new_map[k].annotation.value  # type: ignore
+        assert new_map[k].annotation.value == v.annotation.value  # type: ignore
 
 
 def test_mypy_checker_1():
-    with mypy_checker("data/code", wait_before_check=0.0) as checker:
+    with mypy_checker(Path("data/code"), wait_before_check=0.0) as checker:
         check_r = checker.recheck_project()
+        assert isinstance(check_r, MypyResult)
         assert Path("data/code/bad_code_1.py").resolve() in check_r.error_dict
         assert Path("data/code/bad_code_2.py").resolve() in check_r.error_dict
 
 
 def test_mypy_checker_2():
-    with mypy_checker("data/code_output", wait_before_check=0.0) as checker:
+    with mypy_checker(Path("data/code_output"), wait_before_check=0.0) as checker:
         if Path("data/code_output/bad_code_1.py").exists():
             os.remove("data/code_output/bad_code_1.py")
         oe = checker.recheck_project().num_errors
@@ -96,55 +98,6 @@ def test_mypy_checker_2():
         assert c_r.num_errors == oe, f"mypy_output: {c_r.output_str}\ncode: {new_code}"
 
 
-@pytest.mark.skip(reason="Is considering to deprecate incremental type checking.")
-def test_type_env():
-    # remove `data/temp` if it exists
-    inference_dir = "data/code_output/inference"
-    if os.path.exists(inference_dir):
-        shutil.rmtree(inference_dir)
-    if not os.path.exists(inference_dir):
-        os.mkdir(inference_dir)
-    write_file(f"{inference_dir}/env_code_1.py", read_file("data/code/env_code_1.py"))
-    write_file(f"{inference_dir}/env_code_2.py", read_file("data/code/env_code_2.py"))
-
-    with mypy_checker(inference_dir, wait_before_check=0.0) as checker:
-        with type_inf_env(
-            checker,
-            f"{inference_dir}/env_code_1.py",
-            SelectAnnotations.select_all_paths,
-        ) as env:
-            while len(env.state.to_annot) > 0:
-                p = next(iter(env.state.to_annot))
-                env.step(TypeInfAction(p, cst.Name("int")))
-
-            assert env.state.num_errors == 0
-            assert len(env.state.annotated) == 11
-            for k, v in env.state.annotated.items():
-                if k == annot_path("int_add", "b"):
-                    assert not v.deep_equals(cst.Name("int")), f"{k}:{v}"
-                else:
-                    assert v.deep_equals(cst.Name("int")), f"{k}:{v}"
-
-        _, annots = collect_annots_info(
-            cst.parse_module(read_file(f"{inference_dir}/env_code_2.py"))
-        )
-        with type_inf_env(
-            checker,
-            f"{inference_dir}/env_code_2.py",
-            SelectAnnotations.select_annotated,
-        ) as env:
-            assert len(env.state.annotated) == 0
-            assert (
-                len(env.state.to_annot) == len(annots) == 10
-            )  # this should equal to the number of manual annotations
-            while len(env.state.to_annot) > 0:
-                path = next(iter(env.state.to_annot))
-                env.step(TypeInfAction(path, annots[path].annotation))
-
-            assert env.state.num_errors == 0
-            assert len(env.state.annotated) == 10
-
-
 def test_type_normalization():
     equiv_pairs: list[tuple[str, str]] = [
         ("list[int]", "List[int]"),
@@ -153,6 +106,11 @@ def test_type_normalization():
         ("typing.Union[str, List]", "typing.Union[list, str]"),
         ("typing.Union[str, typing.Union[str, int]]", "str | int"),
         ("typing.Union[str, float, typing.Union[str, int]]", "str | int | float"),
+        ("Union[str, float, None]", "Optional[Union[str, float]]"),
+        ("str | None", "Optional[str]"),
+        ("Any | None", "Optional"),
+        ("List[Any]", "List"),
+        ("Dict[Any, Any]", "Dict"),
     ]
 
     for a, b in equiv_pairs:
@@ -164,9 +122,46 @@ def test_type_normalization():
         ("Union[str, int]", "Union[str, list]"),
         ("typing.List[str]", "t.List[str]"),
         ("tuple[str, int]", "tuple[int, str]"),
+        ("Dict[str, Any]", "Dict"),
     ]
 
     for a, b in nonequiv_pairs:
         ta = parse_type_str(a)
         tb = parse_type_str(b)
         assert normalize_type(ta) != normalize_type(tb)
+
+
+import shutil
+
+from spot.data import SrcDataset, type_check_src, type_check_src_in_project
+from spot.utils import load_tokenizer_spot, proj_root
+
+
+def test_mypy_checking():
+    simple_dataset = SrcDataset.from_repos(
+        proj_root() / "data",
+        [proj_root() / "data/code"],
+        load_tokenizer_spot(),
+        drop_comments=True,
+        max_workers=10,
+        label_ratio=1.0,
+    )
+
+    src_to_check = simple_dataset.get_src_by_file(Path("bad_code_2.py"))
+    result_1 = type_check_src(src_to_check, {0: "int"})
+    assert len(result_1.feedbacks) == 0
+
+    src_to_check = simple_dataset.get_src_by_file(Path("bad_code_2.py"))
+    temp_dir = proj_root() / "mypy_temp/test_dir"
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+    result_2 = type_check_src_in_project(
+        src_to_check,
+        {0: "int"},
+        project_root=(proj_root() / "data/code"),
+    )
+    assert isinstance(result_2.feedbacks, list) and len(result_2.feedbacks) == 1
+    assert (
+        'Argument 1 to "fib" has incompatible type "int"; expected "str"'
+        in result_2.feedbacks[0].message
+    )

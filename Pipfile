@@ -16,14 +16,16 @@ ipywidgets = "*"
 datasets = "*"
 transformers = "*"
 wandb = "*"
-libcst = "0.4.1"
+libcst = "<=0.4.2"
 sklearn = "*"
 matplotlib = "*"
 pytorch-lightning = "*"
+colored = "*"
+ipykernel = "*"
 
 [dev-packages]
-ipykernel = "*"
 pytest = "*"
+black = "*"
 
 [requires]
 python_version = "3.10"
