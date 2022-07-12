@@ -100,16 +100,13 @@ def incr_inference_with_feedback(
         template_root,
         prog: tqdm,
     ):
-        src = deepcopy(src)
         device = wrapper.model.device
         num_return_sequences = beam_width
         proj_root = template_root / src.repo
         assignment = dict[int, PythonType]()
         for lid in range(len(src.types_info)):
             with t_logger.log_time("chunk_from_src"):
-                chunk, info = chunk_from_src(
-                    src, src_id, lid, ctx_args, DefaultTokenizer
-                )
+                chunk, info = chunk_from_src(src, src_id, lid, ctx_args)
                 batch = dict()
                 batch["input_ids"] = torch.tensor([chunk["input_ids"]], device=device)
                 batch["n_labels"] = [chunk["n_labels"]]
@@ -201,7 +198,7 @@ def incr_inference_with_feedback(
                     dataloader = dynamic_dataloader(
                         critic_dataset,
                         max_tokens=sampling_max_tokens,
-                        collate_fn=CriticCollator(DefaultTokenizer),
+                        collate_fn=CriticCollator(),
                     )
                     chunk2preds = selector.critic.classify_data(
                         dataloader, len(critic_dataset), tqdm_args={"disable": True}
@@ -243,7 +240,6 @@ def sample_candidates(
     src_data: SrcDataset,
     n_samples: int,
 ) -> tuple[ChunkedDataset, list[list[list[PythonType]]]]:
-    tokenizer = wrapper.tokenizer
     ctx_args = wrapper.args.ctx_args
 
     do_sample = wrapper.args.do_sample
@@ -251,7 +247,7 @@ def sample_candidates(
         assert wrapper.args.num_beams is not None, "num_beams needs to be set"
         assert n_samples <= wrapper.args.num_beams
 
-    chunks = src_data.to_chunks(tokenizer, ctx_args)
+    chunks = src_data.to_chunks(ctx_args)
     n_chunks = len(chunks.data)
 
     if do_sample:
@@ -450,7 +446,7 @@ def select_candidates_using_critic(
     dataloader = dynamic_dataloader(
         critic_dataset,
         max_tokens=dec_args.sampling_max_tokens,
-        collate_fn=CriticCollator(DefaultTokenizer),
+        collate_fn=CriticCollator(),
     )
     chunk2preds = critic.classify_data(
         dataloader, len(critic_dataset), tqdm_args=tqdm_args
@@ -508,9 +504,7 @@ def to_critic_inputs(
     chunks_info = list[SrcChunkInfo]()
     if labels_range is None:
         labels_range = min(preds.keys()), max(preds.keys()) + 1
-    src_to_chunks_(
-        chunks, chunks_info, new_src, src_id, labels_range, ctx_args, DefaultTokenizer
-    )
+    src_to_chunks_(chunks, chunks_info, new_src, src_id, labels_range, ctx_args)
     return chunks, chunks_info
 
 

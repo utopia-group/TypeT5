@@ -1,6 +1,6 @@
 import os
 import warnings
-from copy import copy, deepcopy
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import *
@@ -135,7 +135,7 @@ def train_spot_model(
     with run_long_task("Preparing chunked datasets", notify=False):
         for n in ["valid", "train"]:
             src = src_datasets[n]
-            chunks[n] = src.to_chunks(tokenizer, train_ctx_args)
+            chunks[n] = src.to_chunks(train_ctx_args)
 
     wandb_logger = WandbLogger()  # assuming a run has already been initialized
 
@@ -267,14 +267,13 @@ def R1_srcs_from_extra(
     chunk_datasets = dict[str, ChunkedDataset]()
     for n in ["test", "valid", "train"]:
         src = src_datasets[n]
-        chunk_datasets[n] = src.to_chunks(tokenizer, wrapper.args.ctx_args)
+        chunk_datasets[n] = src.to_chunks(wrapper.args.ctx_args)
 
     R1_src_datasets = dict[str, SrcDataset]()
     if ckpt_dir is None or ckpt_interval is None:
         chunks_info = extra["chunks_info"]
         model_preds = extra["model_preds"]
         R1_src_datasets["train"] = R1_srcs_from_preds(
-            tokenizer,
             src_datasets["train"],
             chunks_info,
             chunk_datasets["train"].files,
@@ -301,7 +300,6 @@ def R1_srcs_from_extra(
         print(f"Generating R1 dataset: {n}")
         preds = wrapper.predict(chunk_datasets[n].data, {})
         R1_src_datasets[n] = R1_srcs_from_preds(
-            tokenizer,
             src_datasets[n],
             chunk_datasets[n].chunks_info,
             chunk_datasets[n].files,
@@ -320,7 +318,7 @@ def R1_srcs_from_model(
     R1_src_datasets = dict[str, SrcDataset]()
     tokenizer = wrapper.tokenizer
     chunk_datasets = {
-        n: src_datasets[n].to_chunks(tokenizer, wrapper.args.ctx_args)
+        n: src_datasets[n].to_chunks(wrapper.args.ctx_args)
         for n in ["train", "valid", "test"]
     }
     for n, cdata in chunk_datasets.items():
@@ -328,7 +326,6 @@ def R1_srcs_from_model(
         preds = wrapper.predict(cdata.data, {})
 
         R1_src_datasets[n] = R1_srcs_from_preds(
-            DefaultTokenizer,
             src_datasets[n],
             chunk_datasets[n].chunks_info,
             chunk_datasets[n].files,
@@ -381,7 +378,6 @@ def R1_srcs_from_ckpts(
         preds = wrapper.predict(data_sub.data, tqdm_args=tqdm_args)
         model_preds.extend(preds)
     srcs = R1_srcs_from_preds(
-        tokenizer,
         r0_src,
         chunks_info,
         cdata.files,
@@ -496,14 +492,13 @@ def evaluate_model(
         f"r0_eval-{r0_wrapper.args}.pkl",
         lambda: r0_wrapper.eval_on_dataset(r0_srcs, tqdm_args=tqdm_args),
     )
-    results.append((deepcopy(r0_wrapper.args), r0_result))
+    results.append((copy.deepcopy(r0_wrapper.args), r0_result))
     if r1_wrapper is None:
         return results
 
     r1_srcs = cached(
         f"r1_srcs-{r0_wrapper.args}-{tc_args}.pkl",
         lambda: R1_srcs_from_preds(
-            r1_wrapper.tokenizer,  # type: ignore
             r0_srcs,
             r0_result.chunks.chunks_info,
             r0_result.chunks.files,
@@ -518,6 +513,6 @@ def evaluate_model(
         f"r1_eval-{r1_wrapper.args}-{tc_args}.pkl",
         lambda: r1_wrapper.eval_on_dataset(r1_srcs, tqdm_args=tqdm_args),
     )
-    results.append((deepcopy(r1_wrapper.args), r1_result))
+    results.append((copy.deepcopy(r1_wrapper.args), r1_result))
 
     return results

@@ -13,11 +13,8 @@ from transformers.data.data_collator import DataCollatorForSeq2Seq
 from spot.data import (
     ChunkedDataset,
     CtxArgs,
-    R1_srcs_from_preds,
     SrcDataset,
-    TokenizedSrc,
     output_ids_as_types,
-    patch_code_with_extra,
     preds_to_accuracies,
 )
 from spot.type_env import PythonType
@@ -129,7 +126,7 @@ class ModelWrapper:
         assert len(output_ids.shape) == 2
 
         def decode_row(row, n_labels) -> list[PythonType]:
-            return output_ids_as_types(row, self.tokenizer, n_labels)
+            return output_ids_as_types(row, n_labels)
 
         n_rows = output_ids.shape[0]
         if num_return_sequences is not None:
@@ -227,7 +224,7 @@ class ModelWrapper:
             ctx_args = copy(ctx_args)
             ctx_args.max_labels = max_labels
 
-        chunks = src_data.to_chunks(self.tokenizer, ctx_args, tqdm_args=tqdm_args)
+        chunks = src_data.to_chunks(ctx_args, tqdm_args=tqdm_args)
         preds = self.predict(
             chunks.data, num_return_sequences=None, tqdm_args=tqdm_args
         )

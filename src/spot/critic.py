@@ -1,7 +1,5 @@
 import warnings
 from datasets import Dataset
-from sklearn.decomposition import dict_learning
-from transformers import T5PreTrainedModel
 from spot.data import ChunkedDataset, CtxArgs, SrcDataset
 from spot.type_check import normalize_type
 from .model import (
@@ -146,8 +144,8 @@ class CriticModel(nn.Module):
         tqdm_args: dict = {},
     ) -> tuple[ChunkedDataset, list[list[float]], dict]:
         """Convinient method to preprocess the src according to the model's ctx_args and evaluate the (R0) accuracy."""
-        chunks = src_data.to_chunks(self.tokenizer, ctx_args, tqdm_args=tqdm_args)
-        collator = CriticCollator(self.tokenizer)
+        chunks = src_data.to_chunks(ctx_args, tqdm_args=tqdm_args)
+        collator = CriticCollator()
         dataset = to_critic_dataset(chunks)
         loader = dynamic_dataloader(
             dataset,
@@ -234,11 +232,10 @@ def train_critic_model(
         shutil.rmtree(running_dir)
     running_dir.mkdir(parents=True, exist_ok=True)
 
-    tokenizer = load_tokenizer_spot()
     datasets: dict[str, Dataset] = {}
     for n in ["valid", "test", "train"]:
         sdata = critic_datasets[n]
-        cdata = sdata.to_chunks(tokenizer, train_args.ctx_args)
+        cdata = sdata.to_chunks(train_args.ctx_args)
         datasets[n] = to_critic_dataset(cdata)
 
     # pos_weight = compute_pos_weight(list(seq_flatten(datasets["train"]["is_correct"])))
@@ -255,7 +252,7 @@ def train_critic_model(
     wandb_logger.log_hyperparams({"pos_weight": pos_weight})
     print(f"pos_weight = {pos_weight}")
 
-    collate_fn = CriticCollator(tokenizer)
+    collate_fn = CriticCollator()
     dataloaders = dict[str, DataLoader]()
     for n, data in datasets.items():
         dataloaders[n] = dynamic_dataloader(
@@ -354,10 +351,8 @@ def to_critic_dataset(cdata: ChunkedDataset) -> Dataset:
 
 @dataclass
 class CriticCollator:
-    tokenizer: TokenizerSPOT
-
     def __call__(self, batch: Sequence[dict]) -> dict:
-        pad_id = not_none(self.tokenizer.pad_token_id)
+        pad_id = not_none(DefaultTokenizer.pad_token_id)
         input_ids = stack_and_pad([chunk["input_ids"] for chunk in batch], pad_id)
         attention_mask = (input_ids != pad_id).float()
         result = {

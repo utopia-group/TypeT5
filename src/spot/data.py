@@ -215,7 +215,7 @@ def _compute_ctx(
 
 
 def chunk_from_src(
-    src: TokenizedSrc, src_id: int, label_id: int, ctx_args: CtxArgs, tokenizer
+    src: TokenizedSrc, src_id: int, label_id: int, ctx_args: CtxArgs
 ) -> tuple[dict, "SrcChunkInfo"]:
     """Helper function to extract a single chunk from a source file."""
     chunks = list[dict]()
@@ -227,7 +227,6 @@ def chunk_from_src(
         src_id,
         (label_id, label_id + 1),
         ctx_args,
-        tokenizer,
     )
     assert_eq(len(chunks), len(chunks_info), 1)
     return chunks[0], chunks_info[0]
@@ -240,13 +239,13 @@ def src_to_chunks_(
     src_id: int,
     label_range: tuple[int, int],
     ctx_args: "CtxArgs",
-    tokenizer: TokenizerSPOT,
 ) -> None:
     assert 0 <= label_range[0]
     assert label_range[1] <= len(
         src.types
     ), f"label_range: {label_range}, len(types): {len(src.types)}"
 
+    tokenizer = DefaultTokenizer
     special_tks = [tokenizer.additional_special_tokens_ids[99 - i] for i in range(100)]
     bos_id, eos_id = not_none(tokenizer.bos_token_id), not_none(tokenizer.eos_token_id)
 
@@ -292,16 +291,13 @@ def src_to_chunks_(
 
     new_label_range = (label_ids[-1] + 1, label_range[1])
     if new_label_range[0] < label_range[1]:
-        src_to_chunks_(
-            chunks, chunks_info, src, src_id, new_label_range, ctx_args, tokenizer
-        )
+        src_to_chunks_(chunks, chunks_info, src, src_id, new_label_range, ctx_args)
 
 
 def chunk_srcs_per_file(
     repos_root: Path,
     srcs: Sequence[TokenizedSrc],
     ctx_args: "CtxArgs",
-    tokenizer: TokenizerSPOT,
     tqdm_args: dict,
 ) -> "ChunkedDataset":
     """Turn each file into a single chunk when possible, or break it down into multiple chunks."""
@@ -313,9 +309,7 @@ def chunk_srcs_per_file(
         if len(src.types) == 0:
             continue
         labels_range = 0, len(src.types)
-        src_to_chunks_(
-            chunks, chunks_info, src, src_id, labels_range, ctx_args, tokenizer
-        )
+        src_to_chunks_(chunks, chunks_info, src, src_id, labels_range, ctx_args)
 
     data: dict[str, list] = {
         "input_ids": [],
@@ -338,7 +332,6 @@ def chunk_srcs_per_file(
         files=files,
         file2src={f: s.origin_code for f, s in zip(files, srcs)},
         file2repo={f: (repos_root / s.repo).resolve() for f, s in zip(files, srcs)},
-        tokenizer=tokenizer,
     )
 
 
@@ -389,15 +382,12 @@ class SrcDataset:
 
     def to_chunks(
         self,
-        tokenizer: TokenizerSPOT,
         ctx_args: "CtxArgs",
         tqdm_args: dict = {},
     ) -> "ChunkedDataset":
         srcs = self.all_srcs
-        chunks = chunk_srcs_per_file(
-            self.repos_root, srcs, ctx_args, tokenizer, tqdm_args
-        )
-        chunks.verify_labels(self, tokenizer, tqdm_args=tqdm_args)
+        chunks = chunk_srcs_per_file(self.repos_root, srcs, ctx_args, tqdm_args)
+        chunks.verify_labels(self, tqdm_args=tqdm_args)
         return chunks
 
     def file2src(self, resolve=True):
@@ -500,7 +490,6 @@ class SrcDataset:
 
     def add_type_checker_feedback(
         self,
-        tokenizer: TokenizerSPOT,
         file2preds: dict[Path, dict[int, str]],
         max_workers: int,
         tqdm_args: dict,
@@ -932,7 +921,6 @@ class ChunkedDataset:
     files: list[Path]
     file2src: dict[Path, str]
     file2repo: dict[Path, Path]
-    tokenizer: TokenizerSPOT
 
     def __post_init__(self):
         assert_eq(len(self.data), len(self.chunks_info))
@@ -950,7 +938,6 @@ class ChunkedDataset:
             files=self.files,
             file2src=self.file2src,
             file2repo=self.file2repo,
-            tokenizer=self.tokenizer,
         )
 
     def __len__(self):
@@ -960,7 +947,7 @@ class ChunkedDataset:
     def __repr__(self):
         return f"ChunkedDataset(num_chunks={len(self.chunks_info)}, num_srcs={len(self.files)})"
 
-    def verify_labels(self, srcs: SrcDataset, tokenizer: TokenizerSPOT, tqdm_args={}):
+    def verify_labels(self, srcs: SrcDataset, tqdm_args={}):
         """
         Verify that the labels in the dataset match the source code.
         """
@@ -978,7 +965,7 @@ class ChunkedDataset:
                 assert file in src_path_map, f"{file} not in file2src."
                 assert (
                     info.path in src_path_map[file]
-                ), f"{info.path} should not be a label in {file}. Chunk code:\n{tokenizer.decode(input)}"
+                ), f"{info.path} should not be a label in {file}. Chunk code:\n{decode_tokens(input)}"
                 assert_eq(src_path_map[file][info.path], ty)
 
 
@@ -1005,11 +992,12 @@ def save_datasets(
     subprocess.run(["du", "-sh", datasets_dir])
 
 
-def output_ids_as_seqs(output_ids: Iterable[int], tokenizer: TokenizerSPOT):
+def output_ids_as_seqs(output_ids: Iterable[int]):
     """Divide the model output as a sequence of tokens, filtering out padding tokens."""
     seq_id = 0
     buff = list[int]()
     seqs = list[list[int]]()
+    tokenizer = DefaultTokenizer
     mark = tokenizer.additional_special_tokens_ids[99 - seq_id]
 
     for tk in output_ids:
@@ -1026,12 +1014,11 @@ def output_ids_as_seqs(output_ids: Iterable[int], tokenizer: TokenizerSPOT):
     return seqs[1:]
 
 
-def output_ids_as_types(
-    output_ids: Iterable[int], tokenizer: TokenizerSPOT, n_types: int
-) -> list[PythonType]:
+def output_ids_as_types(output_ids: Iterable[int], n_types: int) -> list[PythonType]:
     """Try to parse model outputs as a list of Python types, pad `Any` to make sure the
     list is of the correct length."""
-    seqs = output_ids_as_seqs(output_ids, tokenizer)
+    seqs = output_ids_as_seqs(output_ids)
+    tokenizer = DefaultTokenizer
     types = list[PythonType]()
     for seq in seqs[:n_types]:
         try:
@@ -1053,7 +1040,6 @@ def output_ids_as_types(
 
 
 def R1_srcs_from_preds(
-    tokenizer: TokenizerSPOT,
     r0_src: SrcDataset,
     chunks_info: list[SrcChunkInfo],
     src_files: list[Path],
@@ -1086,7 +1072,6 @@ def R1_srcs_from_preds(
 
     # assert_eq(len(file2preds1), len(r0_src.all_srcs))
     return r0_src.add_type_checker_feedback(
-        tokenizer,
         file2preds1,
         tc_args=tc_args,
         max_workers=max_workers,
