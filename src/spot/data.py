@@ -42,6 +42,10 @@ warnings.filterwarnings(
 )
 
 
+class TypeCheckSettings:
+    temp_path: str = "Default"
+
+
 @dataclass
 class GitRepo:
     author: str
@@ -666,12 +670,25 @@ class SrcDataset:
         pretty_print_dict(self.stats_to_show())
 
     @contextmanager
-    def prepare_typecheck_projects(self, src_list: Sequence[TokenizedSrc]):
-        # prepare project files
-        template_root = MypyChecker.temp_dir() / "original_projects"
+    def prepare_typecheck_projects(
+        self, src_list: Sequence[TokenizedSrc], cleanup=True
+    ):
+        """
+        Context manager to setup the shared files for multi-processing type checking
+        and handles the cleanup when done.
+
+        If running multiple instances in parallel, set `TypeCheckSettings.temp_path` to specify which temporary directory (under `mypy_temp`)
+        to use.
+        """
+
+        template_root = (
+            proj_root()
+            / "mypy_temp"
+            / TypeCheckSettings.temp_path
+            / f"ORIGINAL_PROJECTS"
+        )
         template_root.mkdir(parents=True, exist_ok=True)
         try:
-
             repo_set = {s.repo for s in src_list}
             repo2srcs = self.repos2srcs()
             for repo in repo_set:
@@ -683,12 +700,12 @@ class SrcDataset:
                     new_path.write_text(new_code)
             yield template_root
         finally:
-            shutil.rmtree(template_root, ignore_errors=True)
+            if cleanup:
+                shutil.rmtree(template_root.parent, ignore_errors=True)
 
     def type_check_each_file_in_project(
         self,
         file2preds: Iterable[tuple[Path, dict[int, str]]],
-        mypy_path=None,
         include_all_errors: bool = False,
         tqdm_args={},
     ) -> list["SrcCheckResult"]:
@@ -705,7 +722,6 @@ class SrcDataset:
                 [p for _, p in file2preds],
                 project_roots,
                 [include_all_errors for _ in src_list],
-                [mypy_path for _ in src_list],
                 desc="map type_check_src_in_project",
                 tqdm_args=tqdm_args,
             )
@@ -719,7 +735,6 @@ class SrcDataset:
         tqdm_args: dict,
         tc_args: TypeCheckArgs,
         include_all_errors: bool = False,
-        mypy_path: Optional[Path] = None,
     ) -> "SrcDataset":
         """Add the predictions to the corresponding files, call the type checker to
         collect the feedbacks, and then patch the feedbacks as well as the original
@@ -730,34 +745,30 @@ class SrcDataset:
         src_list = [file2src[f.resolve()] for f in file2preds]
 
         # first, collec type checker feedbacks
-        try:
-            check_rs: list[SrcCheckResult]
-            if tc_args.no_feedback:
-                check_rs = [
-                    SrcCheckResult(
-                        feedbacks=[], new_code=code_to_check_from_preds(s, preds)
-                    )
-                    for s, preds in zip(src_list, list(file2preds.values()))
-                ]
-            elif tc_args.check_in_isolation:
-                check_rs = pmap(
-                    type_check_src,
-                    src_list,
-                    list(file2preds.values()),
-                    [mypy_path for _ in src_list],
-                    max_workers=max_workers,
-                    desc="map type_check_src",
-                    tqdm_args=tqdm_args,
+        check_rs: list[SrcCheckResult]
+        if tc_args.no_feedback:
+            check_rs = [
+                SrcCheckResult(
+                    feedbacks=[], new_code=code_to_check_from_preds(s, preds)
                 )
-            else:
-                check_rs = self.type_check_each_file_in_project(
-                    file2preds.items(),
-                    mypy_path,
-                    include_all_errors=include_all_errors,
-                    tqdm_args=tqdm_args,
-                )
-        finally:
-            MypyChecker.clear_temp_cache()
+                for s, preds in zip(src_list, list(file2preds.values()))
+            ]
+        elif tc_args.check_in_isolation:
+            check_rs = pmap(
+                type_check_src,
+                src_list,
+                list(file2preds.values()),
+                max_workers=max_workers,
+                desc="map type_check_src",
+                tqdm_args=tqdm_args,
+            )
+        else:
+            check_rs = self.type_check_each_file_in_project(
+                file2preds.items(),
+                include_all_errors=include_all_errors,
+                tqdm_args=tqdm_args,
+            )
+
         n_checked = 0
         code_list = list[str]()
         feedback_list = list[list[MypyFeedback]]()
@@ -893,7 +904,6 @@ def load_src_datasets(
     datasets_name: str,
     data_reduction: int = 1,
     quicktest: bool = False,
-    repos_root: Optional[Path] = None,
     sets_to_load=["train", "valid", "test"],
 ) -> dict[str, SrcDataset]:
     print("Loading datasets: ", datasets_name)
@@ -901,9 +911,9 @@ def load_src_datasets(
     for n in sets_to_load:
         with open(datadir / "SPOT-data" / datasets_name / f"{n}.pkl", "rb") as f:
             src: SrcDataset = pickle.load(f)
-            src = SrcDataset(src.repos_root, src.srcs_with_labels())
-            if repos_root is not None:
-                src.repos_root = repos_root
+            src.all_srcs = src.srcs_with_labels()
+            _fix_src_paths_(src)
+            src.repos_root = datadir / "SPOT-data/repos/downloaded"
             if n == "train":
                 n_train = len(src.all_srcs) // data_reduction
                 src = src[:n_train]
@@ -914,8 +924,22 @@ def load_src_datasets(
     return src_datasets
 
 
+def _fix_src_paths_(dataset: SrcDataset) -> None:
+    if str(dataset.repos_root).endswith("/downloaded"):
+        # already fixed
+        return
+    for src in dataset.all_srcs:
+        assert str(src.file).startswith("downloaded/")
+        assert str(src.repo).startswith("downloaded/")
+        src.file = Path(str(src.file).replace("downloaded/", ""))
+        src.repo = Path(str(src.repo).replace("downloaded/", ""))
+    dataset.repos_root = dataset.repos_root / "downloaded"
+
+
 def code_to_check_from_preds(src: TokenizedSrc, preds: dict[int, str]):
     code = src.origin_code
+    if not preds:
+        return code
     changes = list[tuple[CodeRange, int, str]]()
     start = CodePosition(0, 0)
     changes.append((CodeRange(start, start), 0, MypyChecker.Preamble))
@@ -952,12 +976,11 @@ def type_check_src_skip_check(
 def type_check_src(
     src: TokenizedSrc,
     preds: dict[int, str],
-    mypy_path: Optional[Path] = None,
     cwd: Optional[Path] = None,
 ) -> SrcCheckResult:
     def from_preds(preds: dict[int, str]):
         new_code = code_to_check_from_preds(src, preds)
-        check_r = MypyChecker.check_code(new_code, cwd=cwd, mypy_path=mypy_path)
+        check_r = MypyChecker.check_code(new_code, cwd=cwd)
         feedback: list[MypyFeedback] | str
         if isinstance(check_r, str):
             feedback = check_r
@@ -983,13 +1006,10 @@ def type_check_src_in_project(
     preds: dict[int, str],
     project_root: Path,
     include_all_errors: bool = False,
-    mypy_path: Optional[Path] = None,
 ) -> SrcCheckResult:
     # setup: copy all files into cwd
     proc = multiprocessing.current_process()
-    cwd = MypyChecker.temp_dir() / proc.name / project_root.name
-    if cwd.exists():
-        shutil.rmtree(cwd)
+    cwd = project_root.parent.parent / proc.name / project_root.name
     cwd.mkdir(parents=True, exist_ok=True)
 
     for f in project_root.glob("**/*.py"):
@@ -1003,7 +1023,7 @@ def type_check_src_in_project(
     def from_preds(preds: dict[int, str]):
         new_code = code_to_check_from_preds(src, preds)
         file_path.write_text(new_code)
-        check_r = MypyChecker.check_project(cwd, mypy_path=mypy_path)
+        check_r = MypyChecker.check_project(cwd)
         feedback: list[MypyFeedback] | str
         if isinstance(check_r, str):
             feedback = check_r
@@ -1011,23 +1031,20 @@ def type_check_src_in_project(
             feedback = check_r.error_dict.get(file_path.resolve(), [])
         return feedback, new_code
 
-    try:
-        if include_all_errors:
-            fdbk, new_code = from_preds(preds)
-            return SrcCheckResult(fdbk, new_code)
+    if include_all_errors:
+        fdbk, new_code = from_preds(preds)
+        return SrcCheckResult(fdbk, new_code)
+    else:
+        fdbk0, _ = from_preds({i: "Any" for i, _ in preds.items()})
+        fdbk1, new_code = from_preds(preds)
+        if isinstance(fdbk1, list) and isinstance(fdbk0, list):
+            preexisting = {(f.position.line, f.message) for f in fdbk0}
+            new_fdbk = [
+                f for f in fdbk1 if (f.position.line, f.message) not in preexisting
+            ]
+            return SrcCheckResult(new_fdbk, new_code)
         else:
-            fdbk0, _ = from_preds({i: "Any" for i, _ in preds.items()})
-            fdbk1, new_code = from_preds(preds)
-            if isinstance(fdbk1, list) and isinstance(fdbk0, list):
-                preexisting = {(f.position.line, f.message) for f in fdbk0}
-                new_fdbk = [
-                    f for f in fdbk1 if (f.position.line, f.message) not in preexisting
-                ]
-                return SrcCheckResult(new_fdbk, new_code)
-            else:
-                return SrcCheckResult(fdbk1, new_code)
-    finally:
-        shutil.rmtree(MypyChecker.temp_dir() / proc.name)
+            return SrcCheckResult(fdbk1, new_code)
 
 
 class CommentRemover(cst.CSTTransformer):
@@ -1214,20 +1231,6 @@ def save_datasets(
     import subprocess
 
     subprocess.run(["du", "-sh", datasets_dir])
-
-
-def load_datasets(datasets_dir: Path):
-    set_names = ["train", "valid", "test"]
-    with open(datasets_dir / "repos_split.pkl", "rb") as f:
-        repos_split: dict[str, list[GitRepo]] = pickle.load(f)
-    datasets = dict[str, ChunkedDataset]()
-    for name in set_names:
-        with open(datasets_dir / f"{name}-extra.pkl", "rb") as f:
-            extra = pickle.load(f)
-        dataset = Dataset.load_from_disk(str(datasets_dir / name))
-        datasets[name] = ChunkedDataset(dataset, *extra)
-
-    return datasets, repos_split
 
 
 def output_ids_as_seqs(output_ids: Iterable[int], tokenizer: TokenizerSPOT):

@@ -584,11 +584,10 @@ def collect_type_errors_in_project(
     srcs: list[TokenizedSrc],
     preds_list: list[dict[int, str]],
     project_root: Path,
-    mypy_path: Optional[Path] = None,
 ) -> MypyResult | str:
     # setup: copy all files into cwd
     proc = multiprocessing.current_process()
-    cwd = MypyChecker.temp_dir() / proc.name / project_root.name
+    cwd = project_root.parent.parent / proc.name / project_root.name
     cwd.mkdir(parents=True, exist_ok=True)
 
     for f in project_root.glob("**/*.py"):
@@ -601,7 +600,7 @@ def collect_type_errors_in_project(
         file_path = cwd / rel_path
         new_code = code_to_check_from_preds(src, preds)
         file_path.write_text(new_code)
-    check_r = MypyChecker.check_project(cwd, mypy_path=mypy_path)
+    check_r = MypyChecker.check_project(cwd)
     if isinstance(check_r, MypyResult):
         check_r.error_dict = {
             f.relative_to(cwd): es for f, es in check_r.error_dict.items()

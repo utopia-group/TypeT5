@@ -446,6 +446,8 @@ class PickleCache:
         path = self.cache_dir / rel_path
         if path.exists():
             path.unlink()
+        else:
+            logging.warning(f"[PickleCache] File not found: '{path}'")
 
     def clear(self):
         if self.cache_dir.exists():

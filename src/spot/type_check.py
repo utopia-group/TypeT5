@@ -298,11 +298,11 @@ class MypyChecker:
             mypy_path = proj_root() / ".venv/bin/mypy"
         if cwd is None:
             proc = multiprocessing.current_process()
-            cwd = MypyChecker.temp_dir() / proc.name
+            cwd = proj_root() / "mypy_temp" / proc.name
         cwd.mkdir(parents=True, exist_ok=True)
 
-        (cwd / "code.py").write_text(code)
         try:
+            (cwd / "code.py").write_text(code)
             cmd = [
                 "python",
                 str(mypy_path),
@@ -319,18 +319,6 @@ class MypyChecker:
         finally:
             shutil.rmtree(cwd)
         return MypyChecker.parse_mypy_output(out, cmd, cwd)
-
-    CheckerId = 0
-
-    @staticmethod
-    def clear_temp_cache():
-        cwd = MypyChecker.temp_dir()
-        if cwd.exists():
-            shutil.rmtree(cwd)
-
-    @staticmethod
-    def temp_dir():
-        return proj_root() / f"mypy_temp-{MypyChecker.CheckerId}"
 
     @staticmethod
     def parse_mypy_output(
