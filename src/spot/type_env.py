@@ -83,7 +83,7 @@ def collect_user_annotations(
         return pos.line, pos.column
 
     annots = collect_annots_info(code)
-    m = code if isinstance(code, cst.Module) else code.module
+    m = code if isinstance(code, cst.Module) else cast(cst.MetadataWrapper, code).module
 
     types: list[PythonType] = []
     annots_info: list[AnnotInfo] = []

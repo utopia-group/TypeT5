@@ -35,6 +35,7 @@ import pandas as pd
 from IPython.display import display
 from libcst.metadata import CodePosition, CodeRange
 from sklearn.metrics import confusion_matrix
+import multiprocessing
 
 # from tqdm.auto import tqdm
 from tqdm import tqdm
@@ -57,14 +58,21 @@ def load_tokenizer_spot() -> TokenizerSPOT:
     return TokenizerSPOT.from_pretrained("Salesforce/codet5-base")
 
 
+def _turn_off_tokenizer_warning(tokenizer: TokenizerSPOT):
+    tokenizer.deprecation_warnings[
+        "sequence-length-is-longer-than-the-specified-maximum"
+    ] = True
+
+
 DefaultTokenizer = load_tokenizer_spot()
+_turn_off_tokenizer_warning(DefaultTokenizer)
 
 
 def decode_tokens(tks, skip_special_tokens=False):
     return DefaultTokenizer.decode(tks, skip_special_tokens=skip_special_tokens)
 
 
-DefaultWorkers: int = 24
+DefaultWorkers: int = multiprocessing.cpu_count() // 2
 
 
 @contextmanager

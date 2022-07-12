@@ -6,7 +6,6 @@ import torch
 from spot.critic import CriticCollator, CriticModel
 
 from spot.data import (
-    _TokenizedSrcHelper,
     ChunkedDataset,
     CtxArgs,
     SrcCheckResult,
@@ -17,6 +16,7 @@ from spot.data import (
     code_to_check_from_preds,
     src_to_chunks_,
     type_check_src_in_project,
+    feedbacks_to_tokenized_src,
 )
 from spot.model import DatasetPredResult, DecodingArgs, ModelWrapper, dynamic_dataloader
 from spot.type_check import (
@@ -66,7 +66,7 @@ def incr_inference_with_feedback(
     """
     ctx_args = wrapper.args.ctx_args
     sampling_max_tokens = wrapper.args.sampling_max_tokens
-    srcs_to_check = src_data.srcs_with_labels()
+    srcs_to_check = src_data.all_srcs
     if log_to is not None:
         shutil.rmtree(log_to, ignore_errors=True)
         log_to.mkdir(parents=True)
@@ -286,7 +286,7 @@ def select_candidates_by_type_errors(
     only_same_file_error: bool = False,
 ) -> DatasetPredResult:
     file2src = src_data.file2src(resolve=False)
-    srcs_to_check = src_data.srcs_with_labels()
+    srcs_to_check = src_data.all_srcs
 
     with src_data.prepare_typecheck_projects(srcs_to_check) as template_root:
 
@@ -380,7 +380,7 @@ def select_candidates_using_critic(
     score_transform: Callable[[float], float] = lambda x: x,
 ) -> DatasetPredResult[CriticAssesInfo]:
     file2src = src_data.file2src(resolve=False)
-    srcs_to_check = src_data.srcs_with_labels()
+    srcs_to_check = src_data.all_srcs
 
     with src_data.prepare_typecheck_projects(srcs_to_check) as template_root:
 
@@ -426,7 +426,7 @@ def select_candidates_using_critic(
     avg_n_fdbks = sum(n_errors_map.values()) / len(n_errors_map)
     print(f"Average number of feedbacks per check: {avg_n_fdbks:.2f}")
 
-    file2id = src_data.file2id()
+    file2id = {s.file: i for i, s in enumerate(src_data.all_srcs)}
     src_ids = [file2id[x[0].file] for x in to_check_values]
     critic_inputs_metas = pmap(
         to_critic_inputs,
@@ -499,8 +499,7 @@ def to_critic_inputs(
     """
     errors, current_code = check_r
     fdbks = [] if isinstance(errors, str) else errors
-    helper = _TokenizedSrcHelper(DefaultTokenizer)
-    new_src = helper.feedbacks_to_tokenized_src(
+    new_src = feedbacks_to_tokenized_src(
         src, current_code, fdbks, patch_predictions=False
     )
     new_src.prev_types = preds
@@ -525,7 +524,7 @@ def collect_type_errors_from_predictions(
     chunk_preds = result.predictions
 
     file2src = src_data.file2src(resolve=False)
-    srcs_to_check = src_data.srcs_with_labels()
+    srcs_to_check = src_data.all_srcs
 
     with src_data.prepare_typecheck_projects(srcs_to_check) as template_root:
         to_check = dict[Path, dict[Path, dict[int, str]]]()

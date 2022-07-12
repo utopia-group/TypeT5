@@ -146,7 +146,6 @@ class CriticModel(nn.Module):
         tqdm_args: dict = {},
     ) -> tuple[ChunkedDataset, list[list[float]], dict]:
         """Convinient method to preprocess the src according to the model's ctx_args and evaluate the (R0) accuracy."""
-        assert src_data.predictions_inlined
         chunks = src_data.to_chunks(self.tokenizer, ctx_args, tqdm_args=tqdm_args)
         collator = CriticCollator(self.tokenizer)
         dataset = to_critic_dataset(chunks)
