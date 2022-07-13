@@ -93,6 +93,8 @@ def incr_inference_with_feedback(
         ]
         return "\n".join([f"{types[i]}     ({tokens[i]})" for i in range(len(types))])
 
+    pre_fdbks = None  # will only be set when using SelectByCritic
+
     def infer_src(
         src: TokenizedSrc,
         src_id: int,
@@ -155,11 +157,13 @@ def incr_inference_with_feedback(
             elif isinstance(selector, SelectByCritic):
                 # use the one with the highest critic score
                 with t_logger.log_time("type_check_src_in_project"):
+                    preexisting = cast(list, pre_fdbks)[src_id]
                     check_rs = executor.map(
                         type_check_src_in_project,
                         [src] * N,
                         [a for a in new_assignments],
                         [proj_root] * N,
+                        [preexisting] * N,
                     )
                     check_rs = list(check_rs)
                 with t_logger.log_time("Running critic"):
@@ -219,6 +223,10 @@ def incr_inference_with_feedback(
     n_workers = min(wrapper.args.max_workers, beam_width)
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         with src_data.prepare_typecheck_projects(srcs_to_check) as template_root:
+            if isinstance(selector, SelectByCritic):
+                pre_fdbks = src_data.compute_preexisting_fdbks(
+                    srcs_to_check, template_root
+                )
             with tqdm(
                 total=sum(len(s.types_info) for s in srcs_to_check),
                 desc=f"incr_inference [{type(selector).__name__}]",
@@ -379,6 +387,8 @@ def select_candidates_using_critic(
     srcs_to_check = src_data.all_srcs
 
     with src_data.prepare_typecheck_projects(srcs_to_check) as template_root:
+        pre_fdbks = src_data.compute_preexisting_fdbks(srcs_to_check, template_root)
+        src2pre = {src.file: fdbk for src, fdbk in zip(srcs_to_check, pre_fdbks)}
 
         to_check = dict[tuple[int, int], tuple[TokenizedSrc, dict[int, str], Path]]()
         for i in range(len(chunks.data)):
@@ -404,6 +414,7 @@ def select_candidates_using_critic(
                 [x[0] for x in to_check_values],
                 [x[1] for x in to_check_values],
                 [x[2] for x in to_check_values],
+                [src2pre[x[0].file] for x in to_check_values],
                 desc="map type_check_src_in_project",
                 tqdm_args=tqdm_args,
             )
@@ -542,7 +553,7 @@ def collect_type_errors_from_predictions(
             [[preds for preds in d.values()] for d in to_check.values()],
             [root for root in to_check.keys()],
             max_workers=max_workers,
-            desc="map type_check_src_in_project",
+            desc="map collect_type_errors_in_project",
         )
         feebacks = [
             (f, e)

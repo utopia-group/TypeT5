@@ -464,10 +464,33 @@ class SrcDataset:
             if cleanup:
                 shutil.rmtree(template_root.parent, ignore_errors=True)
 
+    def compute_preexisting_fdbks(
+        self, src_list: Sequence[TokenizedSrc], template_root
+    ) -> list[str | list[MypyFeedback]]:
+        """Compute the feedbacks caused by predicting all types as `Any`."""
+
+        repo_set = {s.repo for s in src_list}
+        repo2id = {repo: i for i, repo in enumerate(repo_set)}
+        repo_paths = [template_root / repo for repo in repo_set]
+        check_rs = pmap(
+            MypyChecker.check_project,
+            repo_paths,
+            desc="compute_preexisting_fdbks",
+        )
+
+        def get_fdbks(src: TokenizedSrc):
+            abs_path = (template_root / src.file).resolve()
+            check_r = check_rs[repo2id[src.repo]]
+            if isinstance(check_r, str):
+                return check_r
+            else:
+                return check_r.error_dict.get(abs_path, [])
+
+        return [get_fdbks(s) for s in src_list]
+
     def type_check_each_file_in_project(
         self,
         file2preds: Iterable[tuple[Path, dict[int, str]]],
-        include_all_errors: bool = False,
         tqdm_args={},
     ) -> list["SrcCheckResult"]:
         file2src = self.file2src(resolve=False)
@@ -475,6 +498,7 @@ class SrcDataset:
         src_list = [file2src[f.relative_to(repos_root)] for f, _ in file2preds]
 
         with self.prepare_typecheck_projects(src_list) as template_root:
+            pre_fdbks = self.compute_preexisting_fdbks(src_list, template_root)
             project_roots = [template_root / f.repo for f in src_list]
 
             check_rs: list[SrcCheckResult] = pmap(
@@ -482,7 +506,7 @@ class SrcDataset:
                 src_list,
                 [p for _, p in file2preds],
                 project_roots,
-                [include_all_errors for _ in src_list],
+                pre_fdbks,
                 desc="map type_check_src_in_project",
                 tqdm_args=tqdm_args,
             )
@@ -494,14 +518,13 @@ class SrcDataset:
         max_workers: int,
         tqdm_args: dict,
         tc_args: TypeCheckArgs,
-        include_all_errors: bool = False,
     ) -> "SrcDataset":
         """Add the predictions to the corresponding files, call the type checker to
         collect the feedbacks, and then patch the feedbacks as well as the original
         predictions to form the new inputs.
         """
 
-        file2src = self.file2src()
+        file2src = self.file2src(resolve=True)
         src_list = [file2src[f.resolve()] for f in file2preds]
 
         # first, collec type checker feedbacks
@@ -525,7 +548,6 @@ class SrcDataset:
         else:
             check_rs = self.type_check_each_file_in_project(
                 file2preds.items(),
-                include_all_errors=include_all_errors,
                 tqdm_args=tqdm_args,
             )
 
@@ -725,6 +747,18 @@ class SrcCheckResult(NamedTuple):
         print("======= New code =======")
         print(add_line_numbers(self.new_code))
 
+    def remove_preexisting(self, pre: list[MypyFeedback] | str) -> "SrcCheckResult":
+        if isinstance(pre, list) and isinstance(self.feedbacks, list):
+            preexisting = {(f.position.line, f.message) for f in pre}
+            new_fdbk = [
+                f
+                for f in self.feedbacks
+                if (f.position.line, f.message) not in preexisting
+            ]
+            return SrcCheckResult(new_fdbk, self.new_code)
+        else:
+            return self
+
 
 def type_check_src_skip_check(
     src: TokenizedSrc,
@@ -766,7 +800,7 @@ def type_check_src_in_project(
     src: TokenizedSrc,
     preds: dict[int, str],
     project_root: Path,
-    include_all_errors: bool = False,
+    preexisting: list[MypyFeedback] | str,
 ) -> SrcCheckResult:
     # setup: copy all files into cwd
     proc = multiprocessing.current_process()
@@ -790,22 +824,9 @@ def type_check_src_in_project(
             feedback = check_r
         else:
             feedback = check_r.error_dict.get(file_path.resolve(), [])
-        return feedback, new_code
+        return SrcCheckResult(feedback, new_code)
 
-    if include_all_errors:
-        fdbk, new_code = from_preds(preds)
-        return SrcCheckResult(fdbk, new_code)
-    else:
-        fdbk0, _ = from_preds({i: "Any" for i, _ in preds.items()})
-        fdbk1, new_code = from_preds(preds)
-        if isinstance(fdbk1, list) and isinstance(fdbk0, list):
-            preexisting = {(f.position.line, f.message) for f in fdbk0}
-            new_fdbk = [
-                f for f in fdbk1 if (f.position.line, f.message) not in preexisting
-            ]
-            return SrcCheckResult(new_fdbk, new_code)
-        else:
-            return SrcCheckResult(fdbk1, new_code)
+    return from_preds(preds).remove_preexisting(preexisting)
 
 
 class CommentRemover(cst.CSTTransformer):

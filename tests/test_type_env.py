@@ -141,27 +141,38 @@ def test_mypy_checking():
     simple_dataset = SrcDataset.from_repos(
         proj_root() / "data",
         [proj_root() / "data/code"],
-        load_tokenizer_spot(),
         drop_comments=True,
         max_workers=10,
         label_ratio=1.0,
     )
 
-    src_to_check = simple_dataset.get_src_by_file(Path("bad_code_2.py"))
+    src_to_check = simple_dataset.get_src_by_file(Path("code/bad_code_2.py"))
     result_1 = type_check_src(src_to_check, {0: "int"})
     assert len(result_1.feedbacks) == 0
 
-    src_to_check = simple_dataset.get_src_by_file(Path("bad_code_2.py"))
     temp_dir = proj_root() / "mypy_temp/test_dir"
     shutil.rmtree(temp_dir, ignore_errors=True)
 
-    result_2 = type_check_src_in_project(
-        src_to_check,
-        {0: "int"},
-        project_root=(proj_root() / "data/code"),
-    )
-    assert isinstance(result_2.feedbacks, list) and len(result_2.feedbacks) == 1
-    assert (
-        'Argument 1 to "fib" has incompatible type "int"; expected "str"'
-        in result_2.feedbacks[0].message
-    )
+    with simple_dataset.prepare_typecheck_projects(
+        [src_to_check], cleanup=True
+    ) as temp_root:
+        result_2 = type_check_src_in_project(
+            src_to_check,
+            {0: "int"},
+            (temp_root / "code"),
+            "Skip",
+        )
+        assert isinstance(result_2.feedbacks, list) and len(result_2.feedbacks) == 0
+
+        rs = simple_dataset.type_check_each_file_in_project(
+            [
+                ((simple_dataset.repos_root / "code/bad_code_2.py"), {0: "int"}),
+                ((simple_dataset.repos_root / "code/bad_code_1.py"), {0: "str"}),
+            ],
+        )
+        fdbks3 = rs[0].feedbacks
+        assert isinstance(fdbks3, list) and len(fdbks3) == 0
+        # assert (
+        #     'Argument 1 to "fib" has incompatible type "int"; expected "str"'
+        #     in fdbks3[0].message
+        # )
