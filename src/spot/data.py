@@ -263,10 +263,10 @@ def src_to_chunks_(
         label_tkns.extend(src.types_tks[l_id])
         types.append(src.types[l_id])
         types_info.append(src.types_info[l_id])
-        if prev_types is not None:
-            prev_types.append(not_none(src.prev_types)[l_id])
-        if inlined_spans is not None:
-            span0 = not_none(src.inlined_spans)[l_id]
+        if prev_types is not None and l_id in as_any(src.prev_types):
+            prev_types.append(as_any(src.prev_types)[l_id])
+        if inlined_spans is not None and l_id in as_any(src.inlined_spans):
+            span0 = as_any(src.inlined_spans)[l_id]
             inlined_spans.append(slice(span0.start - ctx_start, span0.stop - ctx_start))
     label_tkns.append(eos_id)
 
@@ -333,6 +333,12 @@ def chunk_srcs_per_file(
         file2src={f: s.origin_code for f, s in zip(files, srcs)},
         file2repo={f: (repos_root / s.repo).resolve() for f, s in zip(files, srcs)},
     )
+
+
+@dataclass
+class TypeCheckingEnv:
+    template_root: Path
+    pre_fdbks: dict[Path, str | list[MypyFeedback]]
 
 
 @dataclass
@@ -424,8 +430,11 @@ class SrcDataset:
         pretty_print_dict(self.stats_to_show())
 
     @contextmanager
-    def prepare_typecheck_projects(
-        self, src_list: Sequence[TokenizedSrc], cleanup=True
+    def setup_typechecking(
+        self,
+        src_list: Sequence[TokenizedSrc],
+        cleanup=True,
+        skip_pre_fdbks=False,
     ):
         """
         Context manager to setup the shared files for multi-processing type checking
@@ -459,14 +468,18 @@ class SrcDataset:
                     new_path = template_root / s.file
                     new_path.parent.mkdir(parents=True, exist_ok=True)
                     new_path.write_text(new_code)
-            yield template_root
+            if not skip_pre_fdbks:
+                pre_fdbks = self.compute_preexisting_fdbks(src_list, template_root)
+            else:
+                pre_fdbks = dict()
+            yield TypeCheckingEnv(template_root, pre_fdbks)
         finally:
             if cleanup:
                 shutil.rmtree(template_root.parent, ignore_errors=True)
 
     def compute_preexisting_fdbks(
         self, src_list: Sequence[TokenizedSrc], template_root
-    ) -> list[str | list[MypyFeedback]]:
+    ) -> dict[Path, str | list[MypyFeedback]]:
         """Compute the feedbacks caused by predicting all types as `Any`."""
 
         repo_set = {s.repo for s in src_list}
@@ -486,7 +499,7 @@ class SrcDataset:
             else:
                 return check_r.error_dict.get(abs_path, [])
 
-        return [get_fdbks(s) for s in src_list]
+        return {s.file: get_fdbks(s) for s in src_list}
 
     def type_check_each_file_in_project(
         self,
@@ -497,16 +510,15 @@ class SrcDataset:
         repos_root = self.repos_root
         src_list = [file2src[f.relative_to(repos_root)] for f, _ in file2preds]
 
-        with self.prepare_typecheck_projects(src_list) as template_root:
-            pre_fdbks = self.compute_preexisting_fdbks(src_list, template_root)
-            project_roots = [template_root / f.repo for f in src_list]
+        with self.setup_typechecking(src_list) as env:
+            project_roots = [env.template_root / f.repo for f in src_list]
 
             check_rs: list[SrcCheckResult] = pmap(
                 type_check_src_in_project,
                 src_list,
                 [p for _, p in file2preds],
                 project_roots,
-                pre_fdbks,
+                [env.pre_fdbks[s.file] for s in src_list],
                 desc="map type_check_src_in_project",
                 tqdm_args=tqdm_args,
             )
@@ -719,7 +731,9 @@ def _fix_src_paths_(dataset: SrcDataset) -> None:
     dataset.repos_root = dataset.repos_root / "downloaded"
 
 
-def code_to_check_from_preds(src: TokenizedSrc, preds: dict[int, str]):
+def code_to_check_from_preds(
+    src: TokenizedSrc, preds: dict[int, str] | dict[int, PythonType]
+):
     code = src.origin_code
     if not preds:
         return code
@@ -798,7 +812,7 @@ def type_check_src(
 
 def type_check_src_in_project(
     src: TokenizedSrc,
-    preds: dict[int, str],
+    preds: dict[int, str] | dict[int, PythonType],
     project_root: Path,
     preexisting: list[MypyFeedback] | str,
 ) -> SrcCheckResult:
@@ -815,7 +829,7 @@ def type_check_src_in_project(
     rel_path = src.file.relative_to(src.repo)
     file_path = cwd / rel_path
 
-    def from_preds(preds: dict[int, str]):
+    def from_preds(preds: dict[int, str] | dict[int, PythonType]):
         new_code = code_to_check_from_preds(src, preds)
         file_path.write_text(new_code)
         check_r = MypyChecker.check_project(cwd)

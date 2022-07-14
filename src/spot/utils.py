@@ -304,7 +304,7 @@ class TimeLogger:
     times: dict[str, list[float]] = field(default_factory=dict)
 
     @contextmanager
-    def log_time(self, name: str):
+    def timed(self, name: str):
         start = time.time()
         yield
         end = time.time()
@@ -331,6 +331,9 @@ class TimeLogger:
 
     def total_times(self) -> dict[str, float]:
         return {name: sum(ts) for name, ts in self.times.items()}
+
+    def clear(self):
+        self.times.clear()
 
 
 class TaskMonitor(ABC):
@@ -359,7 +362,7 @@ class TaskLoggingMonitor(TaskMonitor):
         print(f"[{self.monitor_name}] Starting task: '{task_name}'")
         try:
             start = time.time()
-            with self.timer.log_time(task_name):
+            with self.timer.timed(task_name):
                 yield
             end = time.time()
             print(
@@ -663,3 +666,10 @@ def get_unique_ids(xs: Sequence[T1]) -> list[int]:
             seen.add(x)
             ids.append(i)
     return ids
+
+
+def print_limited(s: str, max_lines: int = 50):
+    lines = s.split("\n")
+    if len(lines) > max_lines:
+        lines = lines[: max_lines - 1] + ["..."]
+    return print("\n".join(lines))

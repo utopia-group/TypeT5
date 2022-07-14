@@ -12,6 +12,7 @@ from spot.data import (
     SrcChunkInfo,
     SrcDataset,
     TokenizedSrc,
+    TypeCheckingEnv,
     chunk_from_src,
     code_to_check_from_preds,
     src_to_chunks_,
@@ -93,27 +94,25 @@ def incr_inference_with_feedback(
         ]
         return "\n".join([f"{types[i]}     ({tokens[i]})" for i in range(len(types))])
 
-    pre_fdbks = None  # will only be set when using SelectByCritic
-
     def infer_src(
         src: TokenizedSrc,
         src_id: int,
         executor: ProcessPoolExecutor,
-        template_root,
+        env: TypeCheckingEnv,
         prog: tqdm,
     ):
         device = wrapper.model.device
         num_return_sequences = beam_width
-        proj_root = template_root / src.repo
+        proj_root = env.template_root / src.repo
         assignment = dict[int, PythonType]()
         for lid in range(len(src.types_info)):
-            with t_logger.log_time("chunk_from_src"):
+            with t_logger.timed("chunk_from_src"):
                 chunk, info = chunk_from_src(src, src_id, lid, ctx_args)
                 batch = dict()
                 batch["input_ids"] = torch.tensor([chunk["input_ids"]], device=device)
                 batch["n_labels"] = [chunk["n_labels"]]
             # get the list of types return by beam search
-            with t_logger.log_time("predict_on_batch"):
+            with t_logger.timed("predict_on_batch"):
                 maybe_log(
                     src_id, lid, "input_ids", lambda: decode_tokens(chunk["input_ids"])
                 )
@@ -136,7 +135,7 @@ def incr_inference_with_feedback(
             # now try each of them and use the one that worked best
             if isinstance(selector, SelectByCounting):
                 # count the number of type errors
-                with t_logger.log_time("count_type_errors_in_project"):
+                with t_logger.timed("count_type_errors_in_project"):
                     check_rs = executor.map(
                         count_type_errors_in_project,
                         [[src]] * N,
@@ -156,8 +155,8 @@ def incr_inference_with_feedback(
                 best_i = int(np.argmax(is_correct))
             elif isinstance(selector, SelectByCritic):
                 # use the one with the highest critic score
-                with t_logger.log_time("type_check_src_in_project"):
-                    preexisting = cast(list, pre_fdbks)[src_id]
+                with t_logger.timed("type_check_src_in_project"):
+                    preexisting = env.pre_fdbks[src.file]
                     check_rs = executor.map(
                         type_check_src_in_project,
                         [src] * N,
@@ -166,7 +165,7 @@ def incr_inference_with_feedback(
                         [preexisting] * N,
                     )
                     check_rs = list(check_rs)
-                with t_logger.log_time("Running critic"):
+                with t_logger.timed("Running critic"):
                     critic_inputs_metas = executor.map(
                         to_critic_inputs,
                         [src] * N,
@@ -222,11 +221,10 @@ def incr_inference_with_feedback(
     t_logger = TimeLogger()
     n_workers = min(wrapper.args.max_workers, beam_width)
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        with src_data.prepare_typecheck_projects(srcs_to_check) as template_root:
-            if isinstance(selector, SelectByCritic):
-                pre_fdbks = src_data.compute_preexisting_fdbks(
-                    srcs_to_check, template_root
-                )
+        compute_pre_fdbks = isinstance(selector, SelectByCritic)
+        with src_data.setup_typechecking(
+            srcs_to_check, skip_pre_fdbks=not compute_pre_fdbks
+        ) as env:
             with tqdm(
                 total=sum(len(s.types_info) for s in srcs_to_check),
                 desc=f"incr_inference [{type(selector).__name__}]",
@@ -234,7 +232,7 @@ def incr_inference_with_feedback(
                 srcs = list[TokenizedSrc]()
                 predictions = list[list[PythonType]]()
                 for i, src in enumerate(srcs_to_check):
-                    src, preds = infer_src(src, i, executor, template_root, prog)
+                    src, preds = infer_src(src, i, executor, env, prog)
                     srcs.append(src)
                     predictions.append(preds)
 
@@ -292,14 +290,13 @@ def select_candidates_by_type_errors(
     file2src = src_data.file2src(resolve=False)
     srcs_to_check = src_data.all_srcs
 
-    with src_data.prepare_typecheck_projects(srcs_to_check) as template_root:
-
+    with src_data.setup_typechecking(srcs_to_check, skip_pre_fdbks=True) as env:
         to_check = dict[tuple[int, int], tuple[TokenizedSrc, dict[int, str], Path]]()
         for i in range(len(chunks.data)):
             info = chunks.chunks_info[i]
             file = chunks.files[info.src_ids[0]]
             src = file2src[file.relative_to(src_data.repos_root)]
-            proj_root = template_root / src.repo
+            proj_root = env.template_root / src.repo
             for j, candidates in enumerate(pred_candidates[i]):
                 preds_dict = {
                     l_id: str(pred) for l_id, pred in zip(info.label_ids, candidates)
@@ -386,16 +383,13 @@ def select_candidates_using_critic(
     file2src = src_data.file2src(resolve=False)
     srcs_to_check = src_data.all_srcs
 
-    with src_data.prepare_typecheck_projects(srcs_to_check) as template_root:
-        pre_fdbks = src_data.compute_preexisting_fdbks(srcs_to_check, template_root)
-        src2pre = {src.file: fdbk for src, fdbk in zip(srcs_to_check, pre_fdbks)}
-
+    with src_data.setup_typechecking(srcs_to_check) as env:
         to_check = dict[tuple[int, int], tuple[TokenizedSrc, dict[int, str], Path]]()
         for i in range(len(chunks.data)):
             info = chunks.chunks_info[i]
             file = chunks.files[info.src_ids[0]]
             src = file2src[file.relative_to(src_data.repos_root)]
-            proj_root = template_root / src.repo
+            proj_root = env.template_root / src.repo
             for j, candidates in enumerate(pred_candidates[i]):
                 preds_dict = {
                     l_id: str(pred) for l_id, pred in zip(info.label_ids, candidates)
@@ -414,7 +408,7 @@ def select_candidates_using_critic(
                 [x[0] for x in to_check_values],
                 [x[1] for x in to_check_values],
                 [x[2] for x in to_check_values],
-                [src2pre[x[0].file] for x in to_check_values],
+                [env.pre_fdbks[x[0].file] for x in to_check_values],
                 desc="map type_check_src_in_project",
                 tqdm_args=tqdm_args,
             )
@@ -531,14 +525,14 @@ def collect_type_errors_from_predictions(
     file2src = src_data.file2src(resolve=False)
     srcs_to_check = src_data.all_srcs
 
-    with src_data.prepare_typecheck_projects(srcs_to_check) as template_root:
+    with src_data.setup_typechecking(srcs_to_check) as env:
         to_check = dict[Path, dict[Path, dict[int, str]]]()
         for i in range(len(chunks_info)):
             info = chunks.chunks_info[i]
             file = chunks.files[info.src_ids[0]]
             src = file2src[file.relative_to(src_data.repos_root)]
             file = src.file
-            proj_root = template_root / src.repo
+            proj_root = env.template_root / src.repo
             if proj_root not in to_check:
                 to_check[proj_root] = dict()
             if file not in to_check[proj_root]:

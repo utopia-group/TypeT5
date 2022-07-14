@@ -153,13 +153,15 @@ def test_mypy_checking():
     temp_dir = proj_root() / "mypy_temp/test_dir"
     shutil.rmtree(temp_dir, ignore_errors=True)
 
-    with simple_dataset.prepare_typecheck_projects(
-        [src_to_check], cleanup=True
-    ) as temp_root:
+    with simple_dataset.setup_typechecking(
+        [src_to_check],
+        cleanup=True,
+        skip_pre_fdbks=True,
+    ) as env:
         result_2 = type_check_src_in_project(
             src_to_check,
             {0: "int"},
-            (temp_root / "code"),
+            (env.template_root / "code"),
             "Skip",
         )
         assert isinstance(result_2.feedbacks, list) and len(result_2.feedbacks) == 0

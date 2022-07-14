@@ -107,9 +107,10 @@ class TokenizedSrc:
             inlined_spans=inlined_spans,
         )
 
-    def print_code(self):
+    def print_code(self, max_lines: int = 50):
         "Print out the (decoded) token sequence"
-        return print(decode_tokens(self.tokenized_code))
+        code = decode_tokens(self.tokenized_code)
+        print_limited(code, max_lines)
 
     @staticmethod
     def inline_predictions(src: "TokenizedSrc", as_comment: bool):
@@ -204,7 +205,9 @@ def feedbacks_to_tokenized_src(
         current_code, preds_map, pos_to_msg, patch_predictions
     )
     code_segs = new_code.split(SpecialNames.TypeMask)
-    assert len(code_segs) == len(types) + 1, f"{len(code_segs)} != {len(types)} + 1"
+    assert (
+        len(code_segs) == len(types) + 1
+    ), f"{len(code_segs)} != {len(types)} + 1.\nNew Code:\n{new_code}"
 
     d = {
         "file": src.file,
