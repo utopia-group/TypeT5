@@ -108,7 +108,7 @@ def pmap(
         return outs
 
     chunksize = max(1, n // (10 * max_workers))
-    return process_map(
+    r = process_map(
         f,
         *f_args,
         chunksize=chunksize,
@@ -117,6 +117,8 @@ def pmap(
         tqdm_class=tqdm,
         **tqdm_args,
     )
+    assert isinstance(r, list)
+    return r
 
 
 class SpecialNames:

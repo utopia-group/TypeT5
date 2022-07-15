@@ -18,6 +18,7 @@ class TokenizedSrc:
     tokenized_code: list[int]  # with certain types masked out
     prev_types: dict[int, PythonType] | None = None  # previously predicted types
     inlined_spans: dict[int, slice] | None = None  # the spans of inlined previous types
+    feedbacks: list[MypyFeedback] | None = None
 
     def inline_single_prediction(
         self, label_id: int, ty: PythonType, as_comment: bool
@@ -55,6 +56,7 @@ class TokenizedSrc:
             tokenized_code=new_code,
             prev_types=None,  # don't need them for now
             inlined_spans=None,  # don't need them for now
+            feedbacks=self.feedbacks,
         )
 
     def inline_prev_predictions(self, as_comment: bool) -> "TokenizedSrc":
@@ -105,6 +107,7 @@ class TokenizedSrc:
             tokenized_code=tokenized_code,
             prev_types=prev_types,
             inlined_spans=inlined_spans,
+            feedbacks=self.feedbacks,
         )
 
     def print_code(self, max_lines: int = 50):
@@ -220,7 +223,9 @@ def feedbacks_to_tokenized_src(
         "prev_types": prev_types,
         "is_label": None,
     }
-    return dict_to_tokenized_src(d)
+    new_src = dict_to_tokenized_src(d)
+    new_src.feedbacks = feedbacks
+    return new_src
 
 
 def patch_code_with_extra(

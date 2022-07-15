@@ -67,6 +67,7 @@ class TrainingConfig(NamedTuple):
     train_max_labels: int = 64
     dec_max_labels: int = 16
     use_small_model: bool = False
+    grad_accum_labels = 32
     modifications: str = ""
 
     def modified_params(self) -> dict[str, Any]:

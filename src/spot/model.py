@@ -25,7 +25,7 @@ from spot.utils import *
 class DecodingArgs:
     ctx_args: CtxArgs
     sampling_max_tokens: int
-    max_workers: int
+    max_workers: int = DefaultWorkers
     max_tokens_per_type: int = 10
     do_sample: bool = False
     top_p: float = 0.9
