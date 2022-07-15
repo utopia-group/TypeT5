@@ -170,21 +170,20 @@ class ModelWrapper:
         device = model.device
         # we use this dict to keep the order of the chunks since it may be permuted by dynamic_dataloader
         pred_types = dict[int, list]()
-        tqdm_bar = tqdm(total=len(dataset), desc="predict", **tqdm_args)
-        for batch in loader:
-            n_chunks = batch["input_ids"].shape[0]
-            batch["input_ids"] = batch["input_ids"].to(device)
-            preds, _ = self.predict_on_batch(batch, num_return_sequences)
-            for i, c_id in enumerate(batch["chunk_id"]):
-                c_id = int(c_id)
-                if num_return_sequences is None:
-                    pred_types[c_id] = preds[i]
-                else:
-                    pred_types[c_id] = preds[
-                        i * num_return_sequences : (i + 1) * num_return_sequences
-                    ]
-            tqdm_bar.update(n_chunks)
-        tqdm_bar.close()
+        with tqdm(total=len(dataset), desc="predict", **tqdm_args) as tqdm_bar:
+            for batch in loader:
+                n_chunks = batch["input_ids"].shape[0]
+                batch["input_ids"] = batch["input_ids"].to(device)
+                preds, _ = self.predict_on_batch(batch, num_return_sequences)
+                for i, c_id in enumerate(batch["chunk_id"]):
+                    c_id = int(c_id)
+                    if num_return_sequences is None:
+                        pred_types[c_id] = preds[i]
+                    else:
+                        pred_types[c_id] = preds[
+                            i * num_return_sequences : (i + 1) * num_return_sequences
+                        ]
+                tqdm_bar.update(n_chunks)
         return [pred_types[int(c_id)] for c_id in dataset["chunk_id"]]
 
     def save_pretrained(self, path: Path):

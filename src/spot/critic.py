@@ -95,10 +95,11 @@ class CriticModel(nn.Module):
         probability for each prediction span."""
         device = self.device
         chunk2preds = dict[int, list[float]]()
-        tqdm_bar = tqdm(total=n_examples, desc="classify_data", **tqdm_args)
         self.eval()
 
-        with torch.no_grad():
+        with torch.no_grad(), tqdm(
+            total=n_examples, desc="classify_data", **tqdm_args
+        ) as pbar:
             for batch in dataloader:
                 batch_size = batch["input_ids"].shape[0]
                 with torch.autocast("cuda"):
@@ -116,8 +117,7 @@ class CriticModel(nn.Module):
                     chunk2preds[c_id] = pred_vec[pred_counter:pred_counter_next]
                     pred_counter = pred_counter_next
 
-                tqdm_bar.update(batch_size)
-        tqdm_bar.close()
+                pbar.update(batch_size)
 
         return chunk2preds
 

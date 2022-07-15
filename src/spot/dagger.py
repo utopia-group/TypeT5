@@ -18,11 +18,11 @@ from transformers.modeling_outputs import Seq2SeqLMOutput
 import torch
 import copy
 import random
-import wandb
 
 
 class DAggerArgs(NamedTuple):
     grad_accum_steps: int = 32
+    concurrency: int = 12
 
 
 @dataclass
@@ -145,7 +145,6 @@ class DAggerModel:
         src_datasets: dict[str, SrcDataset],
         dagger_args: DAggerArgs,
         log_fn: Callable[[int, dict], None],
-        concurrency: int = 10,
     ):
         mr = self.wrapper
 
@@ -167,7 +166,7 @@ class DAggerModel:
 
             with tqdm(
                 total=sum(len(s.types) for s in train_srcs),
-                desc="Training",
+                desc="train_on_data",
                 smoothing=0.0,
             ) as pbar, ThreadPoolExecutor(1) as model_executor, ProcessPoolExecutor(
                 DefaultWorkers
@@ -195,7 +194,7 @@ class DAggerModel:
                         train_acc.update(int(is_correct))
                     for l in r.loss_seq:
                         train_loss.update(l)
-                    step = train_acc.count
+                    step = train_loss.count
                     log_fn(
                         step,
                         {
@@ -204,7 +203,9 @@ class DAggerModel:
                         },
                     )
 
-                await throttled_async_run(train_step, train_srcs, concurrency)
+                await throttled_async_run(
+                    train_step, train_srcs, dagger_args.concurrency
+                )
 
     async def eval_on_data(
         self,
@@ -215,7 +216,7 @@ class DAggerModel:
 
         with dataset.setup_typechecking(dataset.all_srcs) as env, tqdm(
             total=sum(len(s.types) for s in dataset.all_srcs),
-            desc="Evaluating",
+            desc="eval_on_data",
             smoothing=0.0,
         ) as pbar, ThreadPoolExecutor(1) as model_executor, ProcessPoolExecutor(
             DefaultWorkers

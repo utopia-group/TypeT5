@@ -127,14 +127,13 @@ def export_preds_on_code(
         write_file(export_to / "chunks" / f"chunk{i}.html", page.value)
 
     chunk_accs = list[CountedAcc]()
-    tq = tqdm(total=len(preds), desc="Computing accuracies")
-    for info, ps in zip(dataset.chunks_info, preds):
-        n_correct = sum(
-            normalize_type(p) == normalize_type(t) for p, t in zip(ps, info.types)
-        )
-        chunk_accs.append(CountedAcc(n_correct, len(ps)))
-        tq.update()
-    tq.close()
+    with tqdm(total=len(preds), desc="Computing accuracies") as pbar:
+        for info, ps in zip(dataset.chunks_info, preds):
+            n_correct = sum(
+                normalize_type(p) == normalize_type(t) for p, t in zip(ps, info.types)
+            )
+            chunk_accs.append(CountedAcc(n_correct, len(ps)))
+            pbar.update()
 
     chunk_sorted = sorted(range(len(chunk_accs)), key=lambda i: chunk_accs[i].acc)
     links = "\n".join(
