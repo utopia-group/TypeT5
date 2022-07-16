@@ -347,6 +347,9 @@ class SrcDataset:
     all_srcs: list[TokenizedSrc]
     extra_stats: dict = field(default_factory=dict)
 
+    def __len__(self):
+        return len(self.all_srcs)
+
     def inline_predictions(self, as_comment: bool, tqdm_args={}) -> "SrcDataset":
         new_srcs = pmap(
             TokenizedSrc.inline_predictions,

@@ -60,6 +60,7 @@ def visualize_chunk(
     input_ids: list[int],
     pred_types: list[PythonType],
     label_types: list[PythonType],
+    contain_extra_id: bool = True,
 ):
     def id_replace(id: int) -> str:
         p = pred_types[id]
@@ -73,7 +74,10 @@ def visualize_chunk(
 
     code_dec = DefaultTokenizer.decode(input_ids, skip_special_tokens=False)
     code = colorize_code_html(html.escape(code_dec))
-    code = code_inline_extra_ids(code, id_replace)
+    if contain_extra_id:
+        code = code_inline_extra_ids(code, id_replace)
+    else:
+        code = code_inline_mask_ids(code, id_replace)
     return widgets.HTML(
         "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30);'>"
         + code
@@ -110,27 +114,52 @@ def code_inline_extra_ids(code: str, id2replace: Callable[[int], str]):
     return re.sub(r"(&lt;extra_id_\d+&gt;)", replace, code)
 
 
+def code_inline_mask_ids(code: str, id2replace: Callable[[int], str]):
+    mask_i = 0
+
+    def replace(m: re.Match[str]):
+        nonlocal mask_i
+        s = id2replace(mask_i)
+        mask_i += 1
+        return s
+
+    return re.sub(r"(&lt;mask&gt;)", replace, code)
+
+
 def export_preds_on_code(
-    dataset: ChunkedDataset,
+    dataset: SrcDataset | ChunkedDataset,
     preds: list[list[Any]],
-    preds_extra: dict[str, list[list[Any]]],
     export_to: Path,
 ):
     if export_to.exists():
         shutil.rmtree(export_to)
     (export_to / "chunks").mkdir(parents=True)
-    for i in tqdm(range(len(dataset.data)), desc="Exporting"):
-        page = visualize_chunk(
-            dataset.data[i]["input_ids"], preds[i], dataset.chunks_info[i].types
+    for i in tqdm(range(len(dataset)), desc="Exporting"):
+        page = (
+            visualize_chunk(
+                dataset.data[i]["input_ids"], preds[i], dataset.chunks_info[i].types
+            )
+            if isinstance(dataset, ChunkedDataset)
+            else visualize_chunk(
+                dataset.all_srcs[i].tokenized_code,
+                preds[i],
+                dataset.all_srcs[i].types,
+                contain_extra_id=False,
+            )
         )
         assert isinstance(page.value, str)
         write_file(export_to / "chunks" / f"chunk{i}.html", page.value)
 
     chunk_accs = list[CountedAcc]()
     with tqdm(total=len(preds), desc="Computing accuracies") as pbar:
-        for info, ps in zip(dataset.chunks_info, preds):
+        labels_list = (
+            [info.types for info in dataset.chunks_info]
+            if isinstance(dataset, ChunkedDataset)
+            else [s.types for s in dataset.all_srcs]
+        )
+        for labels, ps in zip(labels_list, preds):
             n_correct = sum(
-                normalize_type(p) == normalize_type(t) for p, t in zip(ps, info.types)
+                normalize_type(p) == normalize_type(t) for p, t in zip(ps, labels)
             )
             chunk_accs.append(CountedAcc(n_correct, len(ps)))
             pbar.update()
