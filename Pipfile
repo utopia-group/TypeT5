@@ -22,6 +22,7 @@ matplotlib = "*"
 pytorch-lightning = "*"
 colored = "*"
 ipykernel = "*"
+termcolor = "*"
 
 [dev-packages]
 pytest = "*"

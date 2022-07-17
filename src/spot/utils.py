@@ -675,3 +675,16 @@ def print_limited(s: str, max_lines: int = 50):
     if len(lines) > max_lines:
         lines = lines[: max_lines - 1] + ["..."]
     return print("\n".join(lines))
+
+
+@dataclass
+class RunningAvg:
+    value: float = 0.0
+    count: int = 0
+
+    def update(self, value: float, count: int = 1) -> None:
+        self.value = (self.value * self.count + value * count) / (self.count + count)
+        self.count += count
+
+    def __repr__(self) -> str:
+        return f"(value={self.value:.4f}, count={self.count})"

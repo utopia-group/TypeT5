@@ -14,13 +14,13 @@ datadir = get_data_dir()
 # experiment configurations
 
 from spot.data import (
-    SrcDataset,
     get_dataset_name,
     load_src_datasets,
     TypeCheckSettings,
 )
 from spot.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper
 from spot.train import TrainingConfig, TypeCheckArgs
+from termcolor import colored
 
 config = TrainingConfig(
     quicktest=False,
@@ -32,16 +32,12 @@ config = TrainingConfig(
 gpu_id = 0
 TypeCheckSettings.temp_path = f"DAgger-{gpu_id}"
 
-print(f"quicktest={config.quicktest}")
+if config.quicktest:
+    print(colored("quicktest=True", "red"))
 
 project_name = "test-SPOT" if config.quicktest else "SPOT"
 train_ctx_args = config.train_ctx_args()
 tc_args = TypeCheckArgs(check_in_isolation=config.check_in_isolation)
-
-dec_args = DecodingArgs(
-    sampling_max_tokens=8 * config.ctx_size,
-    ctx_args=config.dec_ctx_args(),
-)
 
 datasets_name = get_dataset_name(
     drop_comments=config.drop_comments,
@@ -65,6 +61,13 @@ from spot.model import ModelWrapper
 from spot.dagger import DAggerModel
 import torch
 
+dec_args = DecodingArgs(
+    sampling_max_tokens=8 * config.ctx_size,
+    ctx_args=config.dec_ctx_args(),
+    do_sample=True,  # use necleus sampling during training
+    top_p=0.9,
+)
+
 model = load_model_spot("Salesforce/codet5-base")
 wrapper = ModelWrapper(model, DefaultTokenizer, dec_args)
 device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
@@ -74,10 +77,10 @@ dmodel = DAggerModel(wrapper)
 
 # %%
 # pre-train evaluation
-from spot.utils import pretty_print_dict
+# from spot.utils import pretty_print_dict
 
-eval_r = asyncio.run(dmodel.eval_on_data(src_datasets["test"][0:50]))
-pretty_print_dict(eval_r.accuracies)
+# eval_r = asyncio.run(dmodel.eval_on_data(src_datasets["test"][0:50]))
+# pretty_print_dict(eval_r.accuracies)
 
 
 # %%
@@ -94,17 +97,21 @@ with run_long_task("DAgger training"):
         dir=str(datadir),
     )
 
-    asyncio.run(
-        dmodel.train_on_data(
-            src_datasets,
-            DAggerArgs(config.grad_accum_labels),
-            log_fn=lambda t, x: wandb.log(x, step=t),
+    finished = False
+    try:
+        asyncio.run(
+            dmodel.train_on_data(
+                src_datasets,
+                DAggerArgs(config.grad_accum_labels),
+                log_fn=lambda t, x: wandb.log({"train/step": t, **x}),
+            )
         )
-    )
-
-    save_path = datadir / f"checkpoints/saved/{model_name}"
-    print(f"Saving trained model to: {save_path}")
-    wrapper.save_pretrained(save_path)
+        finished = True
+    finally:
+        save_tpye = "saved" if finished else "saved-emergent"
+        save_path = datadir / f"checkpoints/{save_tpye}/{model_name}"
+        print(colored(f"Saving trained model to: {save_path}", "blue"))
+        wrapper.save_pretrained(save_path)
 
 # %%
 # post-train full evaluation
