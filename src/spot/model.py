@@ -112,7 +112,7 @@ class ModelWrapper:
             ), "num_beam_groups requires diversity_penalty > 0"
 
         output_ids = model.generate(
-            inputs=batch["input_ids"],
+            inputs=batch["input_ids"].to(model.device),
             do_sample=self.args.do_sample,
             top_p=self.args.top_p,
             num_beams=self.args.num_beams,

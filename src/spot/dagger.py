@@ -23,9 +23,11 @@ import threading
 
 
 class DAggerArgs(NamedTuple):
+    save_dir: Path
     grad_accum_steps: int = 32
     concurrency: int = 12
     replay_buffer_size: int = concurrency * 100
+    saves_per_epoch: int = 5
 
 
 @dataclass
@@ -34,15 +36,17 @@ class DAggerTrainingState:
     optimizer: torch.optim.Optimizer
     prog_bar: tqdm
     log_fn: Callable[[int, dict], None]
+    save_every: int
+    avg_loss: RunningAvg
     replay_buffer: Deque[dict] = field(default_factory=Deque)
-    avg_loss: RunningAvg = field(default_factory=RunningAvg)
     grad_counter: int = 0
-    log_lock: threading.Lock = field(default_factory=threading.Lock)
+    save_counter: int = 0
 
 
 @dataclass
 class DAggerRunResult:
     type_assignment: dict[int, PythonType] = field(default_factory=dict)
+    batch_seq: list[dict] = field(default_factory=list)
     src_seq: list[TokenizedSrc] = field(default_factory=list)
     used_expert: list[bool] = field(default_factory=list)
 
@@ -72,7 +76,6 @@ class DAggerModel:
 
         mr = self.wrapper
         ctx_args = mr.args.ctx_args
-        device = mr.model.device
         t_logger = self.t_logger
         eloop = asyncio.get_event_loop()
 
@@ -87,8 +90,7 @@ class DAggerModel:
             batch = await eloop.run_in_executor(
                 cpu_executor, src_to_batch, new_src, t, ctx_args
             )
-            batch["input_ids"] = batch["input_ids"].to(device)
-            batch["labels"] = batch["labels"].to(device)
+            result.batch_seq.append(batch)
             if use_expert:
                 assignment[t] = label
             else:
@@ -134,30 +136,64 @@ class DAggerModel:
         train_set = src_datasets["train"]
         dev_set = src_datasets["valid"]
         all_srcs = train_set.all_srcs + dev_set.all_srcs
+        train_srcs = copy.copy(train_set.all_srcs)
+        random.shuffle(train_srcs)
+        n_labels = sum(len(s.types) for s in train_srcs)
         mix_set = SrcDataset(train_set.repos_root, all_srcs)
+        log_lock = threading.Lock()
+        optimizer = _configure_optimizers(mr.model)[0][0]
 
-        train_acc = RunningAvg()
+        def log_fn_locked(t, d):
+            with log_lock:
+                log_fn(t, d)
 
-        with mix_set.setup_typechecking(all_srcs) as env:
-            # training loop
-            optimizer = _configure_optimizers(mr.model)[0][0]
+        train_acc = RunningAvg(alpha=2 / (1 + n_labels))
 
-            train_srcs = copy.copy(train_set.all_srcs)
-            random.shuffle(train_srcs)
+        with mix_set.setup_typechecking(all_srcs) as env, tqdm(
+            total=(CostModel.TRAIN + CostModel.SAMPLE) * n_labels,
+            desc="train_on_data",
+            smoothing=0.1,
+        ) as pbar, ThreadPoolExecutor(1) as model_executor, ProcessPoolExecutor(
+            DefaultWorkers
+        ) as cpu_executor:
+            save_every = n_labels // dagger_args.saves_per_epoch
+            avg_loss = RunningAvg(alpha=2 / (1 + n_labels))
+            state = DAggerTrainingState(
+                dagger_args, optimizer, pbar, log_fn_locked, save_every, avg_loss
+            )
+            labels_counter = 0
 
-            n_labels = sum(len(s.types) for s in train_srcs)
-            with tqdm(
-                total=(CostModel.TRAIN + CostModel.SAMPLE) * n_labels,
-                desc="train_on_data",
-                smoothing=0.1,
-            ) as pbar, ThreadPoolExecutor(1) as model_executor, ProcessPoolExecutor(
-                DefaultWorkers
-            ) as cpu_executor:
+            async def batch_callback(batch: dict):
+                state.prog_bar.update(CostModel.SAMPLE)
 
-                state = DAggerTrainingState(dagger_args, optimizer, pbar, log_fn)
-                labels_counter = 0
+            async def train_step(src):
+                # progress = pbar.n / not_none(pbar.total)
+                # assert 0 <= progress <= 1.0
+                r = await self.rollout_on_src(
+                    src,
+                    env,
+                    model_executor,
+                    cpu_executor,
+                    batch_callback=batch_callback,
+                    # expert_rate=1 - progress,
+                )
+                preds = r.type_assignment
+                assert_eq(len(preds), len(src.types))
+                for i in range(len(src.types)):
+                    if r.used_expert[i]:
+                        continue
+                    norm_pred = normalize_type(preds[i])
+                    norm_label = normalize_type(src.types[i])
+                    train_acc.update(int(norm_pred == norm_label))
+                nonlocal labels_counter
+                labels_counter += len(src.types)
+                state.log_fn(
+                    labels_counter,
+                    {"train/acc": train_acc.value},
+                )
 
-                async def batch_callback(batch: dict):
+                # train on the batches
+                for batch in r.batch_seq:
                     await eloop.run_in_executor(
                         model_executor,
                         self._process_batch,
@@ -165,42 +201,13 @@ class DAggerModel:
                         state,
                     )
 
-                async def train_step(src):
-                    # progress = pbar.n / not_none(pbar.total)
-                    # assert 0 <= progress <= 1.0
-                    r = await self.rollout_on_src(
-                        src,
-                        env,
-                        model_executor,
-                        cpu_executor,
-                        batch_callback=batch_callback,
-                        # expert_rate=1 - progress,
-                    )
-                    preds = r.type_assignment
-                    assert_eq(len(preds), len(src.types))
-                    for i in range(len(src.types)):
-                        if r.used_expert[i]:
-                            continue
-                        norm_pred = normalize_type(preds[i])
-                        norm_label = normalize_type(src.types[i])
-                        train_acc.update(int(norm_pred == norm_label))
-                    nonlocal labels_counter
-                    labels_counter += len(src.types)
-                    with state.log_lock:
-                        log_fn(
-                            labels_counter,
-                            {"train/acc": train_acc.value},
-                        )
-
-                await throttled_async_run(
-                    train_step, train_srcs, dagger_args.concurrency
-                )
-                # train on the remaining batches
-                await eloop.run_in_executor(
-                    model_executor,
-                    self._empty_buffer,
-                    state,
-                )
+            await throttled_async_run(train_step, train_srcs, dagger_args.concurrency)
+            # train on the remaining batches
+            await eloop.run_in_executor(
+                model_executor,
+                self._empty_buffer,
+                state,
+            )
 
     async def eval_on_data(
         self,
@@ -243,8 +250,6 @@ class DAggerModel:
         by comsuming the buffer.
         Should be called from the model thread to avoid race conditoin.
         """
-
-        state.prog_bar.update(CostModel.SAMPLE)
         buffer_size = state.args.replay_buffer_size
         state.replay_buffer.appendleft(batch)
         if len(state.replay_buffer) > buffer_size:
@@ -271,11 +276,13 @@ class DAggerModel:
         t_logger = self.t_logger
         mr = self.wrapper
         accum_steps = state.args.grad_accum_steps
+        device = mr.model.device
 
         with t_logger.timed("compute gradients"):
             with torch.autocast("cuda"):
                 outputs = mr.model.forward(
-                    input_ids=batch["input_ids"], labels=batch["labels"]
+                    input_ids=batch["input_ids"].to(device),
+                    labels=batch["labels"].to(device),
                 )
             assert isinstance(outputs, Seq2SeqLMOutput)
             loss = not_none(outputs.loss)
@@ -292,16 +299,22 @@ class DAggerModel:
             torch.nn.utils.clip_grad_norm_(self.wrapper.model.parameters(), 1.0)
             state.optimizer.step()
             self.wrapper.model.zero_grad()
-            state.grad_counter = 0
 
-        with state.log_lock:
-            state.log_fn(
-                state.avg_loss.count,
-                {
-                    "train/loss": state.avg_loss.value,
-                    "train/replay_buffer": len(state.replay_buffer),
-                },
-            )
+        step = state.avg_loss.count
+        state.log_fn(
+            step,
+            {
+                "train/loss": state.avg_loss.value,
+                "train/replay_buffer": len(state.replay_buffer),
+            },
+        )
+
+        state.save_counter += state.grad_counter
+        if state.save_counter >= state.save_every:
+            self.wrapper.save_pretrained(state.args.save_dir / f"step={step}")
+            state.save_counter -= state.save_every
+
+        state.grad_counter = 0
 
 
 def src_to_batch(src: TokenizedSrc, t: int, ctx_args: CtxArgs):

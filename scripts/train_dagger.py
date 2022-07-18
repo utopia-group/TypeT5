@@ -4,7 +4,7 @@ import os
 import asyncio
 from typing import *
 
-from spot.utils import proj_root, get_data_dir
+from spot.utils import not_none, proj_root, get_data_dir
 
 os.chdir(proj_root())
 
@@ -25,9 +25,9 @@ from termcolor import colored
 config = TrainingConfig(
     quicktest=False,
     all_labels=True,
-    ctx_size=2048,
-    left_margin=1024,
-    right_margin=512,
+    ctx_size=4096,
+    left_margin=2048,
+    right_margin=2000,
 )
 gpu_id = 0
 TypeCheckSettings.temp_path = f"DAgger-{gpu_id}"
@@ -88,6 +88,9 @@ dmodel = DAggerModel(wrapper)
 from spot.dagger import DAggerArgs
 from spot.utils import run_long_task
 import wandb
+import shutil
+
+ckpt_dir = datadir / f"checkpoints/running/{model_name}"
 
 with run_long_task("DAgger training"):
     wandb.init(
@@ -97,12 +100,18 @@ with run_long_task("DAgger training"):
         dir=str(datadir),
     )
 
+    dargs = DAggerArgs(
+        ckpt_dir,
+        grad_accum_steps=config.grad_accum_labels,
+        replay_buffer_size=24,
+    )
+
     finished = False
     try:
         asyncio.run(
             dmodel.train_on_data(
                 src_datasets,
-                DAggerArgs(config.grad_accum_labels),
+                dargs,
                 log_fn=lambda t, x: wandb.log({"train/step": t, **x}),
             )
         )
@@ -111,15 +120,19 @@ with run_long_task("DAgger training"):
         save_tpye = "saved" if finished else "saved-emergent"
         save_path = datadir / f"checkpoints/{save_tpye}/{model_name}"
         print(colored(f"Saving trained model to: {save_path}", "blue"))
+        shutil.rmtree(save_path, ignore_errors=True)
         wrapper.save_pretrained(save_path)
 
 # %%
 # post-train full evaluation
-from spot.utils import pretty_print_dict, pretty_show_dict
+from spot.utils import pretty_print_dict, pretty_show_dict, PickleCache
 from spot.visualization import string_to_html
 
+eval_cache = PickleCache(save_path / "eval_cache")  # type: ignore
 
-eval_r = asyncio.run(dmodel.eval_on_data(src_datasets["test"]))
+eval_r = eval_cache.cached(
+    "eval_test", lambda: asyncio.run(dmodel.eval_on_data(src_datasets["test"]))
+)
 pretty_print_dict(eval_r.accuracies)
 
 
@@ -128,3 +141,27 @@ def wandb_string(s: str):
 
 
 wandb.log({"test/accuracies": wandb_string(pretty_show_dict(eval_r.accuracies))})
+
+# %%
+# compute valid set performance
+import re
+from spot.utils import not_none
+
+validset = src_datasets["valid"][0:-1:5]
+
+with run_long_task("DAgger evaluating (valid set)"):
+    for model_path in ckpt_dir.glob("step=*"):
+        print(colored(f"Evaluating model checkpoint: {model_path}", "blue"))
+        m = not_none(re.match("step=(.+)", model_path.name)).groups()[0]
+        step = int(m)
+        wrapper = ModelWrapper.from_pretrained(model_path)
+        device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
+        wrapper.to(device)
+        dmodel = DAggerModel(wrapper)
+        eval_r = asyncio.run(dmodel.eval_on_data(validset))
+        wandb.log(
+            {
+                "valid/full_acc": eval_r.accuracies["full_acc"].acc,
+                "train/step": step,
+            }
+        )

@@ -565,7 +565,7 @@ class CountedAcc(NamedTuple):
     n_total: int
 
     @property
-    def acc(self):
+    def acc(self) -> float:
         return safe_div(self.n_correct, self.n_total)
 
     def __str__(self):
@@ -679,11 +679,23 @@ def print_limited(s: str, max_lines: int = 50):
 
 @dataclass
 class RunningAvg:
+    """
+    When `alpha > 0`, applies exponential moving average, otherwise applies simple moving average.
+    """
+
+    alpha: float
     value: float = 0.0
     count: int = 0
 
     def update(self, value: float, count: int = 1) -> None:
-        self.value = (self.value * self.count + value * count) / (self.count + count)
+        if self.count == 0:
+            self.value = value
+        elif self.alpha > 0:
+            self.value = (1 - self.alpha) * self.value + self.alpha * value
+        else:
+            self.value = (self.value * self.count + value * count) / (
+                self.count + count
+            )
         self.count += count
 
     def __repr__(self) -> str:
