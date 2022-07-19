@@ -678,7 +678,7 @@ def print_limited(s: str, max_lines: int = 50):
 
 
 @dataclass
-class RunningAvg:
+class MovingAvg:
     """
     When `alpha > 0`, applies exponential moving average, otherwise applies simple moving average.
     """
@@ -687,16 +687,14 @@ class RunningAvg:
     value: float = 0.0
     count: int = 0
 
-    def update(self, value: float, count: int = 1) -> None:
+    def update(self, value: float) -> None:
         if self.count == 0:
             self.value = value
         elif self.alpha > 0:
             self.value = (1 - self.alpha) * self.value + self.alpha * value
         else:
-            self.value = (self.value * self.count + value * count) / (
-                self.count + count
-            )
-        self.count += count
+            self.value = (self.value * self.count + value) / (self.count + 1)
+        self.count += 1
 
     def __repr__(self) -> str:
         return f"(value={self.value:.4f}, count={self.count})"

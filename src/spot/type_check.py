@@ -298,7 +298,7 @@ class MypyChecker:
             mypy_path = proj_root() / ".venv/bin/mypy"
         if cwd is None:
             proc = multiprocessing.current_process()
-            cwd = proj_root() / "mypy_temp" / proc.name
+            cwd = proj_root() / "../mypy_temp" / proc.name
         cwd.mkdir(parents=True, exist_ok=True)
 
         try:

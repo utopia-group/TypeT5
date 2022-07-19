@@ -17,7 +17,6 @@ from transformers.modeling_outputs import Seq2SeqLMOutput
 from collections import deque as Deque
 
 import torch
-import copy
 import random
 import threading
 
@@ -28,6 +27,7 @@ class DAggerArgs(NamedTuple):
     concurrency: int = 12
     replay_buffer_size: int = concurrency * 100
     saves_per_epoch: int = 5
+    rollout_length: int = 100
 
 
 @dataclass
@@ -37,7 +37,7 @@ class DAggerTrainingState:
     prog_bar: tqdm
     log_fn: Callable[[int, dict], None]
     save_every: int
-    avg_loss: RunningAvg
+    avg_loss: MovingAvg
     replay_buffer: Deque[dict] = field(default_factory=Deque)
     grad_counter: int = 0
     save_counter: int = 0
@@ -48,7 +48,7 @@ class DAggerRunResult:
     type_assignment: dict[int, PythonType] = field(default_factory=dict)
     batch_seq: list[dict] = field(default_factory=list)
     src_seq: list[TokenizedSrc] = field(default_factory=list)
-    used_expert: list[bool] = field(default_factory=list)
+    used_expert: dict[int, bool] = field(default_factory=dict)
 
 
 class CostModel:
@@ -64,6 +64,7 @@ class DAggerModel:
     async def rollout_on_src(
         self,
         src: TokenizedSrc,
+        labels: Sequence[int],
         typecheck_env: TypeCheckingEnv,
         model_executor: ThreadPoolExecutor,
         cpu_executor: ProcessPoolExecutor,
@@ -83,16 +84,16 @@ class DAggerModel:
         result = DAggerRunResult()
         assignment = result.type_assignment
 
-        for t, label in enumerate(src.types):
+        for t in labels:
             use_expert = random.random() < expert_rate
-            result.used_expert.append(use_expert)
+            result.used_expert[t] = use_expert
 
             batch = await eloop.run_in_executor(
                 cpu_executor, src_to_batch, new_src, t, ctx_args
             )
             result.batch_seq.append(batch)
             if use_expert:
-                assignment[t] = label
+                assignment[t] = src.types[t]
             else:
                 with t_logger.timed("predict next type"):
                     preds, _ = await eloop.run_in_executor(
@@ -127,37 +128,35 @@ class DAggerModel:
 
     async def train_on_data(
         self,
-        src_datasets: dict[str, SrcDataset],
+        train_set: SrcDataset,
         dagger_args: DAggerArgs,
         log_fn: Callable[[int, dict], None],
     ):
         eloop = asyncio.get_event_loop()
         mr = self.wrapper
-        train_set = src_datasets["train"]
-        dev_set = src_datasets["valid"]
-        all_srcs = train_set.all_srcs + dev_set.all_srcs
-        train_srcs = copy.copy(train_set.all_srcs)
-        random.shuffle(train_srcs)
-        n_labels = sum(len(s.types) for s in train_srcs)
-        mix_set = SrcDataset(train_set.repos_root, all_srcs)
-        log_lock = threading.Lock()
         optimizer = _configure_optimizers(mr.model)[0][0]
+        n_labels = sum(len(s.types) for s in train_set.all_srcs)
+        src_range_list = _to_src_range_list(
+            train_set.all_srcs, dagger_args.rollout_length
+        )
+        random.shuffle(src_range_list)
+        alpha = min(1.0, 100 / (1 + n_labels))
+        avg_acc = MovingAvg(alpha=alpha)
+        avg_loss = MovingAvg(alpha=alpha)
+        log_lock = threading.Lock()
 
         def log_fn_locked(t, d):
             with log_lock:
                 log_fn(t, d)
 
-        train_acc = RunningAvg(alpha=2 / (1 + n_labels))
-
-        with mix_set.setup_typechecking(all_srcs) as env, tqdm(
+        with train_set.setup_typechecking(train_set.all_srcs) as env, tqdm(
             total=(CostModel.TRAIN + CostModel.SAMPLE) * n_labels,
             desc="train_on_data",
-            smoothing=0.1,
+            smoothing=0.01,
         ) as pbar, ThreadPoolExecutor(1) as model_executor, ProcessPoolExecutor(
             DefaultWorkers
         ) as cpu_executor:
             save_every = n_labels // dagger_args.saves_per_epoch
-            avg_loss = RunningAvg(alpha=2 / (1 + n_labels))
             state = DAggerTrainingState(
                 dagger_args, optimizer, pbar, log_fn_locked, save_every, avg_loss
             )
@@ -166,11 +165,13 @@ class DAggerModel:
             async def batch_callback(batch: dict):
                 state.prog_bar.update(CostModel.SAMPLE)
 
-            async def train_step(src):
+            async def train_step(src_labels: tuple[TokenizedSrc, Sequence[int]]):
+                src, labels = src_labels
                 # progress = pbar.n / not_none(pbar.total)
                 # assert 0 <= progress <= 1.0
                 r = await self.rollout_on_src(
                     src,
+                    labels,
                     env,
                     model_executor,
                     cpu_executor,
@@ -178,18 +179,18 @@ class DAggerModel:
                     # expert_rate=1 - progress,
                 )
                 preds = r.type_assignment
-                assert_eq(len(preds), len(src.types))
-                for i in range(len(src.types)):
-                    if r.used_expert[i]:
+                assert_eq(len(preds), len(labels))
+                for t in labels:
+                    if r.used_expert[t]:
                         continue
-                    norm_pred = normalize_type(preds[i])
-                    norm_label = normalize_type(src.types[i])
-                    train_acc.update(int(norm_pred == norm_label))
+                    norm_pred = normalize_type(preds[t])
+                    norm_label = normalize_type(src.types[t])
+                    avg_acc.update(int(norm_pred == norm_label))
                 nonlocal labels_counter
-                labels_counter += len(src.types)
+                labels_counter += len(labels)
                 state.log_fn(
                     labels_counter,
-                    {"train/acc": train_acc.value},
+                    {"train/acc": avg_acc.value},
                 )
 
                 # train on the batches
@@ -201,7 +202,9 @@ class DAggerModel:
                         state,
                     )
 
-            await throttled_async_run(train_step, train_srcs, dagger_args.concurrency)
+            await throttled_async_run(
+                train_step, src_range_list, dagger_args.concurrency
+            )
             # train on the remaining batches
             await eloop.run_in_executor(
                 model_executor,
@@ -213,13 +216,14 @@ class DAggerModel:
         self,
         dataset: SrcDataset,
         concurrency: int = DefaultWorkers,
+        rollout_length: int = 100,
     ):
         result = DAggerEvalResult([], [])
 
         with dataset.setup_typechecking(dataset.all_srcs) as env, tqdm(
             total=sum(len(s.types) for s in dataset.all_srcs),
             desc="eval_on_data",
-            smoothing=0.1,
+            smoothing=0.01,
         ) as pbar, ThreadPoolExecutor(1) as model_executor, ProcessPoolExecutor(
             concurrency
         ) as cpu_executor:
@@ -227,9 +231,11 @@ class DAggerModel:
             async def batch_callback(batch):
                 pbar.update()
 
-            async def eval_step(src: TokenizedSrc):
+            async def eval_step(src_labels):
+                src, labels = src_labels
                 r = await self.rollout_on_src(
                     src,
+                    labels,
                     env,
                     model_executor,
                     cpu_executor,
@@ -237,10 +243,10 @@ class DAggerModel:
                     expert_rate=0.0,
                 )
                 result.final_srcs.append(r.src_seq[-1])
-                preds = [r.type_assignment[i] for i in range(len(src.types))]
-                result.final_preds.append(preds)
+                result.final_preds.append(r.type_assignment)
 
-            await throttled_async_run(eval_step, dataset.all_srcs, concurrency)
+            src_range_list = _to_src_range_list(dataset.all_srcs, rollout_length)
+            await throttled_async_run(eval_step, src_range_list, concurrency)
 
         return result
 
@@ -331,7 +337,7 @@ def src_to_batch(src: TokenizedSrc, t: int, ctx_args: CtxArgs):
 @dataclass
 class DAggerEvalResult:
     final_srcs: list[TokenizedSrc]
-    final_preds: list[list[PythonType]]
+    final_preds: list[dict[int, PythonType]]
 
     @property
     def accuracies(self):
@@ -361,3 +367,23 @@ def get_typechecked_src(src: TokenizedSrc, assignment, check_r) -> TokenizedSrc:
     new_src.prev_types = assignment
     new_src = new_src.inline_prev_predictions(as_comment=False)
     return new_src
+
+
+def _get_label_ranges(n: int, max_labels: int):
+    t = 0
+    out = list[range]()
+    while n > 0:
+        delta = min(n, max_labels)
+        out.append(range(t, t + delta))
+        t += delta
+        n -= delta
+    return out
+
+
+def _to_src_range_list(srcs: Sequence[TokenizedSrc], max_labels: int):
+    src_range_list = list[tuple[TokenizedSrc, range]]()
+    for s in srcs:
+        ranges = _get_label_ranges(len(s.types), max_labels)
+        for r in ranges:
+            src_range_list.append((s, r))
+    return src_range_list

@@ -447,9 +447,10 @@ class SrcDataset:
         to use.
         """
 
+        # put the temp files out of the project to avoid slowing down VSCode symbol search
         template_root = (
             proj_root()
-            / "mypy_temp"
+            / "../mypy_temp"
             / TypeCheckSettings.temp_path
             / f"ORIGINAL_PROJECTS"
         )
@@ -1204,16 +1205,25 @@ def preds_to_accuracies(
 
 
 def src_preds_to_accuracies(
-    preds: Sequence[Sequence[PythonType]],
+    preds: Sequence[dict[int, PythonType]] | Sequence[Sequence[PythonType]],
     srcs: Sequence[TokenizedSrc],
     normalize_types=True,
 ):
-    cats = [an.cat for s in srcs for an in s.types_info]
-    labels = [ty for s in srcs for ty in s.types]
-    poses = [i for s in srcs for i in range(len(s.types))]
+    pred_types = list[PythonType]()
+    cats, labels, poses = [], [], []
+
+    for pred, src in zip(preds, srcs):
+        if not isinstance(pred, dict):
+            pred = {i: p for i, p in enumerate(pred)}
+        for t, ty in pred.items():
+            pred_types.append(ty)
+            cats.append(src.types_info[t].cat)
+            labels.append(src.types[t])
+            poses.append(t)
+
     results = [
         type_accuracies(
-            list(seq_flatten(preds)),
+            pred_types,
             labels,
             cats,
             poses,

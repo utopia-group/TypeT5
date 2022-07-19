@@ -27,13 +27,13 @@ config = TrainingConfig(
     all_labels=True,
     ctx_size=4096,
     left_margin=2048,
-    right_margin=2000,
+    right_margin=1023,
 )
 gpu_id = 0
 TypeCheckSettings.temp_path = f"DAgger-{gpu_id}"
 
 if config.quicktest:
-    print(colored("quicktest=True", "red"))
+    print(colored("quicktest: True", "red"))
 
 project_name = "test-SPOT" if config.quicktest else "SPOT"
 train_ctx_args = config.train_ctx_args()
@@ -61,7 +61,7 @@ from spot.model import ModelWrapper
 from spot.dagger import DAggerModel
 import torch
 
-dec_args = DecodingArgs(
+train_dec_args = DecodingArgs(
     sampling_max_tokens=8 * config.ctx_size,
     ctx_args=config.dec_ctx_args(),
     do_sample=True,  # use necleus sampling during training
@@ -69,7 +69,7 @@ dec_args = DecodingArgs(
 )
 
 model = load_model_spot("Salesforce/codet5-base")
-wrapper = ModelWrapper(model, DefaultTokenizer, dec_args)
+wrapper = ModelWrapper(model, DefaultTokenizer, train_dec_args)
 device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
 wrapper.to(device)
 dmodel = DAggerModel(wrapper)
@@ -103,14 +103,14 @@ with run_long_task("DAgger training"):
     dargs = DAggerArgs(
         ckpt_dir,
         grad_accum_steps=config.grad_accum_labels,
-        replay_buffer_size=24,
+        replay_buffer_size=1000,
     )
 
     finished = False
     try:
         asyncio.run(
             dmodel.train_on_data(
-                src_datasets,
+                src_datasets["train"],
                 dargs,
                 log_fn=lambda t, x: wandb.log({"train/step": t, **x}),
             )
@@ -127,6 +127,14 @@ with run_long_task("DAgger training"):
 # post-train full evaluation
 from spot.utils import pretty_print_dict, pretty_show_dict, PickleCache
 from spot.visualization import string_to_html
+
+test_dec_args = DecodingArgs(
+    sampling_max_tokens=8 * config.ctx_size,
+    ctx_args=config.dec_ctx_args(),
+    do_sample=False,
+    num_beams=8,
+)
+dmodel.wrapper.args = test_dec_args
 
 eval_cache = PickleCache(save_path / "eval_cache")  # type: ignore
 
@@ -148,6 +156,7 @@ import re
 from spot.utils import not_none
 
 validset = src_datasets["valid"][0:-1:5]
+dmodel.wrapper.args = train_dec_args
 
 with run_long_task("DAgger evaluating (valid set)"):
     for model_path in ckpt_dir.glob("step=*"):
