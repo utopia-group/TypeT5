@@ -58,19 +58,22 @@ def display_as_widget(x) -> widgets.Output:
 
 def visualize_chunk(
     input_ids: list[int],
-    pred_types: list[PythonType],
+    pred_types: dict[int, PythonType],
     label_types: list[PythonType],
     contain_extra_id: bool = True,
 ):
     def id_replace(id: int) -> str:
-        p = pred_types[id]
-        t = label_types[id]
-        correct = normalize_type(p) == normalize_type(t)
-        id_str = f"prediction-{id}"
-        if correct:
-            return f"<span id='{id_str}' style='color: green;'>{str(p)}</span>"
+        if id in pred_types:
+            p = pred_types[id]
+            t = label_types[id]
+            correct = normalize_type(p) == normalize_type(t)
+            id_str = f"prediction-{id}"
+            if correct:
+                return f"<span id='{id_str}' style='color: green;'>{str(p)}</span>"
+            else:
+                return f"<span id='{id_str}' style='color: red;'>{str(p)} (Gold: {str(t)})</span>"
         else:
-            return f"<span id='{id_str}' style='color: red;'>{str(p)} (Gold: {str(t)})</span>"
+            return f"<span style='color: gray;'> MISSING-{str(id)} </span>"
 
     code_dec = DefaultTokenizer.decode(input_ids, skip_special_tokens=False)
     code = colorize_code_html(html.escape(code_dec))
@@ -128,21 +131,24 @@ def code_inline_mask_ids(code: str, id2replace: Callable[[int], str]):
 
 def export_preds_on_code(
     dataset: SrcDataset | ChunkedDataset,
-    preds: list[list[Any]],
+    preds: list[dict] | list[list],
     export_to: Path,
 ):
     if export_to.exists():
         shutil.rmtree(export_to)
     (export_to / "chunks").mkdir(parents=True)
     for i in tqdm(range(len(dataset)), desc="Exporting"):
+        preds_dict = preds[i]
+        if isinstance(preds_dict, list):
+            preds_dict = {k: v for k, v in enumerate(preds_dict)}
         page = (
             visualize_chunk(
-                dataset.data[i]["input_ids"], preds[i], dataset.chunks_info[i].types
+                dataset.data[i]["input_ids"], preds_dict, dataset.chunks_info[i].types
             )
             if isinstance(dataset, ChunkedDataset)
             else visualize_chunk(
                 dataset.all_srcs[i].tokenized_code,
-                preds[i],
+                preds_dict,
                 dataset.all_srcs[i].types,
                 contain_extra_id=False,
             )
@@ -158,8 +164,10 @@ def export_preds_on_code(
             else [s.types for s in dataset.all_srcs]
         )
         for labels, ps in zip(labels_list, preds):
+            if isinstance(ps, list):
+                ps = {k: v for k, v in enumerate(ps)}
             n_correct = sum(
-                normalize_type(p) == normalize_type(t) for p, t in zip(ps, labels)
+                normalize_type(ps[t]) == normalize_type(labels[t]) for t in ps
             )
             chunk_accs.append(CountedAcc(n_correct, len(ps)))
             pbar.update()
@@ -204,7 +212,10 @@ def visualize_preds_on_code(
         src_ids = sorted(list(set(dataset.chunks_info[i].src_ids)))
         files = [dataset.files[sid] for sid in src_ids]
 
-        code = visualize_chunk(dataset.data[i]["input_ids"], pred_types, label_types)
+        pred_types_dict = {i: v for i, v in enumerate(pred_types)}
+        code = visualize_chunk(
+            dataset.data[i]["input_ids"], pred_types_dict, label_types
+        )
 
         rows = [
             in_scroll_pane(display_as_widget(pd.DataFrame(meta_data)), height="100px"),

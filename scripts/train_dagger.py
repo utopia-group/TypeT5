@@ -156,7 +156,7 @@ import re
 from spot.utils import not_none
 
 validset = src_datasets["valid"][0:-1:5]
-dmodel.wrapper.args = train_dec_args
+# dmodel.wrapper.args = train_dec_args
 
 with run_long_task("DAgger evaluating (valid set)"):
     for model_path in ckpt_dir.glob("step=*"):
