@@ -59,9 +59,12 @@ class TokenizedSrc:
             feedbacks=self.feedbacks,
         )
 
-    def inline_prev_predictions(self, as_comment: bool) -> "TokenizedSrc":
+    def inline_prev_predictions(
+        self, as_comment: bool, prev_types: dict[int, PythonType] | None = None
+    ) -> "TokenizedSrc":
         "Inine the previous predictions into the code, either directly or as comments."
-        prev_types = self.prev_types
+        if prev_types is None:
+            prev_types = self.prev_types
         assert isinstance(prev_types, dict), f"prev_types has type: {type(prev_types)}"
         assert len(prev_types) > 0
 
@@ -116,8 +119,12 @@ class TokenizedSrc:
         print_limited(code, max_lines)
 
     @staticmethod
-    def inline_predictions(src: "TokenizedSrc", as_comment: bool):
-        return src.inline_prev_predictions(as_comment=as_comment)
+    def inline_predictions(
+        src: "TokenizedSrc",
+        as_comment: bool,
+        prev_types: dict[int, PythonType] | None = None,
+    ):
+        return src.inline_prev_predictions(as_comment=as_comment, prev_types=prev_types)
 
 
 def dict_to_tokenized_src(d: dict) -> TokenizedSrc:

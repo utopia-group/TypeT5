@@ -22,12 +22,15 @@ from spot.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper
 from spot.train import TrainingConfig, TypeCheckArgs
 from termcolor import colored
 
+use_type_checker = False
+
 config = TrainingConfig(
     quicktest=False,
     all_labels=True,
-    ctx_size=4096,
-    left_margin=2048,
+    ctx_size=2048,
+    left_margin=1024,
     right_margin=1023,
+    modifications="no_type_checker",
 )
 gpu_id = 0
 TypeCheckSettings.temp_path = f"DAgger-{gpu_id}"
@@ -72,7 +75,7 @@ model = load_model_spot("Salesforce/codet5-base")
 wrapper = ModelWrapper(model, DefaultTokenizer, train_dec_args)
 device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
 wrapper.to(device)
-dmodel = DAggerModel(wrapper)
+dmodel = DAggerModel(wrapper, use_type_checker=use_type_checker)
 
 
 # %%
@@ -130,7 +133,11 @@ from spot.visualization import string_to_html
 
 test_dec_args = DecodingArgs(
     sampling_max_tokens=8 * config.ctx_size,
-    ctx_args=config.dec_ctx_args(),
+    ctx_args=CtxArgs(
+        ctx_size=4096,
+        left_margin=2048,
+        right_margin=1023,
+    ),
     do_sample=False,
     num_beams=8,
 )
@@ -155,7 +162,7 @@ wandb.log({"test/accuracies": wandb_string(pretty_show_dict(eval_r.accuracies))}
 import re
 from spot.utils import not_none
 
-validset = src_datasets["valid"][0:-1:5]
+validset = src_datasets["valid"][0:-1:3]
 # dmodel.wrapper.args = train_dec_args
 
 with run_long_task("DAgger evaluating (valid set)"):

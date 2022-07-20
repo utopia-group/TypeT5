@@ -27,7 +27,6 @@ class DAggerArgs(NamedTuple):
     concurrency: int = 12
     replay_buffer_size: int = concurrency * 100
     saves_per_epoch: int = 5
-    rollout_length: int = 100
 
 
 @dataclass
@@ -59,13 +58,15 @@ class CostModel:
 @dataclass
 class DAggerModel:
     wrapper: ModelWrapper
+    use_type_checker: bool = True
+    rollout_length: int = 100
     t_logger: TimeLogger = field(default_factory=TimeLogger)
 
     async def rollout_on_src(
         self,
         src: TokenizedSrc,
         labels: Sequence[int],
-        typecheck_env: TypeCheckingEnv,
+        typecheck_env: TypeCheckingEnv | None,
         model_executor: ThreadPoolExecutor,
         cpu_executor: ProcessPoolExecutor,
         batch_callback: Callable[[dict], Coroutine] | None = None,
@@ -105,21 +106,31 @@ class DAggerModel:
                 # e.g., perform training here
                 cb_future = batch_callback(batch)
 
-            with t_logger.timed("type checking"):
-                repo_root = typecheck_env.template_root / src.repo
-                check_r = await eloop.run_in_executor(
-                    cpu_executor,
-                    type_check_src_in_project,
-                    src,
-                    assignment,
-                    repo_root,
-                    typecheck_env.pre_fdbks[src.file],
-                )
-            with t_logger.timed("generate new src"):
+            if typecheck_env is not None:
+                with t_logger.timed("type checking"):
+                    repo_root = typecheck_env.template_root / src.repo
+                    check_r = await eloop.run_in_executor(
+                        cpu_executor,
+                        type_check_src_in_project,
+                        src,
+                        assignment,
+                        repo_root,
+                        typecheck_env.pre_fdbks[src.file],
+                    )
+                with t_logger.timed("generate new src"):
+                    new_src = await eloop.run_in_executor(
+                        cpu_executor, get_typechecked_src, src, assignment, check_r
+                    )
+            else:
+                # skip type checking
                 new_src = await eloop.run_in_executor(
-                    cpu_executor, get_typechecked_src, src, assignment, check_r
+                    cpu_executor,
+                    TokenizedSrc.inline_predictions,
+                    src,
+                    False,
+                    assignment,
                 )
-                result.src_seq.append(new_src)
+            result.src_seq.append(new_src)
 
             if batch_callback is not None:
                 await cb_future  # type: ignore
@@ -136,9 +147,7 @@ class DAggerModel:
         mr = self.wrapper
         optimizer = _configure_optimizers(mr.model)[0][0]
         n_labels = sum(len(s.types) for s in train_set.all_srcs)
-        src_range_list = _to_src_range_list(
-            train_set.all_srcs, dagger_args.rollout_length
-        )
+        src_range_list = _to_src_range_list(train_set.all_srcs, self.rollout_length)
         random.shuffle(src_range_list)
         alpha = min(1.0, 100 / (1 + n_labels))
         avg_acc = MovingAvg(alpha=alpha)
@@ -172,7 +181,7 @@ class DAggerModel:
                 r = await self.rollout_on_src(
                     src,
                     labels,
-                    env,
+                    env if self.use_type_checker else None,
                     model_executor,
                     cpu_executor,
                     batch_callback=batch_callback,
@@ -216,7 +225,6 @@ class DAggerModel:
         self,
         dataset: SrcDataset,
         concurrency: int = DefaultWorkers,
-        rollout_length: int = 100,
     ):
         result = DAggerEvalResult([], [])
 
@@ -236,7 +244,7 @@ class DAggerModel:
                 r = await self.rollout_on_src(
                     src,
                     labels,
-                    env,
+                    env if self.use_type_checker else None,
                     model_executor,
                     cpu_executor,
                     batch_callback=batch_callback,
@@ -245,7 +253,7 @@ class DAggerModel:
                 result.final_srcs.append(r.src_seq[-1])
                 result.final_preds.append(r.type_assignment)
 
-            src_range_list = _to_src_range_list(dataset.all_srcs, rollout_length)
+            src_range_list = _to_src_range_list(dataset.all_srcs, self.rollout_length)
             await throttled_async_run(eval_step, src_range_list, concurrency)
 
         return result
