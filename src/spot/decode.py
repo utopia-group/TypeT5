@@ -467,7 +467,7 @@ def select_candidates_using_critic(
             all_preds.extend(preds)
         critic_preds.append(all_preds)
         score = np.mean([score_transform(p) for p in all_preds])
-        critic_scores.append(score)
+        critic_scores.append(float(score))
 
     scores_map = dict(zip(to_check.keys(), critic_scores))
     preds_map = dict(zip(to_check.keys(), critic_preds))
@@ -585,7 +585,7 @@ def collect_type_errors_in_project(
 ) -> MypyResult | str:
     # setup: copy all files into cwd
     proc = multiprocessing.current_process()
-    cwd = project_root.parent.parent / proc.name / project_root.name
+    cwd = (project_root.parent.parent / proc.name / project_root.name).resolve()
     cwd.mkdir(parents=True, exist_ok=True)
 
     for f in project_root.glob("**/*.py"):
