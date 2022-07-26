@@ -214,7 +214,7 @@ def incr_inference_with_feedback(
                 raise NotImplementedError(f"Unknown selector type: {type(selector)}")
 
             assignment = new_assignments[best_i]
-            src = src.inline_single_prediction(lid, preds[best_i], as_comment=False)
+            src = inline_single_prediction(src, lid, preds[best_i], as_comment=False)
             prog.update()
         return src, list(assignment.values())
 
@@ -239,6 +239,45 @@ def incr_inference_with_feedback(
     if print_times:
         display(t_logger.as_dataframe())
     return srcs, predictions
+
+
+def inline_single_prediction(
+    src: TokenizedSrc, label_id: int, ty: PythonType, as_comment: bool
+) -> "TokenizedSrc":
+    tokenizer = DefaultTokenizer
+    mask_id = tokenizer.mask_token_id
+    to_insert = tokenizer.encode(str(ty), add_special_tokens=False)
+    if as_comment:
+        comment_start = tokenizer.encode("/* ", add_special_tokens=False)
+        comment_end = tokenizer.encode(" */", add_special_tokens=False)
+        to_insert = comment_start + to_insert + comment_end
+
+    l_pos = src.types_pos[label_id]
+    assert_eq(src.tokenized_code[l_pos], mask_id)
+
+    new_code = src.tokenized_code[:l_pos] + to_insert + src.tokenized_code[l_pos + 1 :]
+    # inlined_span = slice(l_pos, l_pos + len(to_insert))
+    offset = len(to_insert) - 1
+    new_types_pos = [
+        pos + offset if i > label_id else pos for i, pos in enumerate(src.types_pos)
+    ]
+
+    return TokenizedSrc(
+        file=src.file,
+        repo=src.repo,
+        types=src.types,
+        types_pos=new_types_pos,
+        types_str=src.types_str,
+        types_tks=src.types_tks,
+        types_info=src.types_info,
+        main_code=src.main_code,
+        tokenized_code=new_code,
+        preamble_code=src.preamble_code,
+        tokenized_preamble=src.tokenized_preamble,
+        prev_types=None,  # don't need them for now
+        inlined_spans=None,  # don't need them for now
+        feedbacks=src.feedbacks,
+    )
 
 
 def sample_candidates(
@@ -399,7 +438,7 @@ def select_candidates_using_critic(
         to_check_values = to_check.values()
         if no_feedback:
             check_rs = [
-                SrcCheckResult("no_feedback=True", x[0].origin_code)
+                SrcCheckResult("no_feedback=True", x[0].main_code)
                 for x in to_check_values
             ]
         else:

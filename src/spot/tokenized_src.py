@@ -1,6 +1,7 @@
 from .utils import *
 from spot.type_env import AnnotInfo, collect_user_annotations
 from .type_check import MypyFeedback, PythonType, parse_type_str
+from .type_env import apply_annotations, collect_user_annotations
 
 
 @dataclass
@@ -14,50 +15,41 @@ class TokenizedSrc:
     types_str: list[str]
     types_tks: list[list[int]]
     types_info: list[AnnotInfo]
-    origin_code: str
+    main_code: str
     tokenized_code: list[int]  # with certain types masked out
+    preamble_code: str
+    tokenized_preamble: list[int]
     prev_types: dict[int, PythonType] | None = None  # previously predicted types
     inlined_spans: dict[int, slice] | None = None  # the spans of inlined previous types
     feedbacks: list[MypyFeedback] | None = None
 
-    def inline_single_prediction(
-        self, label_id: int, ty: PythonType, as_comment: bool
+    @staticmethod
+    def parse(
+        code: str,
+        file: Path,
+        repo: Path,
+        args: "PreprocessArgs | None" = None,
     ) -> "TokenizedSrc":
-        tokenizer = DefaultTokenizer
-        mask_id = tokenizer.mask_token_id
-        to_insert = tokenizer.encode(str(ty), add_special_tokens=False)
-        if as_comment:
-            comment_start = tokenizer.encode("/* ", add_special_tokens=False)
-            comment_end = tokenizer.encode(" */", add_special_tokens=False)
-            to_insert = comment_start + to_insert + comment_end
+        if args is None:
+            args = PreprocessArgs()
+        d = preprocess_code(code, args)
+        d["file"] = file
+        d["repo"] = repo
+        d["is_label"] = None
+        return dict_to_tokenized_src(d)
 
-        l_pos = self.types_pos[label_id]
-        assert_eq(self.tokenized_code[l_pos], mask_id)
-
-        new_code = (
-            self.tokenized_code[:l_pos] + to_insert + self.tokenized_code[l_pos + 1 :]
-        )
-        # inlined_span = slice(l_pos, l_pos + len(to_insert))
-        offset = len(to_insert) - 1
-        new_types_pos = [
-            pos + offset if i > label_id else pos
-            for i, pos in enumerate(self.types_pos)
+    def __str__(self):
+        segs = [
+            "========TokenizedSrc========",
+            f"file:{self.file}",
+            f"repo:{self.repo}",
+            "--------Preamble--------",
+            self.preamble_code,
+            "--------Main Code--------",
+            self.main_code,
+            "========End of TokenizedSrc========",
         ]
-
-        return TokenizedSrc(
-            file=self.file,
-            repo=self.repo,
-            types=self.types,
-            types_pos=new_types_pos,
-            types_str=self.types_str,
-            types_tks=self.types_tks,
-            types_info=self.types_info,
-            origin_code=self.origin_code,
-            tokenized_code=new_code,
-            prev_types=None,  # don't need them for now
-            inlined_spans=None,  # don't need them for now
-            feedbacks=self.feedbacks,
-        )
+        return "\n".join(segs)
 
     def inline_prev_predictions(
         self, as_comment: bool, prev_types: dict[int, PythonType] | None = None
@@ -106,8 +98,10 @@ class TokenizedSrc:
             types_str=self.types_str,
             types_tks=self.types_tks,
             types_info=self.types_info,
-            origin_code=self.origin_code,
+            main_code=self.main_code,
             tokenized_code=tokenized_code,
+            preamble_code=self.preamble_code,
+            tokenized_preamble=self.tokenized_preamble,
             prev_types=prev_types,
             inlined_spans=inlined_spans,
             feedbacks=self.feedbacks,
@@ -127,12 +121,61 @@ class TokenizedSrc:
         return src.inline_prev_predictions(as_comment=as_comment, prev_types=prev_types)
 
 
+@dataclass
+class PreprocessArgs:
+    imports_in_preamble: bool = True
+    drop_comments: bool = True
+
+
+def preprocess_code(code: str, args: PreprocessArgs) -> dict:
+    """Preprocess the Python code to carve out all the type annotations. The original
+    code is split into sequences at the type annotations."""
+    m = cst.parse_module(code)
+    preamble_segs = list[str]()
+
+    if args.drop_comments:
+        m = remove_comments(m)
+    if args.imports_in_preamble:
+        m, imports = remove_imports(m)
+        imports_part = cst.Module([cst.SimpleStatementLine([s]) for s in imports])
+        preamble_segs.append(imports_part.code)
+
+    cst_code = m.code
+    annots_info, types = collect_user_annotations(m)
+    types_str = [
+        m.code_for_node(not_none(info.annot).annotation) for info in annots_info
+    ]
+    mask_annot = cst.Annotation(cst.Name(SpecialNames.TypeMask))
+    replaces = dict()
+    for info in annots_info:
+        replaces[info.path] = mask_annot
+    new_code = apply_annotations(m, replaces).code
+    code_segs = new_code.split(SpecialNames.TypeMask)
+
+    assert (
+        len(code_segs) == len(types) + 1
+    ), f"{len(code_segs)} != {len(types) + 1}. replaces: {replaces}\ncode: {new_code}"
+    return {
+        "preamble": "".join(preamble_segs),
+        "code_segs": code_segs,
+        "types": types,
+        "types_str": types_str,
+        "annots_info": annots_info,
+        "cst_code": cst_code,
+        "prev_types": None,
+    }
+
+
 def dict_to_tokenized_src(d: dict) -> TokenizedSrc:
+    tkn = DefaultTokenizer
+
     r = TokenizedSrc(
         file=d["file"],
         repo=d["repo"],
-        origin_code=d["cst_code"],
+        main_code=d["cst_code"],
         tokenized_code=list[int](),
+        preamble_code=d["preamble"],
+        tokenized_preamble=tkn.encode(d["preamble"], add_special_tokens=False),
         types=list[PythonType](),
         types_pos=list[int](),
         types_str=list[str](),
@@ -153,7 +196,6 @@ def dict_to_tokenized_src(d: dict) -> TokenizedSrc:
         case _:
             raise ValueError(f"Invalid dict with keys: {d.keys()}")
 
-    tkn = DefaultTokenizer
     bos_id = not_none(tkn.bos_token_id)
     eos_id = not_none(tkn.eos_token_id)
     mask_id = not_none(tkn.mask_token_id)
@@ -252,3 +294,74 @@ def patch_code_with_extra(
         replaces.append((CodeRange(p, p), 3, f"/* error: {e} */"))
 
     return replace_strs_by_pos(code, replaces)
+
+
+def remove_comments(m: cst.Module) -> cst.Module:
+    """Removes all comments and docstrings."""
+    return m.visit(CommentRemover())
+
+
+class CommentRemover(cst.CSTTransformer):
+    """Removes comments and docstrings."""
+
+    def leave_IndentedBlock(
+        self, node: cst.IndentedBlock, updated: cst.IndentedBlock
+    ) -> cst.IndentedBlock:
+        new_body = type(updated.body)(  # type: ignore
+            filter(lambda n: not CommentRemover.is_doc_string(n), updated.body)
+        )
+        if len(new_body) != len(updated.body):
+            return updated.with_changes(body=new_body)
+        else:
+            return updated
+
+    def leave_Module(self, node, updated):
+        return self.leave_IndentedBlock(node, updated)
+
+    def leave_EmptyLine(self, node: cst.EmptyLine, updated: cst.EmptyLine):
+        if updated.comment is not None:
+            return cst.RemoveFromParent()
+        else:
+            return updated
+
+    def leave_TrailingWhitespace(self, node, updated: cst.TrailingWhitespace):
+        if updated.comment is not None:
+            return updated.with_changes(comment=None)
+        else:
+            return updated
+
+    @staticmethod
+    def is_doc_string(node: cst.BaseStatement) -> bool:
+        match node:
+            case cst.SimpleStatementLine(body=[cst.Expr(value=cst.SimpleString())]):
+                return True
+            case _:
+                return False
+
+
+def remove_imports(
+    m: cst.Module,
+) -> tuple[cst.Module, list[cst.Import | cst.ImportFrom]]:
+    """Removes all top-level import statements and collect them into a list."""
+    remover = ImportsRemover()
+    m = m.visit(remover)
+    return m, list(remover.import_stmts)
+
+
+class ImportsRemover(cst.CSTTransformer):
+    """Removes all top-level import statements and collect them into `self.import_stmts`."""
+
+    def __init__(self):
+        self.import_stmts = set[cst.Import | cst.ImportFrom]()
+
+    def leave_Import(self, node: cst.Import, updated: cst.Import):
+        self.import_stmts.add(updated)
+        return cst.RemoveFromParent()
+
+    def leave_ImportFrom(self, node: cst.ImportFrom, updated: cst.ImportFrom):
+        self.import_stmts.add(updated)
+        return cst.RemoveFromParent()
+
+    def visit_FunctionDef(self, node):
+        # stops traversal at inner levels.
+        return False

@@ -488,7 +488,7 @@ def visualize_feedbacks_in_srcs(
 
     def viz(i):
         fdbk, src = fdbks[i]
-        code = code_inline_type_masks(src.origin_code, src.types)
+        code = code_inline_type_masks(src.main_code, src.types)
         text = (
             f"feedback: {fdbk}\n" + "=========code=========\n" + add_line_numbers(code)
         )
