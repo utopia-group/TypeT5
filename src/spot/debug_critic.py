@@ -1,7 +1,7 @@
-from spot.decode import CriticAssesInfo
-from spot.model import DatasetPredResult
-from spot.type_check import PythonType, normalize_type
-from spot.utils import *
+from .decode import CriticAssesInfo
+from .model import DatasetPredResult
+from .type_check import PythonType, normalize_type
+from .utils import *
 
 
 def check_delta(

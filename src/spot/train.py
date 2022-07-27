@@ -16,7 +16,7 @@ from transformers import DataCollatorForSeq2Seq, get_linear_schedule_with_warmup
 from transformers.trainer_pt_utils import get_parameter_names
 from transformers.modeling_outputs import Seq2SeqLMOutput
 
-from spot.type_check import TypeCheckArgs
+from .type_check import TypeCheckArgs
 
 from .data import (
     ChunkedDataset,

@@ -10,15 +10,15 @@ from torch import Tensor
 from torch.utils.data import DataLoader, RandomSampler
 from transformers.data.data_collator import DataCollatorForSeq2Seq
 
-from spot.data import (
+from .data import (
     ChunkedDataset,
     CtxArgs,
     SrcDataset,
     output_ids_as_types,
     preds_to_accuracies,
 )
-from spot.type_env import PythonType
-from spot.utils import *
+from .type_env import PythonType
+from .utils import *
 
 
 @dataclass

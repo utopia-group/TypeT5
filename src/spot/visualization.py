@@ -6,16 +6,16 @@ import colored
 import ipywidgets as widgets
 import plotly.express as px
 
-from spot.data import (
+from .data import (
     ChunkedDataset,
     CountedAcc,
     CtxArgs,
     PythonType,
     SrcDataset,
 )
-from spot.model import DatasetPredResult, DecodingArgs
-from spot.type_check import normalize_type
-from spot.utils import *
+from .model import DatasetPredResult, DecodingArgs
+from .type_check import normalize_type
+from .utils import *
 
 from io import StringIO
 from IPython.display import HTML
@@ -449,8 +449,8 @@ def visualize_counts(
 
 import plotly.express as px
 
-from spot.type_env import MypyFeedback
-from spot.utils import groupby, pretty_print_dict
+from .type_env import MypyFeedback
+from .utils import groupby, pretty_print_dict
 
 
 def plot_feedback_distribution(

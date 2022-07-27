@@ -1,5 +1,5 @@
 from .utils import *
-from spot.type_env import AnnotInfo, collect_user_annotations
+from .type_env import AnnotInfo, collect_user_annotations
 from .type_check import MypyFeedback, PythonType, parse_type_str
 from .type_env import apply_annotations, collect_user_annotations
 

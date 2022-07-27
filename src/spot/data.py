@@ -30,7 +30,7 @@ from .type_env import (
     parse_type_expr,
     parse_type_from_ast,
 )
-from spot.utils import *
+from .utils import *
 
 warnings.filterwarnings(
     "ignore",

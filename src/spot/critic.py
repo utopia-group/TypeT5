@@ -1,7 +1,7 @@
 import warnings
 from datasets import Dataset
-from spot.data import ChunkedDataset, CtxArgs, SrcDataset
-from spot.type_check import normalize_type
+from .data import ChunkedDataset, CtxArgs, SrcDataset
+from .type_check import normalize_type
 from .model import (
     dynamic_dataloader,
     DataLoader,

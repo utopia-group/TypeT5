@@ -3,9 +3,9 @@ import multiprocessing
 
 from datasets import Dataset
 import torch
-from spot.critic import CriticCollator, CriticModel
+from .critic import CriticCollator, CriticModel
 
-from spot.data import (
+from .data import (
     ChunkedDataset,
     CtxArgs,
     SrcCheckResult,
@@ -19,15 +19,15 @@ from spot.data import (
     type_check_src_in_project,
     feedbacks_to_tokenized_src,
 )
-from spot.model import DatasetPredResult, DecodingArgs, ModelWrapper, dynamic_dataloader
-from spot.type_check import (
+from .model import DatasetPredResult, DecodingArgs, ModelWrapper, dynamic_dataloader
+from .type_check import (
     MypyChecker,
     MypyFeedback,
     MypyResult,
     PythonType,
     normalize_type,
 )
-from spot.utils import *
+from .utils import *
 
 
 class IncrSelector:

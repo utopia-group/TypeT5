@@ -1,6 +1,6 @@
 import asyncio
 from typing import *
-from spot.data import (
+from .data import (
     CtxArgs,
     SrcDataset,
     TypeCheckingEnv,
@@ -8,11 +8,11 @@ from spot.data import (
     src_preds_to_accuracies,
     type_check_src_in_project,
 )
-from spot.model import ModelWrapper
-from spot.tokenized_src import TokenizedSrc, feedbacks_to_tokenized_src
-from spot.train import _configure_optimizers
-from spot.type_check import MypyFeedback, PythonType, TypeCheckArgs, normalize_type
-from spot.utils import *
+from .model import ModelWrapper
+from .tokenized_src import TokenizedSrc, feedbacks_to_tokenized_src
+from .train import _configure_optimizers
+from .type_check import MypyFeedback, PythonType, TypeCheckArgs, normalize_type
+from .utils import *
 from transformers.modeling_outputs import Seq2SeqLMOutput
 from collections import deque as Deque
 
