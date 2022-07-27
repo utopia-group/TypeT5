@@ -196,11 +196,8 @@ def dict_to_tokenized_src(d: dict) -> TokenizedSrc:
         case _:
             raise ValueError(f"Invalid dict with keys: {d.keys()}")
 
-    bos_id = not_none(tkn.bos_token_id)
-    eos_id = not_none(tkn.eos_token_id)
     mask_id = not_none(tkn.mask_token_id)
     all_tks = r.tokenized_code
-    all_tks.append(bos_id)
     for i in range(len(types)):
         all_tks.extend(tkn.encode(segs[i], add_special_tokens=False))
         if is_label is None or is_label[i]:
@@ -213,7 +210,6 @@ def dict_to_tokenized_src(d: dict) -> TokenizedSrc:
         else:
             all_tks.extend(tkn.encode(types_str[i], add_special_tokens=False))
     all_tks.extend(tkn.encode(segs[-1], add_special_tokens=False))
-    all_tks.append(eos_id)
 
     return r
 

@@ -107,7 +107,7 @@ def incr_inference_with_feedback(
         assignment = dict[int, PythonType]()
         for lid in range(len(src.types_info)):
             with t_logger.timed("chunk_from_src"):
-                chunk, info = chunk_from_src(src, src_id, lid, ctx_args)
+                chunk, info = chunk_from_src(src, lid, ctx_args)
                 batch = dict()
                 batch["input_ids"] = torch.tensor([chunk["input_ids"]], device=device)
                 batch["n_labels"] = [chunk["n_labels"]]
@@ -169,7 +169,6 @@ def incr_inference_with_feedback(
                     critic_inputs_metas = executor.map(
                         to_critic_inputs,
                         [src] * N,
-                        [src_id] * N,
                         new_assignments,
                         check_rs,
                         [ctx_args] * N,
@@ -333,7 +332,7 @@ def select_candidates_by_type_errors(
         to_check = dict[tuple[int, int], tuple[TokenizedSrc, dict[int, str], Path]]()
         for i in range(len(chunks.data)):
             info = chunks.chunks_info[i]
-            file = chunks.files[info.src_ids[0]]
+            file = info.src_file
             src = file2src[file.relative_to(src_data.repos_root)]
             proj_root = env.template_root / src.repo
             for j, candidates in enumerate(pred_candidates[i]):
@@ -426,7 +425,7 @@ def select_candidates_using_critic(
         to_check = dict[tuple[int, int], tuple[TokenizedSrc, dict[int, str], Path]]()
         for i in range(len(chunks.data)):
             info = chunks.chunks_info[i]
-            file = chunks.files[info.src_ids[0]]
+            file = info.src_file
             src = file2src[file.relative_to(src_data.repos_root)]
             proj_root = env.template_root / src.repo
             for j, candidates in enumerate(pred_candidates[i]):
@@ -471,7 +470,6 @@ def select_candidates_using_critic(
     critic_inputs_metas = pmap(
         to_critic_inputs,
         [x[0] for x in to_check_values],
-        src_ids,
         [x[1] for x in to_check_values],
         check_rs,
         [dec_args.ctx_args] * len(to_check_values),
@@ -527,7 +525,6 @@ def select_candidates_using_critic(
 
 def to_critic_inputs(
     src: TokenizedSrc,
-    src_id: int,
     preds: dict[int, PythonType],
     check_r: SrcCheckResult,
     ctx_args: CtxArgs,
@@ -548,7 +545,7 @@ def to_critic_inputs(
     chunks_info = list[SrcChunkInfo]()
     if labels_range is None:
         labels_range = min(preds.keys()), max(preds.keys()) + 1
-    src_to_chunks_(chunks, chunks_info, new_src, src_id, labels_range, ctx_args)
+    src_to_chunks_(chunks, chunks_info, new_src, labels_range, ctx_args)
     return chunks, chunks_info
 
 
@@ -568,7 +565,7 @@ def collect_type_errors_from_predictions(
         to_check = dict[Path, dict[Path, dict[int, str]]]()
         for i in range(len(chunks_info)):
             info = chunks.chunks_info[i]
-            file = chunks.files[info.src_ids[0]]
+            file = info.src_file
             src = file2src[file.relative_to(src_data.repos_root)]
             file = src.file
             proj_root = env.template_root / src.repo

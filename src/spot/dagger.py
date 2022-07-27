@@ -332,7 +332,7 @@ class DAggerModel:
 
 
 def src_to_batch(src: TokenizedSrc, t: int, ctx_args: CtxArgs):
-    chunk, info = chunk_from_src(src, 0, t, ctx_args)
+    chunk, info = chunk_from_src(src, t, ctx_args)
     assert_eq(chunk["n_labels"], 1)
     batch = {
         "input_ids": torch.tensor([chunk["input_ids"]]),

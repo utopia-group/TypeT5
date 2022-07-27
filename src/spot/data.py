@@ -154,17 +154,24 @@ class GitRepo:
 @dataclass
 class CtxArgs:
     ctx_size: int
+    # up to how much of the left_margin to be allocated as preamble
+    preamble_size: int
     left_margin: int
     right_margin: int
     max_labels: int = 16
 
+    def __post_init__(self):
+        assert self.preamble_size > 0
+        assert (
+            self.preamble_size < self.left_margin
+        ), "Preamble size is allcoated from the left margin."
+        assert (
+            self.left_margin + self.right_margin < self.ctx_size
+        ), "No window size left."
+
     @property
     def window_size(self) -> int:
         return self.ctx_size - self.left_margin - self.right_margin
-
-    def as_tuple(self):
-        "Returns (left_margin, window_size, right_margin, max_labels)."
-        return self.left_margin, self.window_size, self.right_margin, self.max_labels
 
     def __repr__(self):
         return repr_modified_args(self)
@@ -182,8 +189,6 @@ def _compute_ctx(
     left_margin_size = window_start - left_margin_start
 
     max_window_size = ctx_args.window_size
-    label_ids = list[int]()
-
     right_margin_end = left_margin_start + ctx_args.ctx_size
     if right_margin_end >= src_len:
         right_margin_end = src_len
@@ -191,6 +196,7 @@ def _compute_ctx(
         assert max_window_size > 0
 
     label_pos = 0
+    label_ids = list[int]()
     assert len(src.types) > 0
     for i in range(label_range[0], label_range[1]):
         label_pos = src.types_pos[i] - window_start
@@ -212,7 +218,7 @@ def _compute_ctx(
 
 
 def chunk_from_src(
-    src: TokenizedSrc, src_id: int, label_id: int, ctx_args: CtxArgs
+    src: TokenizedSrc, label_id: int, ctx_args: CtxArgs
 ) -> tuple[dict, "SrcChunkInfo"]:
     """Helper function to extract a single chunk from a source file."""
     chunks = list[dict]()
@@ -221,7 +227,6 @@ def chunk_from_src(
         chunks,
         chunks_info,
         src,
-        src_id,
         (label_id, label_id + 1),
         ctx_args,
     )
@@ -233,7 +238,6 @@ def src_to_chunks_(
     chunks: list,
     chunks_info: list,
     src: TokenizedSrc,
-    src_id: int,
     label_range: tuple[int, int],
     ctx_args: "CtxArgs",
 ) -> None:
@@ -246,8 +250,22 @@ def src_to_chunks_(
     special_tks = [tokenizer.additional_special_tokens_ids[99 - i] for i in range(100)]
     bos_id, eos_id = not_none(tokenizer.bos_token_id), not_none(tokenizer.eos_token_id)
 
-    label_ids, (ctx_start, ctx_end) = _compute_ctx(src, label_range, ctx_args)
+    if len(src.tokenized_preamble) > ctx_args.preamble_size:
+        preamble = src.tokenized_preamble[: ctx_args.preamble_size]
+        preamble[-1] = eos_id
+    else:
+        preamble = src.tokenized_preamble
+    new_ctx_args = copy.deepcopy(ctx_args)
+    new_ctx_args.ctx_size -= len(preamble)
+    new_ctx_args.left_margin -= len(preamble)
+    new_ctx_args.preamble_size = 0
+
+    label_ids, (ctx_start, ctx_end) = _compute_ctx(src, label_range, new_ctx_args)
     tks = src.tokenized_code[ctx_start:ctx_end]
+    if ctx_start > 0:
+        tks[0] = bos_id
+    if ctx_end < len(src.tokenized_code) - 1:
+        tks[-1] = eos_id
     label_tkns = [bos_id]
     types = list[PythonType]()
     types_info = list[AnnotInfo]()
@@ -268,9 +286,10 @@ def src_to_chunks_(
     label_tkns.append(eos_id)
 
     assert len(label_ids) > 0
-    assert len(tks) <= ctx_args.ctx_size
+    assert len(preamble) + len(tks) <= ctx_args.ctx_size
+
     this_chunk = {
-        "input_ids": tks,
+        "input_ids": preamble + tks,
         "labels": label_tkns,
         "n_labels": len(label_ids),
     }
@@ -279,7 +298,7 @@ def src_to_chunks_(
     meta = SrcChunkInfo(
         types,
         types_info,
-        src_ids=[src_id] * len(label_ids),
+        src_file=src.file,
         label_ids=label_ids,
         prev_types=prev_types,
         inlined_spans=inlined_spans,
@@ -288,7 +307,7 @@ def src_to_chunks_(
 
     new_label_range = (label_ids[-1] + 1, label_range[1])
     if new_label_range[0] < label_range[1]:
-        src_to_chunks_(chunks, chunks_info, src, src_id, new_label_range, ctx_args)
+        src_to_chunks_(chunks, chunks_info, src, new_label_range, ctx_args)
 
 
 def chunk_srcs_per_file(
@@ -302,11 +321,11 @@ def chunk_srcs_per_file(
     chunks = list[dict]()
     chunks_info: list[SrcChunkInfo] = []
 
-    for src_id, src in enumerate(tqdm(srcs, desc="chunk_srcs_per_file", **tqdm_args)):
+    for src in tqdm(srcs, desc="chunk_srcs_per_file", **tqdm_args):
         if len(src.types) == 0:
             continue
         labels_range = 0, len(src.types)
-        src_to_chunks_(chunks, chunks_info, src, src_id, labels_range, ctx_args)
+        src_to_chunks_(chunks, chunks_info, src, labels_range, ctx_args)
 
     data: dict[str, list] = {
         "input_ids": [],
@@ -847,15 +866,14 @@ class SrcChunkInfo:
 
     types: list[PythonType]  # the label types in this chunk
     annots_info: list[AnnotInfo]  # the label AnnotInfos in this chunk
-    # maps each label to its source file id
-    src_ids: list[int]
+    src_file: Path
     # maps each label to its label id in the corresponding TokenizedSrc
     label_ids: list[int]
     prev_types: list[PythonType] | None
     inlined_spans: list[slice] | None
 
     def __repr__(self):
-        return f"SrcChunkInfo(num_types={len(self.types)}, unique_src_ids={set(self.src_ids)})"
+        return f"SrcChunkInfo(num_types={len(self.types)}, src_file='{self.src_file}')"
 
 
 @dataclass
@@ -898,15 +916,15 @@ class ChunkedDataset:
         """
 
         src_path_map = dict[Path, dict[AnnotPath, PythonType]]()
-        for f, src in srcs.file2src().items():
+        for f, src in srcs.file2src(resolve=False).items():
             src_path_map[f] = {
                 info.path: ty for ty, info in zip(src.types, src.types_info)
             }
             assert_eq(len(src_path_map[f]), len(src.types))
         input_ids = tqdm(self.data["input_ids"], desc="verify_labels", **tqdm_args)
         for input, chunk in zip(input_ids, self.chunks_info):
-            for info, ty, sid in zip(chunk.annots_info, chunk.types, chunk.src_ids):
-                file = self.files[sid]
+            file = chunk.src_file
+            for info, ty in zip(chunk.annots_info, chunk.types):
                 assert file in src_path_map, f"{file} not in file2src."
                 assert (
                     info.path in src_path_map[file]
@@ -973,9 +991,8 @@ def R1_srcs_from_preds(
     file2preds = dict[Path, dict[AnnotPath, str]]()
     for preds, chunk_info in zip(r0_preds, chunks_info):
         assert_eq(len(preds), len(chunk_info.types))
+        file = (r0_src.repos_root / chunk_info.src_file).resolve()
         for i, pred in enumerate(preds):
-            sid = chunk_info.src_ids[i]
-            file = src_files[sid]
             if file not in file2preds:
                 file2preds[file] = dict()
             label_path = chunk_info.annots_info[i].path

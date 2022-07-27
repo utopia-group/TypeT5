@@ -60,6 +60,7 @@ def visualize_chunk(
     input_ids: list[int],
     pred_types: dict[int, PythonType],
     label_types: list[PythonType],
+    src_file: Path,
     contain_extra_id: bool = True,
 ):
     def id_replace(id: int) -> str:
@@ -83,6 +84,7 @@ def visualize_chunk(
         code = code_inline_mask_ids(code, id_replace)
     return widgets.HTML(
         "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30);'>"
+        + f"# file: {src_file}"
         + code
         + "</pre>"
     )
@@ -143,13 +145,17 @@ def export_preds_on_code(
             preds_dict = {k: v for k, v in enumerate(preds_dict)}
         page = (
             visualize_chunk(
-                dataset.data[i]["input_ids"], preds_dict, dataset.chunks_info[i].types
+                dataset.data[i]["input_ids"],
+                preds_dict,
+                dataset.chunks_info[i].types,
+                dataset.chunks_info[i].src_file,
             )
             if isinstance(dataset, ChunkedDataset)
             else visualize_chunk(
                 dataset.all_srcs[i].tokenized_code,
                 preds_dict,
                 dataset.all_srcs[i].types,
+                dataset.all_srcs[i].file,
                 contain_extra_id=False,
             )
         )
@@ -209,17 +215,15 @@ def visualize_preds_on_code(
         for k, v in preds_extra.items():
             meta_data[k] = v[i]
 
-        src_ids = sorted(list(set(dataset.chunks_info[i].src_ids)))
-        files = [dataset.files[sid] for sid in src_ids]
-
         pred_types_dict = {i: v for i, v in enumerate(pred_types)}
+        file = dataset.chunks_info[i].src_file
         code = visualize_chunk(
-            dataset.data[i]["input_ids"], pred_types_dict, label_types
+            dataset.data[i]["input_ids"], pred_types_dict, label_types, file
         )
 
         rows = [
             in_scroll_pane(display_as_widget(pd.DataFrame(meta_data)), height="100px"),
-            in_scroll_pane(str(files), height=None),
+            in_scroll_pane(str(dataset.chunks_info[i].src_file), height=None),
             in_scroll_pane(code),
         ]
         return widgets.VBox(rows)

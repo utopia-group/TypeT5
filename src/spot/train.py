@@ -58,13 +58,16 @@ class ModelTrainingArgs:
 class TrainingConfig(NamedTuple):
     quicktest: bool = False
     drop_comments: bool = True
+    imports_in_preamble: bool = True
     data_reduction: int = 1
     check_in_isolation: bool = False
     all_labels: bool = False
     ctx_size: int = 4096
     left_margin: int = 2048
-    right_margin: int = 1024
-    train_max_labels: int = 64
+    # up to how much of the left_margin to be allocated as preamble
+    preamble_size: int = 512
+    right_margin: int = 1023
+    train_max_labels: int = 32
     dec_max_labels: int = 16
     use_small_model: bool = False
     grad_accum_labels = 32
@@ -90,9 +93,13 @@ class TrainingConfig(NamedTuple):
         else:
             return "default"
 
+    def get_model_name(self) -> str:
+        return "model-v2--" + self.as_name()
+
     def train_ctx_args(self) -> CtxArgs:
         return CtxArgs(
             ctx_size=self.ctx_size,
+            preamble_size=self.preamble_size,
             left_margin=self.left_margin,
             right_margin=self.right_margin,
             max_labels=self.train_max_labels,
@@ -192,7 +199,7 @@ def train_spot_model(
 
     warnings.filterwarnings("ignore", "The dataloader.*does not have many workers.*")
 
-    with run_long_task(f"Training {model_name}"):
+    with run_long_task(f"Training {model_name}", notify=False):
         trainer.fit(
             model=lit_model,
             train_dataloaders=train_dataloader,

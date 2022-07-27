@@ -66,8 +66,7 @@ class DatasetPredResult(Generic[T1]):
     def group_by_repo(self) -> dict[Path, "DatasetPredResult[T1]"]:
         chunk2repo = list[Path]()
         for i, info in enumerate(self.chunks.chunks_info):
-            sid = info.src_ids[0]
-            file = self.chunks.files[sid]
+            file = info.src_file
             repo = self.chunks.file2repo[file]
             chunk2repo.append(repo)
 
