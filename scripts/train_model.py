@@ -20,7 +20,9 @@ from spot.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper
 from spot.train import TrainingConfig, TypeCheckArgs
 from termcolor import colored
 
-config = TrainingConfig(quicktest=False, all_labels=True)
+config = TrainingConfig(
+    quicktest=False, all_labels=True, stub_in_preamble=True, preamble_size=1024
+)
 gpu_id = 0
 TypeCheckSettings.temp_path = f"GPU-{gpu_id}"
 
@@ -37,12 +39,7 @@ dec_args = DecodingArgs(
     ctx_args=config.dec_ctx_args(),
 )
 
-
-datasets_name = get_dataset_name(
-    drop_comments=config.drop_comments,
-    all_labels=config.all_labels,
-    imports_in_preamble=config.imports_in_preamble,
-)
+datasets_name = get_dataset_name(config.get_preprocess_args())
 
 src_datasets = load_src_datasets(
     datadir,

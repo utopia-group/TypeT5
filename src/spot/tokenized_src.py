@@ -28,10 +28,8 @@ class TokenizedSrc:
         code: str,
         file: Path,
         repo: Path,
-        args: "PreprocessArgs | None" = None,
+        args: "PreprocessArgs",
     ) -> "TokenizedSrc":
-        if args is None:
-            args = PreprocessArgs()
         d = preprocess_code(code, args)
         d["file"] = file
         d["repo"] = repo
@@ -124,6 +122,7 @@ class TokenizedSrc:
 @dataclass
 class PreprocessArgs:
     imports_in_preamble: bool = True
+    stub_in_preamble: bool = False
     drop_comments: bool = True
 
 
@@ -139,6 +138,9 @@ def preprocess_code(code: str, args: PreprocessArgs) -> dict:
         m, imports = remove_imports(m)
         imports_part = cst.Module([cst.SimpleStatementLine([s]) for s in imports])
         preamble_segs.append(imports_part.code)
+    if args.stub_in_preamble:
+        stub_m = stub_from_module(m)
+        preamble_segs.append(stub_m.code)
 
     cst_code = m.code
     annots_info, types = collect_user_annotations(m)
@@ -290,6 +292,94 @@ def patch_code_with_extra(
         replaces.append((CodeRange(p, p), 3, f"/* error: {e} */"))
 
     return replace_strs_by_pos(code, replaces)
+
+
+def stub_from_module(m: cst.Module, rm_comments=True, rm_imports=True) -> cst.Module:
+    """Generate a stub module from normal python code."""
+    if rm_comments:
+        m = remove_comments(m)
+    if rm_imports:
+        m, _ = remove_imports(m)
+    m = m.visit(StubGenerator())
+    m = remove_empty_lines(m)
+    return m
+
+
+def remove_empty_lines(m: cst.Module) -> cst.Module:
+    m = m.visit(EmptyLineRemove())
+    return m
+
+
+@dataclass
+class ClassNamespace:
+    all_elems: set[str] = field(default_factory=set)
+    declared_elems: set[str] = field(default_factory=set)
+
+
+class StubGenerator(cst.CSTTransformer):
+    """Generate a stub module from a Python module."""
+
+    OMIT = cst.SimpleStatementSuite([cst.Expr(cst.Ellipsis())])
+
+    def __init__(self):
+        self.ns_stack = list[ClassNamespace]()
+
+    def register_elem(self, name: str, declared: bool):
+        if self.ns_stack:
+            s = self.ns_stack[-1]
+            s.all_elems.add(name)
+            if declared:
+                s.declared_elems.add(name)
+
+    def visit_ClassDef(self, node: cst.ClassDef):
+        self.ns_stack.append(ClassNamespace())
+
+    def leave_ClassDef(self, node, updated: cst.ClassDef):
+        s = self.ns_stack.pop()
+        to_declare = s.all_elems.difference(s.declared_elems)
+        if to_declare:
+            more_stmts = [cst.parse_statement(f"{n}: ...") for n in to_declare]
+            new_stmts = list(updated.body.body) + more_stmts
+            updated = updated.with_changes(
+                body=updated.body.with_changes(body=new_stmts)
+            )
+        return updated
+
+    def leave_FunctionDef(self, node, updated: cst.FunctionDef):
+        self.register_elem(updated.name.value, True)
+        return updated.with_changes(body=StubGenerator.OMIT, returns=None)
+
+    def leave_Annotation(self, node, updated: cst.Annotation):
+        return updated.with_changes(annotation=cst.Ellipsis())
+
+    def leave_Param(self, node, updated: cst.Param):
+        if updated.default is not None:
+            updated = updated.with_changes(default=cst.Ellipsis())
+        return updated.with_changes(annotation=None)
+
+    def leave_AnnAssign(self, node, updated: cst.AnnAssign):
+        if updated.value is not None:
+            updated = updated.with_changes(value=cst.Ellipsis())
+        return updated
+
+    def leave_Assign(self, node, updated: cst.AnnAssign):
+        return updated.with_changes(value=cst.Ellipsis())
+
+    def leave_Attribute(self, node, updated: cst.Assign):
+        match updated:
+            case cst.Attribute(
+                value=cst.Name(value="self"),
+                attr=cst.Name(value=elem_name),
+            ):
+                self.register_elem(elem_name, False)
+        return updated
+
+
+class EmptyLineRemove(cst.CSTTransformer):
+    def on_leave(self, node, updated):
+        if hasattr(updated, "leading_lines") and updated.leading_lines:
+            return updated.with_changes(leading_lines=[])
+        return updated
 
 
 def remove_comments(m: cst.Module) -> cst.Module:

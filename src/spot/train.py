@@ -16,6 +16,8 @@ from transformers import DataCollatorForSeq2Seq, get_linear_schedule_with_warmup
 from transformers.trainer_pt_utils import get_parameter_names
 from transformers.modeling_outputs import Seq2SeqLMOutput
 
+from spot.tokenized_src import PreprocessArgs
+
 from .type_check import TypeCheckArgs
 
 from .data import (
@@ -59,9 +61,10 @@ class TrainingConfig(NamedTuple):
     quicktest: bool = False
     drop_comments: bool = True
     imports_in_preamble: bool = True
+    stub_in_preamble: bool = False
     data_reduction: int = 1
     check_in_isolation: bool = False
-    all_labels: bool = False
+    all_labels: bool = True
     ctx_size: int = 4096
     left_margin: int = 2048
     # up to how much of the left_margin to be allocated as preamble
@@ -94,7 +97,7 @@ class TrainingConfig(NamedTuple):
             return "default"
 
     def get_model_name(self) -> str:
-        return "model-v2--" + self.as_name()
+        return "model-v3--" + self.as_name()
 
     def train_ctx_args(self) -> CtxArgs:
         return CtxArgs(
@@ -103,6 +106,13 @@ class TrainingConfig(NamedTuple):
             left_margin=self.left_margin,
             right_margin=self.right_margin,
             max_labels=self.train_max_labels,
+        )
+
+    def get_preprocess_args(self):
+        return PreprocessArgs(
+            drop_comments=self.drop_comments,
+            imports_in_preamble=self.imports_in_preamble,
+            stub_in_preamble=self.stub_in_preamble,
         )
 
     def dec_ctx_args(self) -> CtxArgs:

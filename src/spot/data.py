@@ -669,8 +669,7 @@ class SrcDataset:
             {
                 "n_files_too_wide": num_all_srcs - len(srcs),
                 "too_wide_ratio": (1 - len(srcs) / num_all_srcs),
-                "drop_comments": preprocess_args.drop_comments,
-                "imports_in_preamble": preprocess_args.imports_in_preamble,
+                "preprocess": preprocess_args,
             }
         )
 
@@ -1140,13 +1139,9 @@ def src_preds_to_accuracies(
 
 
 def get_dataset_name(
-    drop_comments: bool,
-    all_labels: bool,
-    imports_in_preamble: bool,
+    pre_args: PreprocessArgs,
     spot_round: int = 0,
 ):
-    drop_tag = "-drop_comments" if drop_comments else ""
-    label_tag = "-all_labels" if all_labels else ""
-    imports_tag = "-no_imports_preamble" if not imports_in_preamble else ""
     round_tag = f"-R{spot_round}" if spot_round > 0 else ""
-    return f"src_datasets-v2{round_tag}{label_tag}{drop_tag}{imports_tag}"
+    pre_parts = repr_modified_args(pre_args)
+    return f"src_datasets-v3-{round_tag}{pre_parts}"
