@@ -1,3 +1,4 @@
+import copy
 from .utils import *
 from .type_env import AnnotInfo, collect_user_annotations
 from .type_check import MypyFeedback, PythonType, parse_type_str
@@ -53,39 +54,42 @@ class TokenizedSrc:
         self, as_comment: bool, prev_types: dict[int, PythonType] | None = None
     ) -> "TokenizedSrc":
         "Inine the previous predictions into the code, either directly or as comments."
+        if len(self.types) == 0:
+            return copy.copy(self)
+
         if prev_types is None:
             prev_types = self.prev_types
         assert isinstance(prev_types, dict), f"prev_types has type: {type(prev_types)}"
         assert len(prev_types) > 0
 
         types_pos = list[int]()
-        tokenized_code = list[int]()
+        inlined_spans = dict[int, slice]()
+        new_tks = list[int]()
         tokenizer = DefaultTokenizer
         mask_id = tokenizer.mask_token_id
         comment_start = tokenizer.encode("/* ", add_special_tokens=False)
         comment_end = tokenizer.encode(" */", add_special_tokens=False)
 
-        inlined_spans = dict[int, slice]()
+        start = 0
 
-        i_types = 0
-        for tk in self.tokenized_code:
-            tokenized_code.append(tk)
-            if tk == mask_id:
-                span_start = len(tokenized_code)
-                types_pos.append(span_start - 1)
+        for t in range(len(self.types)):
+            new_tks.extend(self.tokenized_code[start : self.types_pos[t]])
+            types_pos.append(len(new_tks))
+            type_tk = self.tokenized_code[self.types_pos[t]]
+            if t in prev_types:
+                assert type_tk == mask_id
+                to_insert = tokenizer.encode(
+                    str(prev_types[t]), add_special_tokens=False
+                )
+                if as_comment:
+                    to_insert = comment_start + to_insert + comment_end
+                new_tks.extend(to_insert)
+                inlined_spans[t] = slice(types_pos[t], len(new_tks))
+            else:
+                new_tks.append(type_tk)
+            start = self.types_pos[t] + 1
+        new_tks.extend(self.tokenized_code[start:])
 
-                if i_types in prev_types:
-                    to_insert = tokenizer.encode(
-                        str(prev_types[i_types]), add_special_tokens=False
-                    )
-                    if as_comment:
-                        to_insert = comment_start + to_insert + comment_end
-                    tokenized_code.extend(to_insert)
-                    span_end = len(tokenized_code)
-                    inlined_spans[i_types] = slice(span_start, span_end)
-                    assert_eq(tokenized_code[span_start:span_end], to_insert)
-                i_types += 1
-        assert_eq(i_types, len(self.types))
         assert prev_types.keys() == inlined_spans.keys()
 
         return TokenizedSrc(
@@ -97,7 +101,7 @@ class TokenizedSrc:
             types_tks=self.types_tks,
             types_info=self.types_info,
             main_code=self.main_code,
-            tokenized_code=tokenized_code,
+            tokenized_code=new_tks,
             preamble_code=self.preamble_code,
             tokenized_preamble=self.tokenized_preamble,
             prev_types=prev_types,

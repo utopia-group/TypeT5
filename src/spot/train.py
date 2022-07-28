@@ -65,6 +65,7 @@ class TrainingConfig(NamedTuple):
     data_reduction: int = 1
     check_in_isolation: bool = False
     all_labels: bool = True
+    inline_prev_gold: bool = False
     ctx_size: int = 4096
     left_margin: int = 2048
     # up to how much of the left_margin to be allocated as preamble
@@ -106,6 +107,7 @@ class TrainingConfig(NamedTuple):
             left_margin=self.left_margin,
             right_margin=self.right_margin,
             max_labels=self.train_max_labels,
+            inline_prev_gold=self.inline_prev_gold,
         )
 
     def get_preprocess_args(self):
@@ -419,6 +421,8 @@ class TrainModelWrapper(pl.LightningModule):
         self.tokenizer: TokenizerSPOT = TokenizerSPOT.from_pretrained(model_checkpoint)
         self.model_saving_path = model_saving_path
         self.model_saving_interval: Optional[int] = None
+        self.avg_loss = MovingAvg(alpha=0.01)
+        self.labels_trained = 0
 
     def on_fit_start(self):
         # maps chunk id to the initial predictions made for that chunk immediately
@@ -449,8 +453,12 @@ class TrainModelWrapper(pl.LightningModule):
         )
         assert isinstance(outputs, Seq2SeqLMOutput)
         loss = not_none(outputs.loss)
-        self.log("train/loss", loss.item())
+        n_labels = float(batch["n_labels"].sum().item())
+        self.labels_trained += n_labels
+        self.avg_loss.update(loss.item())
+        self.log("train/loss", self.avg_loss.value)
         self.log("train/lr", self.lr_schedulers().get_last_lr()[0])  # type: ignore
+        self.log("train/labels", self.labels_trained)
         return loss
 
     def validation_step(self, batch, batch_idx):

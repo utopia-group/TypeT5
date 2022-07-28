@@ -159,6 +159,8 @@ class CtxArgs:
     left_margin: int
     right_margin: int
     max_labels: int = 16
+    # whether to inline all the labels that precede the context. Set to true when in interactive mode.
+    inline_prev_gold: bool = False
 
     def __post_init__(self):
         assert self.preamble_size > 0
@@ -178,7 +180,7 @@ class CtxArgs:
 
 
 def _compute_ctx(
-    src: TokenizedSrc, label_range: tuple[int, int], ctx_args: "CtxArgs"
+    src: TokenizedSrc, label_range: tuple[int, int], ctx_args: CtxArgs
 ) -> tuple[list[int], tuple[int, int]]:
     src_len = len(src.tokenized_code)
     assert label_range[0] < len(
@@ -239,7 +241,7 @@ def src_to_chunks_(
     chunks_info: list,
     src: TokenizedSrc,
     label_range: tuple[int, int],
-    ctx_args: "CtxArgs",
+    ctx_args: CtxArgs,
 ) -> None:
     assert 0 <= label_range[0]
     assert label_range[1] <= len(
@@ -304,6 +306,10 @@ def src_to_chunks_(
         inlined_spans=inlined_spans,
     )
     chunks_info.append(meta)
+
+    if ctx_args.inline_prev_gold:
+        prev_types = {t: src.types[t] for t in label_ids}
+        src = src.inline_prev_predictions(as_comment=False, prev_types=prev_types)
 
     new_label_range = (label_ids[-1] + 1, label_range[1])
     if new_label_range[0] < label_range[1]:
@@ -1084,7 +1090,7 @@ def preds_to_accuracies(
 ):
     cats = [an.cat for info in dataset.chunks_info for an in info.annots_info]
     labels = [ty for info in dataset.chunks_info for ty in info.types]
-    poses = [i for info in dataset.chunks_info for i in range(len(info.types))]
+    poses = [i for info in dataset.chunks_info for i in info.label_ids]
     results = [
         type_accuracies(
             list(seq_flatten(preds)),

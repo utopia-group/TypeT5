@@ -21,7 +21,12 @@ from spot.train import TrainingConfig, TypeCheckArgs
 from termcolor import colored
 
 config = TrainingConfig(
-    quicktest=False, all_labels=True, stub_in_preamble=True, preamble_size=1024
+    quicktest=False,
+    all_labels=True,
+    stub_in_preamble=True,
+    preamble_size=1024,
+    inline_prev_gold=True,
+    dec_max_labels=1,
 )
 gpu_id = 0
 TypeCheckSettings.temp_path = f"GPU-{gpu_id}"
