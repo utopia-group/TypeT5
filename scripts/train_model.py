@@ -29,10 +29,13 @@ config = TrainingConfig(
     dec_max_labels=1,
 )
 gpu_id = 0
+eval_only = False
 TypeCheckSettings.temp_path = f"GPU-{gpu_id}"
 
 if config.quicktest:
     print(colored("Quicktest mode", "red"))
+if eval_only:
+    print(colored("Model Evaluating Mode", "blue"))
 
 project_name = "test-SPOT" if config.quicktest else "SPOT"
 train_ctx_args = config.train_ctx_args()
@@ -62,31 +65,36 @@ from spot.utils import run_long_task
 import wandb
 import torch
 
-train_args = ModelTrainingArgs(
-    train_ctx_args,
-    dec_args,
-    train_max_tokens=max_tokens_per_file,
-    eval_max_tokens=2 * max_tokens_per_file,
-    max_epochs=2,
-    tc_args=tc_args,
-)
+if not eval_only:
+    train_args = ModelTrainingArgs(
+        train_ctx_args,
+        dec_args,
+        train_max_tokens=max_tokens_per_file,
+        eval_max_tokens=2 * max_tokens_per_file,
+        max_epochs=2,
+        tc_args=tc_args,
+    )
 
-wandb.init(
-    project=project_name,
-    name=model_name,
-    config=config.as_dict(),
-    dir=str(datadir),
-)
+    wandb.init(
+        project=project_name,
+        name=model_name,
+        config=config.as_dict(),
+        dir=str(datadir),
+    )
 
-with run_long_task("Training spot model"):
-    wrapper, r0_extra = train_spot_model(
-        src_datasets,
-        model_name,
-        train_args=train_args,
-        record_batches=False,
-        gpus=[gpu_id],
-        quicktest=config.quicktest,
-        use_small_model=config.use_small_model,
+    with run_long_task("Training spot model"):
+        wrapper, r0_extra = train_spot_model(
+            src_datasets,
+            model_name,
+            train_args=train_args,
+            record_batches=False,
+            gpus=[gpu_id],
+            quicktest=config.quicktest,
+            use_small_model=config.use_small_model,
+        )
+else:
+    wrapper = ModelWrapper.from_pretrained(
+        datadir / f"checkpoints/lit-saved/{model_name}"
     )
 
 device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
@@ -109,7 +117,7 @@ bs_args = DecodingArgs(
 wrapper.args = bs_args
 
 eval_cache = PickleCache(datadir / f"checkpoints/lit-saved/{model_name}/eval_cache")
-
+# eval_cache.clear()
 r0_eval = eval_cache.cached(
     "dataset_pred.pkl",
     lambda: wrapper.eval_on_dataset(src_datasets["test"]),
@@ -129,8 +137,9 @@ def wandb_string(s: str):
     return wandb.Html(string_to_html(s))
 
 
-wandb.log({f"test/accuracies": wandb_string(pretty_show_dict(r0_accs))})
-wandb.finish()
+if not eval_only:
+    wandb.log({f"test/accuracies": wandb_string(pretty_show_dict(r0_accs))})
+    wandb.finish()
 
 # %%
 # export the code with inlined predictions as HTML

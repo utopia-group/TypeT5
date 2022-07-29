@@ -159,8 +159,11 @@ def export_preds_on_code(
                 contain_extra_id=False,
             )
         )
+        chunk_id = (
+            dataset.data[i]["chunk_id"] if isinstance(dataset, ChunkedDataset) else i
+        )
         assert isinstance(page.value, str)
-        write_file(export_to / "chunks" / f"chunk{i}.html", page.value)
+        write_file(export_to / "chunks" / f"chunk{chunk_id}.html", page.value)
 
     chunk_accs = list[CountedAcc]()
     with tqdm(total=len(preds), desc="Computing accuracies") as pbar:
