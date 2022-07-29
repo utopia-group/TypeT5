@@ -26,7 +26,9 @@ class DecodingArgs:
     ctx_args: CtxArgs
     sampling_max_tokens: int
     max_workers: int = DefaultWorkers
-    max_tokens_per_type: int = 10
+    # the maximal prediction length = tokens_per_type * num_types + slack_tokens
+    tokens_per_type: int = 10
+    slack_tokens: int = 10
     do_sample: bool = False
     top_p: float = 0.9
     num_beams: Optional[int] = None
@@ -101,25 +103,26 @@ class ModelWrapper:
     ) -> tuple[list[list[PythonType]], Tensor]:
         """Run the model on the given batch and return the predicted types for each row."""
         model = self.model
+        args = self.args
         n_labels = batch["n_labels"]
         max_labels = max(n_labels)
 
-        div_pen = self.args.diversity_penalty
-        if self.args.num_beam_groups is not None:
+        div_pen = args.diversity_penalty
+        if args.num_beam_groups is not None:
             assert (
                 div_pen is not None and div_pen > 0
             ), "num_beam_groups requires diversity_penalty > 0"
 
         output_ids = model.generate(
             inputs=batch["input_ids"].to(model.device),
-            do_sample=self.args.do_sample,
-            top_p=self.args.top_p,
-            num_beams=self.args.num_beams,
+            do_sample=args.do_sample,
+            top_p=args.top_p,
+            num_beams=args.num_beams,
             num_return_sequences=num_return_sequences,
-            num_beam_groups=self.args.num_beam_groups,
-            max_length=self.args.max_tokens_per_type * max_labels,
+            num_beam_groups=args.num_beam_groups,
+            max_length=args.tokens_per_type * max_labels + args.slack_tokens,
             diversity_penalty=div_pen,
-            length_penalty=self.args.length_penalty,
+            length_penalty=args.length_penalty,
             renormalize_logits=True,
         ).cpu()  # type: ignore
         assert len(output_ids.shape) == 2
@@ -169,7 +172,9 @@ class ModelWrapper:
         device = model.device
         # we use this dict to keep the order of the chunks since it may be permuted by dynamic_dataloader
         pred_types = dict[int, list]()
-        with tqdm(total=len(dataset), desc="predict", **tqdm_args) as tqdm_bar:
+        with tqdm(
+            total=len(dataset), desc="predict", smoothing=0.01, **tqdm_args
+        ) as tqdm_bar:
             for batch in loader:
                 n_chunks = batch["input_ids"].shape[0]
                 batch["input_ids"] = batch["input_ids"].to(device)
