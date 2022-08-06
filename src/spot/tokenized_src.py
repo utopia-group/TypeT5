@@ -357,25 +357,38 @@ class StubGenerator(cst.CSTTransformer):
         return updated.with_changes(annotation=cst.Ellipsis())
 
     def leave_Param(self, node, updated: cst.Param):
+        # remove parameter type annotation and default value
         if updated.default is not None:
             updated = updated.with_changes(default=cst.Ellipsis())
         return updated.with_changes(annotation=None)
 
     def leave_AnnAssign(self, node, updated: cst.AnnAssign):
+        # omit rhs of annotated assignments (if any)
         if updated.value is not None:
             updated = updated.with_changes(value=cst.Ellipsis())
         return updated
 
     def leave_Assign(self, node, updated: cst.AnnAssign):
+        # omit rhs of assignments
         return updated.with_changes(value=cst.Ellipsis())
 
     def leave_Attribute(self, node, updated: cst.Assign):
+        # record all atribute accesses involving `self`
         match updated:
             case cst.Attribute(
                 value=cst.Name(value="self"),
                 attr=cst.Name(value=elem_name),
             ):
                 self.register_elem(elem_name, False)
+        return updated
+
+    def leave_Decorator(self, node, updated: cst.Decorator):
+        # omit decorator call arguments
+        match updated.decorator:
+            case cst.Call(func=f):
+                new_call = cst.Call(f, [cst.Arg(cst.Ellipsis())])
+                updated = updated.with_changes(decorator=new_call)
+
         return updated
 
 
