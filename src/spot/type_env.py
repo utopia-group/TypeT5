@@ -126,7 +126,6 @@ def add_stmts(
 
 class CodePathManager:
     def __init__(self):
-        super().__init__()
         self.path: AnnotPath = annot_path()
         self.path_name_counts: dict[AnnotPath, dict[str, int]] = {}
 
@@ -137,36 +136,46 @@ class CodePathManager:
         counts[name] = id + 1
         return self.path.append(name, id)
 
+    def on_visit(self, node):
+        match node:
+            case cst.FunctionDef():
+                self.path = self.get_path(node.name.value)
+            case cst.ClassDef():
+                self.path = self.get_path(node.name.value)
+            case cst.Lambda():
+                self.path = self.get_path(SpecialNames.Lambda)
 
-class AnnotCollector(cst.CSTVisitor, CodePathManager):
+    def on_leave(self, node):
+        match node:
+            case cst.ClassDef() | cst.FunctionDef() | cst.Lambda():
+                self.path = self.path.pop()
+
+
+class AnnotCollector(cst.CSTVisitor):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self):
         super().__init__()
-        CodePathManager.__init__(self)
+        self.pm = CodePathManager()
         # store the type annotations
         self.annots_info: list[AnnotInfo] = []
         self.cat_stack = [AnnotCat.GlobalVar]
 
     def on_visit(self, node):
+        self.pm.on_visit(node)
         match node:
-            case cst.FunctionDef():
-                self.path = self.get_path(node.name.value)
+            case cst.FunctionDef() | cst.Lambda():
                 self.cat_stack.append(AnnotCat.LocalVar)
             case cst.ClassDef():
-                self.path = self.get_path(node.name.value)
                 self.cat_stack.append(AnnotCat.ClassAtribute)
-            case cst.Lambda():
-                self.path = self.get_path(SpecialNames.Lambda)
-                self.cat_stack.append(AnnotCat.LocalVar)
         return super().on_visit(node)
 
     def on_leave(self, node):
         r = super().on_leave(node)
         match node:
             case cst.ClassDef() | cst.FunctionDef() | cst.Lambda():
-                self.path = self.path.pop()
                 self.cat_stack.pop()
+        self.pm.on_leave(node)
         return r
 
     def _record_annot(
@@ -175,15 +184,11 @@ class AnnotCollector(cst.CSTVisitor, CodePathManager):
         cat: AnnotCat,
         annot: cst.Annotation | None,
     ) -> None:
-        def fix_pos(pos: CodePosition):
-            return CodePosition(pos.line, pos.column + 1)
-
-        path = self.get_path(name)
+        path = self.pm.get_path(name)
         crange = None
         if annot:
             crange = self.get_metadata(PositionProvider, annot)
-            # use 1-based indexing for columns
-            crange = CodeRange(fix_pos(crange.start), fix_pos(crange.end))
+            crange = CodeRange(fix_code_pos(crange.start), fix_code_pos(crange.end))
         self.annots_info.append(AnnotInfo(path, cat, annot, crange))
 
     def leave_FunctionDef(self, node: cst.FunctionDef):
@@ -201,15 +206,20 @@ class AnnotCollector(cst.CSTVisitor, CodePathManager):
                 self._record_annot(l + "." + r, AnnotCat.ClassAtribute, node.annotation)
 
 
-class AnnotApplier(cst.CSTTransformer, CodePathManager):
+def fix_code_pos(pos: CodePosition):
+    "convert to 1-based indexing for columns"
+    return CodePosition(pos.line, pos.column + 1)
+
+
+class AnnotApplier(cst.CSTTransformer):
     """Apply the annotations to the code. Note that each AnnotPath will be
     applied at most once."""
 
     def __init__(self, annots: Dict[AnnotPath, cst.Annotation]):
         super().__init__()
-        CodePathManager.__init__(self)
 
         self.annots = annots.copy()
+        self.pm = CodePathManager()
 
         # store the target prefixes
         self.prefixes: Set[AnnotPath] = {annot_path()}
@@ -219,26 +229,20 @@ class AnnotApplier(cst.CSTTransformer, CodePathManager):
                 path = path.pop()
 
     def on_visit(self, node):
-        match node:
-            case cst.ClassDef() | cst.FunctionDef():
-                self.path = self.get_path(node.name.value)
-            case cst.Lambda():
-                self.path = self.get_path(SpecialNames.Lambda)
-        if self.path not in self.prefixes:
+        self.pm.on_visit(node)
+        if self.pm.path not in self.prefixes:
             return False
         return super().on_visit(node)
 
     def on_leave(self, node, updated):
         r = super().on_leave(node, updated)
-        match node:
-            case cst.ClassDef() | cst.FunctionDef() | cst.Lambda():
-                self.path = self.path.pop()
+        self.pm.on_leave(node)
         return r
 
     def leave_FunctionDef(
         self, node: cst.FunctionDef, updated: cst.FunctionDef
     ) -> cst.FunctionDef:
-        path = self.get_path(SpecialNames.Return)
+        path = self.pm.get_path(SpecialNames.Return)
         if path in self.annots:
             rep = self.annots.pop(path)
             return updated.with_changes(returns=rep)
@@ -246,7 +250,7 @@ class AnnotApplier(cst.CSTTransformer, CodePathManager):
             return updated
 
     def leave_Param(self, node: cst.Param, updated: cst.Param) -> cst.Param:
-        path = self.get_path(updated.name.value)
+        path = self.pm.get_path(updated.name.value)
         if path in self.annots:
             rep = self.annots.pop(path)
             return updated.with_changes(annotation=rep)
@@ -263,7 +267,7 @@ class AnnotApplier(cst.CSTTransformer, CodePathManager):
                 key_name = l + "." + r
             case _:
                 key_name = SpecialNames.Missing
-        path = self.get_path(key_name)
+        path = self.pm.get_path(key_name)
 
         if path in self.annots:
             rep = self.annots.pop(path)
