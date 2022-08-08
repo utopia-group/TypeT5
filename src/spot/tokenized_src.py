@@ -1,8 +1,9 @@
 import copy
 from .utils import *
-from .type_env import AnnotInfo, collect_user_annotations
+from .type_env import AnnotInfo, AnnotPath, CodePathManager, collect_user_annotations
 from .type_check import MypyFeedback, PythonType, parse_type_str
 from .type_env import apply_annotations, collect_user_annotations
+from libcst.metadata import CodeRange, PositionProvider
 
 
 @dataclass

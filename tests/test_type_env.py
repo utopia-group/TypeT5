@@ -3,6 +3,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from spot.tokenized_src import PreprocessArgs
 from spot.type_check import MypyResult
 
 from spot.type_env import (
@@ -19,9 +20,9 @@ from spot.type_env import (
     parse_type_str,
     type_inf_env,
 )
-from spot.utils import SpecialNames, cst, read_file, write_file
+from spot.utils import proj_root, SpecialNames, cst, read_file, write_file
 
-os.chdir(Path(__file__).parent.parent)
+os.chdir(proj_root())
 
 
 def test_annotation_collection():
@@ -137,13 +138,12 @@ from spot.data import SrcDataset, type_check_src, type_check_src_in_project
 from spot.utils import load_tokenizer_spot, proj_root
 
 
+@pytest.mark.skip("Not using type checker for the moment")
 def test_mypy_checking():
     simple_dataset = SrcDataset.from_repos(
         proj_root() / "data",
         [proj_root() / "data/code"],
-        drop_comments=True,
-        max_workers=10,
-        label_ratio=1.0,
+        PreprocessArgs(drop_comments=True),
     )
 
     src_to_check = simple_dataset.get_src_by_file(Path("code/bad_code_2.py"))

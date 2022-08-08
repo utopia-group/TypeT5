@@ -24,7 +24,8 @@ from typing import (
     Optional,
     Sequence,
     TypeVar,
-    Union,
+    Mapping,
+    Collection,
     cast,
 )
 
