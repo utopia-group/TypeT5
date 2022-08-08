@@ -6,13 +6,11 @@ from spot.static_analysis import (
     PythonProject,
     UsageAnalysis,
     cst,
+    to_abs_import_path as to_abs,
 )
 import pytest
 
 from spot.utils import assert_eq
-
-
-to_abs = PythonProject.to_abs_import_path
 
 
 def test_import_normalization():

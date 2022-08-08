@@ -83,21 +83,35 @@ class PythonModule:
 @dataclass
 class PythonProject:
     modules: dict[str, PythonModule]
+    symlinks: dict[str, str]
 
     @staticmethod
     def from_modules(modules: Iterable[PythonModule]) -> "PythonProject":
-        return PythonProject({m.name: m for m in modules})
+        return PythonProject({m.name: m for m in modules}, dict())
 
     @staticmethod
-    def from_root(root: Path) -> "PythonProject":
+    def from_root(
+        root: Path,
+        discard_bad_files: bool = False,
+        src_filter: Callable[[str], bool] = lambda s: True,
+    ) -> "PythonProject":
         """Root is typically the `src/` directory or just the root of the project."""
         modules = dict()
+        symlinks = dict()
 
         for src in root.rglob("*.py"):
             if src.is_symlink():
                 continue
             with src.open() as f:
-                mod = cst.parse_module(f.read())
+                src_text = f.read()
+            if not src_filter(src_text):
+                continue
+            try:
+                mod = cst.parse_module(src_text)
+            except cst.ParserSyntaxError as e:
+                if discard_bad_files:
+                    continue
+                raise
 
             mod_name = PythonProject.rel_path_to_module_name(src.relative_to(root))
             modules[mod_name] = PythonModule.from_cst(mod, mod_name)
@@ -109,9 +123,9 @@ class PythonProject:
             origin_name = PythonProject.rel_path_to_module_name(
                 src.resolve().relative_to(root)
             )
-            modules[mod_name] = modules[origin_name]
+            symlinks[mod_name] = origin_name
 
-        return PythonProject(modules)
+        return PythonProject(modules, symlinks)
 
     def all_funcs(self) -> Generator[PythonFunction, None, None]:
         for module in self.modules.values():
@@ -121,21 +135,21 @@ class PythonProject:
     def rel_path_to_module_name(rel_path: Path) -> str:
         return rel_path.with_suffix("").as_posix().replace("/", ".")
 
-    @staticmethod
-    def to_abs_import_path(current_mod: str, path: str) -> str:
-        # take all leading dots
-        dots = 0
-        while dots < len(path) and path[dots] == ".":
-            dots += 1
-        if dots == 0:
-            return path
-        mod_segs = split_import_path(current_mod)
-        assert len(mod_segs) >= dots, "Cannot go up more levels."
-        result_segs = mod_segs[:-dots]
-        rest = path[dots:]
-        if rest:
-            result_segs.append(rest)
-        return ".".join(result_segs)
+
+def to_abs_import_path(current_mod: str, path: str) -> str:
+    # find all leading dots
+    dots = 0
+    while dots < len(path) and path[dots] == ".":
+        dots += 1
+    if dots == 0:
+        return path
+    mod_segs = split_import_path(current_mod)
+    assert len(mod_segs) >= dots, "Cannot go up more levels."
+    result_segs = mod_segs[:-dots]
+    rest = path[dots:]
+    if rest:
+        result_segs.append(rest)
+    return ".".join(result_segs)
 
 
 _path_segs_cache = dict[str, list[str]]()
@@ -182,15 +196,15 @@ class UsageAnalysis:
 
             match qname.source:
                 case QualifiedNameSource.IMPORT:
-                    segs = PythonProject.to_abs_import_path(mname, qname.name).split(
-                        "."
-                    )
+                    segs = to_abs_import_path(mname, qname.name).split(".")
                     assert len(segs) >= 2
-                    callee = ProjectPath(".".join(segs[:-1]), segs[-1])
+                    callee_mod = ".".join(segs[:-1])
+                    callee_mod = project.symlinks.get(callee_mod, callee_mod)
+                    callee = ProjectPath(callee_mod, segs[-1])
                     if callee in path2func:
                         yield FunctionUsage(caller, callee, span, is_certain=True)
                     elif (
-                        cons := ProjectPath(callee.module, callee.path + ".__init__")
+                        cons := ProjectPath(callee_mod, callee.path + ".__init__")
                     ) in path2func:
                         yield FunctionUsage(caller, cons, span, is_certain=True)
                 case QualifiedNameSource.LOCAL:
