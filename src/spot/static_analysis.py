@@ -249,8 +249,13 @@ def compute_module_usages(mod: PythonModule):
 
     for f in mod.all_funcs():
         f.tree.visit(recorder)
+        # we only keep the first usage of each qualified name to avoid quadratic blow up
+        callee_set = set[QualifiedName]()
         for u in recorder.usages:
+            if u[1] in callee_set:
+                continue
             result.append((f.path, u[0], u[1]))
+            callee_set.add(u[1])
         recorder.usages.clear()
 
     return result
