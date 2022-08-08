@@ -174,6 +174,12 @@ class UsageAnalysis:
         )
 
         def generate_usages(caller: ProjectPath, span: CodeRange, qname: QualifiedName):
+            def gen_method_usages(method_name: str):
+                if method_name in UsageAnalysis.CommonMethods:
+                    return
+                for f in all_methods.get(method_name, []):
+                    yield FunctionUsage(caller, f.path, span, is_certain=False)
+
             match qname.source:
                 case QualifiedNameSource.IMPORT:
                     segs = PythonProject.to_abs_import_path(mname, qname.name).split(
@@ -192,10 +198,7 @@ class UsageAnalysis:
                     match segs:
                         case ["<method>", m]:
                             # method fuzzy match case 1
-                            for f in all_methods.get(m, []):
-                                yield FunctionUsage(
-                                    caller, f.path, span, is_certain=False
-                                )
+                            yield from gen_method_usages(m)
                             return
                         case [cls, _, "<locals>", "self", m]:
                             # handle self.method() calls
@@ -210,8 +213,7 @@ class UsageAnalysis:
                         yield FunctionUsage(caller, cons, span, is_certain=True)
                     elif len(segs) >= 2 and segs[-2] != "<locals>":
                         # method fuzzy match case 2
-                        for f in all_methods.get(segs[-1], []):
-                            yield FunctionUsage(caller, f.path, span, is_certain=False)
+                        yield from gen_method_usages(segs[-1])
 
         all_usages = list[FunctionUsage]()
         for mname, mod in project.modules.items():
@@ -223,6 +225,15 @@ class UsageAnalysis:
         self.all_usages = all_usages
         self.caller2callees = groupby(all_usages, lambda u: u.caller)
         self.callee2callers = groupby(all_usages, lambda u: u.callee)
+
+    CommonMethods = {
+        "__init__",
+        "__repr__",
+        "__new__",
+        "__str__",
+        "__hash__",
+        "__eq__",
+    }
 
 
 def compute_module_usages(mod: PythonModule):
