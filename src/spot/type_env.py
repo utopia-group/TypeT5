@@ -77,7 +77,7 @@ def collect_user_annotations(
     code: cst.Module | cst.MetadataWrapper,
 ) -> tuple[list[AnnotInfo], list["PythonType"]]:
     """Collect all user-added type annotations in the given source code. Unlike `collect_annots_info`,
-    The order of the returned annotations is gurated to follow the order of the source code."""
+    The order of the returned annotations is guaranteed to follow the order of the source code."""
 
     def as_tuple(pos: CodePosition):
         return pos.line, pos.column
