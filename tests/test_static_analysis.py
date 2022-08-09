@@ -1,7 +1,7 @@
 from pathlib import Path
 import spot
 from spot.static_analysis import (
-    FunctionUsage,
+    ModuleNamespace,
     ProjectPath,
     PythonModule,
     PythonProject,
@@ -33,6 +33,29 @@ def test_import_normalization():
 
     with pytest.raises(AssertionError):
         to_abs("spot.static_analysis", "...")
+
+
+def test_namespace_resolution():
+    modules = [
+        "foo",
+        "foo.bar",
+        "z",
+    ]
+    namespace = ModuleNamespace.from_modules(modules)
+
+    with pytest.raises(AssertionError):
+        namespace.resolve_path(["foo"])
+    with pytest.raises(AssertionError):
+        namespace.resolve_path(["z"])
+
+    assert namespace.resolve_path(["z", "x"]) == ProjectPath("z", "x")
+    assert namespace.resolve_path(["foo", "a"]) == ProjectPath("foo", "a")
+    assert namespace.resolve_path(["foo", "bar"]) == ProjectPath("foo", "bar")
+    assert namespace.resolve_path(["foo", "C", "x"]) == ProjectPath("foo", "C.x")
+    assert namespace.resolve_path(["foo", "bar", "C"]) == ProjectPath("foo.bar", "C")
+    assert namespace.resolve_path(["foo", "bar", "C", "x"]) == ProjectPath(
+        "foo.bar", "C.x"
+    )
 
 
 def test_usage_analysis():
@@ -109,6 +132,15 @@ class SubClass(UsageClass):
     def use(self):
         self.foo(5)
         f1.C.s_method(5)
+
+from root.file1 import nonexist
+
+def use_nonexist():
+    nonexist(5)
+    nonexist.use(5)
+
+def use_nonexist2():
+    nonexist().use(5)
 """
 
     project = PythonProject.from_modules(
@@ -187,4 +219,13 @@ class SubClass(UsageClass):
     # We should not cound decorator as a usage to avoid blowing up
     assert_usages(
         "root.file2/usage_dec",
+    )
+
+    assert_usages(
+        "root.file2/use_nonexist",
+    )
+
+    assert_usages(
+        "root.file2/use_nonexist2",
+        ("root.file2/SubClass.use", False),
     )

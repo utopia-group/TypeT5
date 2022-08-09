@@ -192,17 +192,57 @@ class FunctionUsage:
         return f"{self.caller} {'' if self.is_certain else 'potentially '}calls {self.callee}"
 
 
+class ModuleNamespace:
+    def __init__(self):
+        self.children = dict[str, "ModuleNamespace"]()
+
+    def __repr__(self):
+        return f"ModuleNamespace({self.children})"
+
+    def add_module(self, segs: list[str]) -> None:
+        namespace = self
+        for s in segs:
+            if s in namespace.children:
+                namespace = namespace.children[s]
+            else:
+                namespace.children[s] = ModuleNamespace()
+                namespace = namespace.children[s]
+
+    def resolve_path(self, segs: list[str]) -> ProjectPath | None:
+        assert len(segs) >= 2, "Path should be at least 2 segments long."
+        namespace = self
+        matched = 0
+        for s in segs[:-1]:
+            if s in namespace.children:
+                namespace = namespace.children[s]
+                matched += 1
+            else:
+                break
+        if matched == 0:
+            return None
+        return ProjectPath(".".join(segs[:matched]), ".".join(segs[matched:]))
+
+    @staticmethod
+    def from_modules(modules: Iterable[str]) -> "ModuleNamespace":
+        root = ModuleNamespace()
+        for m in modules:
+            root.add_module(split_import_path(m))
+        return root
+
+
 class UsageAnalysis:
     all_usages: list[FunctionUsage]
     caller2callees: dict[ProjectPath, list[FunctionUsage]]
     callee2callers: dict[ProjectPath, list[FunctionUsage]]
     path2func: dict[ProjectPath, PythonFunction]
+    namespaces: dict[str, str | dict]
 
     def __init__(self, project: PythonProject):
         path2func = {f.path: f for f in project.all_funcs()}
         all_methods = groupby(
             (f for f in project.all_funcs() if f.is_method), lambda f: f.name
         )
+        namespaces = ModuleNamespace.from_modules(project.modules.keys())
 
         def generate_usages(
             mname: str, caller: ProjectPath, span: CodeRange, qname: QualifiedName
@@ -217,17 +257,17 @@ class UsageAnalysis:
                 case QualifiedNameSource.IMPORT:
                     segs = to_abs_import_path(mname, qname.name).split(".")
                     if len(segs) < 2:
-                        logging.warn(
+                        logging.warning(
                             f"Cannot resolve import '{qname.name}' in module: '{mname}'."
                         )
                         return
-                    callee_mod = ".".join(segs[:-1])
-                    callee_mod = project.symlinks.get(callee_mod, callee_mod)
-                    callee = ProjectPath(callee_mod, segs[-1])
+                    callee = namespaces.resolve_path(segs)
+                    if callee is None:
+                        return
                     if callee in path2func:
                         yield FunctionUsage(caller, callee, span, is_certain=True)
                     elif (
-                        cons := ProjectPath(callee_mod, callee.path + ".__init__")
+                        cons := ProjectPath(callee.module, callee.path + ".__init__")
                     ) in path2func:
                         yield FunctionUsage(caller, cons, span, is_certain=True)
                 case QualifiedNameSource.LOCAL:
