@@ -471,10 +471,14 @@ class PickleCache:
             logging.warning(f"No cache found at: {self.cache_dir}, skip clearing.")
 
 
-def assert_eq(*xs: T1) -> None:
-    assert len(xs) > 1
-    for i, (x, y) in enumerate(zip(xs, xs[1:])):
-        assert x == y, f"{x} != {y} at index {i}"
+def assert_eq(x: T1, *xs: T1, extra_message: Callable[[], str] = lambda: "") -> None:
+    for i in range(len(xs)):
+        x = xs[i - 1] if i > 0 else x
+        y = xs[i]
+        assert x == y, (
+            f"{x} (of type {type(x).__name__}) != {y} (of type {type(y).__name__}) at index {i}.\n"
+            + extra_message()
+        )
 
 
 def scalar_stats(xs) -> dict[str, Any]:

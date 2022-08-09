@@ -141,6 +141,18 @@ def use_nonexist():
 
 def use_nonexist2():
     nonexist().use(5)
+
+def dual():
+    gf(5)
+
+def dual():
+    # this should override the previous one
+    pass
+
+@overload
+def dual():
+    # this one should be ignored as well
+    gf_with_inner(5)
 """
 
     project = PythonProject.from_modules(
@@ -228,4 +240,8 @@ def use_nonexist2():
     assert_usages(
         "root.file2/use_nonexist2",
         ("root.file2/SubClass.use", False),
+    )
+
+    assert_usages(
+        "root.file2/dual",
     )

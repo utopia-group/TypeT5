@@ -143,7 +143,7 @@ def repo_to_tk_srcs(
 
             src = tokenized_src_from_segs(
                 file=file,
-                repo=src_root,
+                repo=repo,
                 preamble=preamble,
                 tokenized_preamble=tokenized_preamble,
                 code_segs=code_segs,

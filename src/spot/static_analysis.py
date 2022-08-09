@@ -50,7 +50,7 @@ class PythonFunction:
 class PythonClass:
     name: str
     path: ProjectPath
-    methods: list[PythonFunction]
+    methods: dict[str, PythonFunction]
     tree: cst.ClassDef
 
     def __repr__(self):
@@ -77,7 +77,7 @@ class PythonModule:
         for f in self.functions:
             yield f
         for c in self.classes:
-            for f in c.methods:
+            for f in c.methods.values():
                 yield f
 
 
@@ -149,8 +149,10 @@ class PythonProject:
         if parts[0] == "src":
             parts = parts[1:]
         if parts[-1] == "__init__.py":
-            parts = parts[:-1]
-        return Path(*parts).with_suffix("").as_posix().replace("/", ".")
+            return ".".join(parts[:-1])
+        else:
+            # also remove the .py extension
+            return ".".join([*parts[:-1], parts[-1][:-3]])
 
 
 def to_abs_import_path(current_mod: str, path: str) -> str:
@@ -340,13 +342,14 @@ def compute_module_usages(mod: PythonModule):
 
 
 class PythonModuleBuilder(cst.CSTVisitor):
-    """Construct a `PythonModule` from a `cst.Module`."""
+    """Construct a `PythonModule` from a `cst.Module`.
+    If multiple definitions of the same name are found, only the last one is kept."""
 
     def __init__(self, module_name: str):
         super().__init__()
 
-        self.functions = list[PythonFunction]()
-        self.classes = list[PythonClass]()
+        self.functions = dict[str, PythonFunction]()
+        self.classes = dict[str, PythonClass]()
         self.current_class: PythonClass | None = None
         self.module = None
         self.module_name = module_name
@@ -354,13 +357,18 @@ class PythonModuleBuilder(cst.CSTVisitor):
     def get_module(self) -> PythonModule:
         assert self.module is not None, "Must visit a module first"
         return PythonModule(
-            functions=self.functions,
-            classes=self.classes,
+            functions=list(self.functions.values()),
+            classes=list(self.classes.values()),
             name=self.module_name,
             tree=self.module,
         )
 
     def visit_FunctionDef(self, node: cst.FunctionDef):
+        for dec in node.decorators:
+            match dec.decorator:
+                case cst.Name("overload") | cst.Attribute(attr=cst.Name("overload")):
+                    # ignore overload signatures
+                    return False
         is_method = self.current_class is not None
         name = node.name.value
         path = self.current_class.name + "." + name if self.current_class else name
@@ -371,7 +379,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
             is_method=is_method,
         )
         fs = self.current_class.methods if self.current_class else self.functions
-        fs.append(func)
+        fs[func.name] = func
         return False  # don't visit inner functions
 
     def visit_ClassDef(self, node: cst.ClassDef):
@@ -380,14 +388,14 @@ class PythonModuleBuilder(cst.CSTVisitor):
         cls = PythonClass(
             name=node.name.value,
             path=ProjectPath(self.module_name, node.name.value),
-            methods=[],
+            methods=dict(),
             tree=node,
         )
         self.current_class = cls
 
     def leave_ClassDef(self, node: cst.ClassDef):
         if self.current_class is not None:
-            self.classes.append(self.current_class)
+            self.classes[self.current_class.name] = self.current_class
             self.current_class = None
 
     def visit_Module(self, node: cst.Module):
