@@ -248,7 +248,8 @@ class UsageAnalysis:
             mname: str, caller: ProjectPath, span: CodeRange, qname: QualifiedName
         ):
             def gen_method_usages(method_name: str):
-                if method_name in UsageAnalysis.CommonMethods:
+                if method_name.startswith("__") and method_name.endswith("__"):
+                    # skip common methods like __init__
                     return
                 for f in all_methods.get(method_name, []):
                     yield FunctionUsage(caller, f.path, span, is_certain=False)
@@ -307,15 +308,6 @@ class UsageAnalysis:
         self.all_usages = all_usages
         self.caller2callees = groupby(all_usages, lambda u: u.caller)
         self.callee2callers = groupby(all_usages, lambda u: u.callee)
-
-    CommonMethods = {
-        "__init__",
-        "__repr__",
-        "__new__",
-        "__str__",
-        "__hash__",
-        "__eq__",
-    }
 
 
 def compute_module_usages(mod: PythonModule):
