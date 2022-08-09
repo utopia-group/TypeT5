@@ -43,7 +43,10 @@ def dataset_from_repos(
             src.file = src.repo / src.file
             all_srcs.append(src)
     for g in groupby(all_srcs, lambda s: s.file).values():
-        assert len(g) == 1, f"Multiple srcs for file {g[0].file}"
+        if len(g) > 1:
+            logging.warning(
+                f"Multiple srcs for file '{g[0].file}' in repo '{repos_root / g[0].repo}'"
+            )
     return SrcDataset(repos_root, all_srcs)
 
 
@@ -139,7 +142,7 @@ def repo_to_tk_srcs(
                 reverse=True,
             )
             left_tks = list(seq_flatten(potential_callees + certain_callees))
-            file = Path(fun.path.module.replace(".", "/")) / fun.path.path
+            file = Path(fun.path.module) / fun.path.path
 
             src = tokenized_src_from_segs(
                 file=file,

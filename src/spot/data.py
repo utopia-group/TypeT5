@@ -166,7 +166,7 @@ class CtxArgs:
         assert self.preamble_size > 0
         assert (
             self.preamble_size < self.left_margin
-        ), "Preamble size is allcoated from the left margin."
+        ), "Preamble bigger than left_margin.(Preamble is allcoated from the left margin.)"
         assert (
             self.left_margin + self.right_margin < self.ctx_size
         ), "No window size left."
@@ -934,7 +934,11 @@ class ChunkedDataset:
                 assert (
                     info.path in src_path_map[file]
                 ), f"{info.path} should not be a label in {file}.\nExpected label map: {src_path_map[file]}\nChunk code:\n{decode_tokens(input)}"
-                assert_eq(src_path_map[file][info.path], ty)
+                assert_eq(
+                    src_path_map[file][info.path],
+                    ty,
+                    extra_message=lambda: f"file={file}, path={info.path}",
+                )
 
 
 def output_ids_as_seqs(output_ids: Iterable[int]):
