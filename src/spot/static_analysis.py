@@ -96,12 +96,19 @@ class PythonProject:
         discard_bad_files: bool = False,
         src_filter: Callable[[str], bool] = lambda s: True,
         drop_comments: bool = True,
+        ignore_dirs: set[str] = {".venv"},
     ) -> "PythonProject":
         """Root is typically the `src/` directory or just the root of the project."""
         modules = dict()
         symlinks = dict()
 
-        for src in root.rglob("*.py"):
+        all_srcs = [
+            p
+            for p in root.rglob("*.py")
+            if p.relative_to(root).parts[0] not in ignore_dirs
+        ]
+
+        for src in all_srcs:
             if src.is_symlink():
                 continue
             with src.open() as f:
@@ -120,7 +127,7 @@ class PythonProject:
                 mod = remove_comments(mod)
             modules[mod_name] = PythonModule.from_cst(mod, mod_name)
 
-        for src in root.rglob("*.py"):
+        for src in all_srcs:
             if not src.is_symlink():
                 continue
             mod_name = PythonProject.rel_path_to_module_name(src.relative_to(root))
@@ -137,7 +144,13 @@ class PythonProject:
 
     @staticmethod
     def rel_path_to_module_name(rel_path: Path) -> str:
-        return rel_path.with_suffix("").as_posix().replace("/", ".")
+        parts = rel_path.parts
+        assert parts[-1].endswith(".py")
+        if parts[0] == "src":
+            parts = parts[1:]
+        if parts[-1] == "__init__.py":
+            parts = parts[:-1]
+        return Path(*parts).with_suffix("").as_posix().replace("/", ".")
 
 
 def to_abs_import_path(current_mod: str, path: str) -> str:
@@ -225,7 +238,6 @@ class UsageAnalysis:
                             yield from gen_method_usages(m)
                             return
                         case [cls, _, "<locals>", "self", m]:
-                            # handle self.method() calls
                             segs = [cls, m]
 
                     callee = ProjectPath(mname, ".".join(segs))
@@ -236,15 +248,21 @@ class UsageAnalysis:
                     ) in path2func:
                         yield FunctionUsage(caller, cons, span, is_certain=True)
                     elif len(segs) >= 2 and segs[-2] != "<locals>":
-                        # method fuzzy match case 2
+                        # method fuzzy match case 3
                         yield from gen_method_usages(segs[-1])
 
-        all_usages = list[FunctionUsage]()
+        best_usages = dict[tuple[ProjectPath, ProjectPath], FunctionUsage]()
         for mname, mod in project.modules.items():
             mod_usages = compute_module_usages(mod)
             for caller, span, qname in mod_usages:
-                all_usages.extend(generate_usages(mname, caller, span, qname))
-
+                for u in generate_usages(mname, caller, span, qname):
+                    up = u.caller, u.callee
+                    if (
+                        up not in best_usages
+                        or u.is_certain > best_usages[up].is_certain
+                    ):
+                        best_usages[up] = u
+        all_usages = list(best_usages.values())
         self.path2func = path2func
         self.all_usages = all_usages
         self.caller2callees = groupby(all_usages, lambda u: u.caller)
@@ -372,6 +390,10 @@ class UsageRecorder(cst.CSTVisitor):
                 # the usage as potential method access.
                 qname = QualifiedName(f"<method>.{attr}", QualifiedNameSource.LOCAL)
                 self.usages.append((span, qname))
+
+    def visit_Decorator(self, node: cst.Decorator):
+        # do not count the calls in decorators
+        return False
 
 
 def is_access_chain(node: cst.CSTNode) -> bool:

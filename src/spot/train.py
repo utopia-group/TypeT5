@@ -62,6 +62,7 @@ class TrainingConfig(NamedTuple):
     drop_comments: bool = True
     imports_in_preamble: bool = True
     stub_in_preamble: bool = False
+    func_only: bool = False
     data_reduction: int = 1
     check_in_isolation: bool = False
     all_labels: bool = True

@@ -933,7 +933,7 @@ class ChunkedDataset:
                 assert file in src_path_map, f"{file} not in file2src."
                 assert (
                     info.path in src_path_map[file]
-                ), f"{info.path} should not be a label in {file}. Chunk code:\n{decode_tokens(input)}"
+                ), f"{info.path} should not be a label in {file}.\nExpected label map: {src_path_map[file]}\nChunk code:\n{decode_tokens(input)}"
                 assert_eq(src_path_map[file][info.path], ty)
 
 

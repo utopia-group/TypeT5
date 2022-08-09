@@ -23,10 +23,13 @@ from termcolor import colored
 config = TrainingConfig(
     quicktest=False,
     all_labels=True,
-    stub_in_preamble=True,
-    preamble_size=1024,
-    inline_prev_gold=True,
-    dec_max_labels=1,
+    # stub_in_preamble=True,
+    preamble_size=512,
+    left_margin=1024 + 512,
+    right_margin=2048,
+    # inline_prev_gold=True,
+    # dec_max_labels=1,
+    func_only=True,
 )
 gpu_id = 0
 eval_only = False
@@ -47,7 +50,7 @@ dec_args = DecodingArgs(
     ctx_args=config.dec_ctx_args(),
 )
 
-datasets_name = get_dataset_name(config.get_preprocess_args())
+datasets_name = get_dataset_name(config.get_preprocess_args(), config.func_only)
 
 src_datasets = load_src_datasets(
     datadir,

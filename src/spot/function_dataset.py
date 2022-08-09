@@ -42,6 +42,8 @@ def dataset_from_repos(
             src.repo = src.repo.relative_to(repos_root)
             src.file = src.repo / src.file
             all_srcs.append(src)
+    for g in groupby(all_srcs, lambda s: s.file).values():
+        assert len(g) == 1, f"Multiple srcs for file {g[0].file}"
     return SrcDataset(repos_root, all_srcs)
 
 
@@ -61,9 +63,8 @@ def repo_to_tk_srcs(
         code = cst.Module([tree.with_changes(leading_lines=[el])]).code
         return DefaultTokenizer.encode(code, add_special_tokens=False)
 
-    src_root = guess_src_root(repo)
     proj = PythonProject.from_root(
-        src_root,
+        repo,
         True,
         src_filter,
         drop_comments=preprocess_args.drop_comments,

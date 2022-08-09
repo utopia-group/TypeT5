@@ -1,3 +1,4 @@
+from pathlib import Path
 import spot
 from spot.static_analysis import (
     FunctionUsage,
@@ -11,6 +12,16 @@ from spot.static_analysis import (
 import pytest
 
 from spot.utils import assert_eq
+
+
+def test_path_to_module():
+    to_module = PythonProject.rel_path_to_module_name
+    assert to_module(Path("a/b.py")) == "a.b"
+    assert to_module(Path("a/b/c.py")) == "a.b.c"
+    assert to_module(Path("a/__init__.py")) == "a"
+    assert to_module(Path("a/b/__init__.py")) == "a.b"
+    assert to_module(Path("src/a.py")) == "a"
+    assert to_module(Path("src/a/__init__.py")) == "a"
 
 
 def test_import_normalization():
@@ -45,6 +56,10 @@ class C:
     
     def foo(self, y):
         return self.x + y
+
+    @staticmethod
+    def s_method(x):
+        return x + 1
     
 """
     code2 = """
@@ -74,13 +89,26 @@ def usage_local():
     usage1(3)
     UsageClass(4)
 
+@f1.C(1)
+def usage_dec():
+    pass
+
 class UsageClass:
     def __init__(self, x):
         self.x = gf_with_inner(x)
-        self.foo(5)
+        self.y = self.foo(5)
 
     def foo(self, y):
         return usage_local(f1.gf(y))
+
+    @staticmethod
+    def s_method(x):
+        return x
+
+class SubClass(UsageClass):
+    def use(self):
+        self.foo(5)
+        f1.C.s_method(5)
 """
 
     project = PythonProject.from_modules(
@@ -147,4 +175,16 @@ class UsageClass:
         "root.file2/UsageClass.foo",
         ("root.file2/usage_local", True),
         ("root.file1/gf", True),
+    )
+
+    assert_usages(
+        "root.file2/SubClass.use",
+        ("root.file2/UsageClass.foo", False),
+        ("root.file1/C.foo", False),
+        ("root.file1/C.s_method", True),
+    )
+
+    # We should not cound decorator as a usage to avoid blowing up
+    assert_usages(
+        "root.file2/usage_dec",
     )
