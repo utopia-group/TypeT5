@@ -13,15 +13,15 @@ from .static_analysis import (
     UsageAnalysis,
     PythonProject,
     PythonModule,
-    guess_src_root,
     remove_types,
+    stub_from_module,
 )
 
 
 def dataset_from_repos(
     repos_root: Path,
     repos_paths: Iterable[Path],
-    preprocess_args: PreprocessArgs,
+    pre_args: PreprocessArgs,
     max_line_width: int = 200,
     max_workers: int | None = None,
     tqdm_args: dict = {},
@@ -30,7 +30,7 @@ def dataset_from_repos(
     srcs_list = pmap(
         repo_to_tk_srcs,
         repos_paths,
-        [preprocess_args] * len(repos),
+        [pre_args] * len(repos),
         [max_line_width] * len(repos),
         desc="Generating dataset from repos",
         max_workers=max_workers,
@@ -52,7 +52,7 @@ def dataset_from_repos(
 
 def repo_to_tk_srcs(
     repo: Path,
-    preprocess_args: PreprocessArgs,
+    pre_args: PreprocessArgs,
     max_line_width: int = 200,
 ) -> list[TokenizedSrc]:
     def src_filter(text):
@@ -70,18 +70,23 @@ def repo_to_tk_srcs(
         repo,
         True,
         src_filter,
-        drop_comments=preprocess_args.drop_comments,
+        drop_comments=pre_args.drop_comments,
     )
-    analysis = UsageAnalysis(proj)
-    p2tks = {p: get_masked_fun_code(f) for p, f in analysis.path2func.items()}
+    analysis = None
+    p2tks = None
+    if pre_args.show_callees or pre_args.show_callers:
+        analysis = UsageAnalysis(proj)
+        p2tks = {p: get_masked_fun_code(f) for p, f in analysis.path2func.items()}
 
     srcs = list[TokenizedSrc]()
     for mpath, mod in proj.modules.items():
         preamble_segs = list[str]()
-        if preprocess_args.imports_in_preamble:
+        if pre_args.imports_in_preamble:
             wo_imports, imports = remove_imports(mod.tree)
             imports_part = cst.Module([cst.SimpleStatementLine([s]) for s in imports])
             preamble_segs.append(imports_part.code)
+        if pre_args.stub_in_preamble:
+            preamble_segs.append(stub_from_module(mod.tree).code)
         preamble = "".join(preamble_segs)
         tokenized_preamble = DefaultTokenizer.encode(preamble, add_special_tokens=False)
 
@@ -109,39 +114,46 @@ def repo_to_tk_srcs(
                 len(code_segs) == len(types) + 1
             ), f"{len(code_segs)} != {len(types) + 1}. replaces: {replaces}\ncode: {new_code}"
 
-            # Right context: assemble code for callers
-            caller_us = [
-                u
-                for u in analysis.callee2callers.get(fun.path, [])
-                if u.caller != u.callee
-            ]
-            # want certain and smaller usages to come first
-            certain_callers = sorted(
-                [p2tks[u.caller] for u in caller_us if u.is_certain], key=len
-            )
-            potential_callers = sorted(
-                [p2tks[u.caller] for u in caller_us if not u.is_certain], key=len
-            )
-            right_tks = list(seq_flatten(certain_callers + potential_callers))
+            right_tks = None
+            if pre_args.show_callers:
+                # Right context: assemble code for callers
+                caller_us = [
+                    u
+                    for u in not_none(analysis).callee2callers.get(fun.path, [])
+                    if u.caller != u.callee
+                ]
+                # want certain and smaller usages to come first
+                certain_callers = sorted(
+                    [not_none(p2tks)[u.caller] for u in caller_us if u.is_certain],
+                    key=len,
+                )
+                potential_callers = sorted(
+                    [not_none(p2tks)[u.caller] for u in caller_us if not u.is_certain],
+                    key=len,
+                )
+                right_tks = list(seq_flatten(certain_callers + potential_callers))
 
-            # Left context: assemble code for callees
-            callee_us = [
-                u
-                for u in analysis.caller2callees.get(fun.path, [])
-                if u.caller != u.callee
-            ]
-            # want certain and smaller usages to come last
-            certain_callees = sorted(
-                [p2tks[u.callee] for u in callee_us if u.is_certain],
-                key=len,
-                reverse=True,
-            )
-            potential_callees = sorted(
-                [p2tks[u.callee] for u in callee_us if not u.is_certain],
-                key=len,
-                reverse=True,
-            )
-            left_tks = list(seq_flatten(potential_callees + certain_callees))
+            left_tks = None
+            if pre_args.show_callees:
+                # Left context: assemble code for callees
+                callee_us = [
+                    u
+                    for u in not_none(analysis).caller2callees.get(fun.path, [])
+                    if u.caller != u.callee
+                ]
+                # want certain and smaller usages to come last
+                certain_callees = sorted(
+                    [not_none(p2tks)[u.callee] for u in callee_us if u.is_certain],
+                    key=len,
+                    reverse=True,
+                )
+                potential_callees = sorted(
+                    [not_none(p2tks)[u.callee] for u in callee_us if not u.is_certain],
+                    key=len,
+                    reverse=True,
+                )
+                left_tks = list(seq_flatten(potential_callees + certain_callees))
+
             file = Path(fun.path.module) / fun.path.path
 
             src = tokenized_src_from_segs(

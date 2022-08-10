@@ -62,6 +62,8 @@ class TrainingConfig(NamedTuple):
     drop_comments: bool = True
     imports_in_preamble: bool = True
     stub_in_preamble: bool = False
+    show_callees: bool = True
+    show_callers: bool = True
     func_only: bool = False
     data_reduction: int = 1
     check_in_isolation: bool = False
@@ -116,6 +118,8 @@ class TrainingConfig(NamedTuple):
             drop_comments=self.drop_comments,
             imports_in_preamble=self.imports_in_preamble,
             stub_in_preamble=self.stub_in_preamble,
+            show_callees=self.show_callees,
+            show_callers=self.show_callers,
         )
 
     def dec_ctx_args(self) -> CtxArgs:

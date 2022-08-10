@@ -135,6 +135,8 @@ class PreprocessArgs:
     imports_in_preamble: bool = True
     stub_in_preamble: bool = False
     drop_comments: bool = True
+    show_callees: bool = True   # only applicable to functional dataset
+    show_callers: bool = True   # only applicable to functional dataset
 
 
 def preprocess_code(code: str, args: PreprocessArgs) -> dict:

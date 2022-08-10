@@ -23,17 +23,20 @@ from termcolor import colored
 config = TrainingConfig(
     quicktest=False,
     all_labels=True,
-    # stub_in_preamble=True,
-    preamble_size=512,
+    stub_in_preamble=True,
+    show_callees=False,
+    show_callers=False,
+    preamble_size=512 + 256,
     left_margin=1024 + 512,
     right_margin=2048,
     # inline_prev_gold=True,
     # dec_max_labels=1,
     func_only=True,
 )
-gpu_id = 0
+gpu_id = 1
 eval_only = False
 TypeCheckSettings.temp_path = f"GPU-{gpu_id}"
+print(colored(f"Use GPU: {gpu_id}", "green"))
 
 if config.quicktest:
     print(colored("Quicktest mode", "red"))
