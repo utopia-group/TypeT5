@@ -470,6 +470,7 @@ class TrainModelWrapper(pl.LightningModule):
         )
         loss = outputs.loss
         self.log("valid/loss", loss.item())
+        self.log("train/labels", self.labels_trained)
 
 
 def concat_batches(batches: list[dict], keys: list[str]) -> dict:

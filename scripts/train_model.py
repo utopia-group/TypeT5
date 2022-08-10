@@ -152,9 +152,11 @@ from spot.visualization import export_preds_on_code, proj_root
 export_preds = True
 
 if export_preds:
-    sub_ids = range(0, len(r0_eval.chunks), 10)
+    max_samples = 1000
+    sub_ids = range(0, len(r0_eval.chunks), len(r0_eval.chunks) // max_samples)
     export_preds_on_code(
         r0_eval.chunks[sub_ids],
         [r0_eval.predictions[i] for i in sub_ids],
         export_to=proj_root() / "caches" / "model_predictions",
     )
+    print("Model predictions exported to 'caches/model_predictions'")

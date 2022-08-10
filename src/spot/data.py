@@ -236,9 +236,21 @@ def chunk_from_src(
     return chunks[0], chunks_info[0]
 
 
+def src_to_chunks(
+    src: TokenizedSrc,
+    label_range: tuple[int, int],
+    ctx_args: CtxArgs,
+) -> tuple[list[dict], list["SrcChunkInfo"]]:
+    """Helper function to extract chunks from a source file."""
+    chunks = list[dict]()
+    chunks_info = list[SrcChunkInfo]()
+    src_to_chunks_(chunks, chunks_info, src, label_range, ctx_args)
+    return chunks, chunks_info
+
+
 def src_to_chunks_(
-    chunks: list,
-    chunks_info: list,
+    chunks: list[dict],
+    chunks_info: list["SrcChunkInfo"],
     src: TokenizedSrc,
     label_range: tuple[int, int],
     ctx_args: CtxArgs,
@@ -324,14 +336,17 @@ def chunk_srcs_per_file(
 ) -> "ChunkedDataset":
     """Turn each file into a single chunk when possible, or break it down into multiple chunks."""
 
-    chunks = list[dict]()
-    chunks_info: list[SrcChunkInfo] = []
-
-    for src in tqdm(srcs, desc="chunk_srcs_per_file", **tqdm_args):
-        if len(src.types) == 0:
-            continue
-        labels_range = 0, len(src.types)
-        src_to_chunks_(chunks, chunks_info, src, labels_range, ctx_args)
+    # TODO: parallelize this
+    srcs = [s for s in srcs if len(s.types) > 0]
+    label_ranges = [(0, len(s.types)) for s in srcs]
+    chunk_rs = pmap(
+        src_to_chunks,
+        srcs,
+        label_ranges,
+        [ctx_args] * len(srcs),
+        desc="map srcs_to_chunks",
+        tqdm_args=tqdm_args,
+    )
 
     data: dict[str, list] = {
         "input_ids": [],
@@ -339,6 +354,9 @@ def chunk_srcs_per_file(
         "n_labels": [],
         "chunk_id": [],
     }
+    chunks = [chunk for r in chunk_rs for chunk in r[0]]
+    chunks_info = [info for r in chunk_rs for info in r[1]]
+
     chunk_id = 0
     for chunk in chunks:
         data["input_ids"].append(chunk["input_ids"])

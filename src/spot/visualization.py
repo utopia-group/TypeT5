@@ -83,10 +83,10 @@ def visualize_chunk(
     else:
         code = code_inline_mask_ids(code, id_replace)
     return widgets.HTML(
-        "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30);'>"
-        + f"# file: {src_file}"
+        "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30);'>\n"
+        + f"# file: {src_file}\n"
         + code
-        + "</pre>"
+        + "\n</pre>"
     )
 
 
@@ -159,11 +159,8 @@ def export_preds_on_code(
                 contain_extra_id=False,
             )
         )
-        chunk_id = (
-            dataset.data[i]["chunk_id"] if isinstance(dataset, ChunkedDataset) else i
-        )
         assert isinstance(page.value, str)
-        write_file(export_to / "chunks" / f"chunk{chunk_id}.html", page.value)
+        write_file(export_to / "chunks" / f"chunk{i}.html", page.value)
 
     chunk_accs = list[CountedAcc]()
     with tqdm(total=len(preds), desc="Computing accuracies") as pbar:

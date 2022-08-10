@@ -1,11 +1,16 @@
 import copy
 
+import numpy
+
 from .static_analysis import remove_comments, remove_imports, stub_from_module
 from .utils import *
 from .type_env import AnnotInfo, AnnotPath, CodePathManager, collect_user_annotations
 from .type_check import MypyFeedback, PythonType, parse_type_str
 from .type_env import apply_annotations, collect_user_annotations
 from libcst.metadata import CodeRange, PositionProvider
+
+
+TokenSeq = list[int]  # might need to make this more space-efficient
 
 
 @dataclass
@@ -17,12 +22,12 @@ class TokenizedSrc:
     types: list[PythonType]
     types_pos: list[int]  # the position of the types in tokenized_code.
     types_str: list[str]
-    types_tks: list[list[int]]
+    types_tks: list[TokenSeq]
     types_info: list[AnnotInfo]
     main_code: str
-    tokenized_code: list[int]  # with certain types masked out
+    tokenized_code: TokenSeq  # with certain types masked out
     preamble_code: str
-    tokenized_preamble: list[int]
+    tokenized_preamble: TokenSeq
     prev_types: dict[int, PythonType] | None = None  # previously predicted types
     inlined_spans: dict[int, slice] | None = None  # the spans of inlined previous types
     feedbacks: list[MypyFeedback] | None = None
