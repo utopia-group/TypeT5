@@ -538,8 +538,14 @@ class StubGenerator(cst.CSTTransformer):
         return updated
 
     def leave_Assign(self, node, updated: cst.AnnAssign):
-        # omit rhs of assignments
-        return updated.with_changes(value=cst.Ellipsis())
+        # omit rhs of assignments unless it's a type variable
+        match updated.value:
+            case cst.Call(func=cst.Name("TypeVar")) | cst.Call(
+                func=cst.Attribute(attr=cst.Name("TypeVar"))
+            ) | None:
+                return updated
+            case _:
+                return updated.with_changes(value=cst.Ellipsis())
 
     def leave_Attribute(self, node, updated: cst.Assign):
         # record all atribute accesses involving `self`
