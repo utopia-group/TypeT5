@@ -22,7 +22,6 @@ from .type_check import TypeCheckArgs
 
 from .data import (
     ChunkedDataset,
-    CountedAcc,
     R1_srcs_from_preds,
     SrcChunkInfo,
     SrcDataset,
@@ -59,12 +58,12 @@ class ModelTrainingArgs:
 
 class TrainingConfig(NamedTuple):
     quicktest: bool = False
+    func_only: bool = False
     drop_comments: bool = True
     imports_in_preamble: bool = True
     stub_in_preamble: bool = False
     show_callees: bool = True
     show_callers: bool = True
-    func_only: bool = False
     data_reduction: int = 1
     check_in_isolation: bool = False
     all_labels: bool = True

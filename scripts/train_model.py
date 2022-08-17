@@ -20,12 +20,15 @@ from spot.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper
 from spot.train import TrainingConfig, TypeCheckArgs
 from termcolor import colored
 
+gpu_id = 0
+eval_only = False
+
 config = TrainingConfig(
     quicktest=False,
     all_labels=True,
     stub_in_preamble=True,
-    show_callees=False,
-    show_callers=False,
+    show_callees=True,
+    show_callers=True,
     preamble_size=512 + 256,
     left_margin=1024 + 512,
     right_margin=2048,
@@ -33,8 +36,14 @@ config = TrainingConfig(
     # dec_max_labels=1,
     func_only=True,
 )
-gpu_id = 1
-eval_only = False
+if config.show_callees and not config.show_callers:
+    config = config._replace(left_margin=4096 - 512, right_margin=1)
+elif config.show_callers and not config.show_callees:
+    config = config._replace(
+        left_margin=config.preamble_size + 1,
+        right_margin=4096 - 512 - config.preamble_size,
+    )
+
 TypeCheckSettings.temp_path = f"GPU-{gpu_id}"
 print(colored(f"Use GPU: {gpu_id}", "green"))
 
@@ -62,7 +71,7 @@ src_datasets = load_src_datasets(
     quicktest=config.quicktest,
 )
 model_name = config.get_model_name()
-
+print(colored(f"Training model: {model_name}", "green"))
 
 # %%
 # train the model
@@ -160,6 +169,6 @@ if export_preds:
     export_preds_on_code(
         r0_eval.chunks[sub_ids],
         [r0_eval.predictions[i] for i in sub_ids],
-        export_to=proj_root() / "caches" / "model_predictions",
+        export_to=proj_root() / "caches" / "model_predictions" / model_name,
     )
     print("Model predictions exported to 'caches/model_predictions'")
