@@ -60,7 +60,9 @@ def repo_to_tk_srcs(
         return width <= max_line_width
 
     def get_masked_fun_code(f: PythonFunction) -> list[int]:
-        tree = remove_types(f.tree)
+        tree = f.tree
+        if pre_args.drop_env_types:
+            tree = remove_types(tree)
         f_location = str(f.path)[: -(len(f.name) + 1)]
         el = cst.EmptyLine(comment=cst.Comment("# " + f_location))
         code = cst.Module([tree.with_changes(leading_lines=[el])]).code

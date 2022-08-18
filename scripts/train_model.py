@@ -18,31 +18,23 @@ from spot.data import (
 )
 from spot.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper
 from spot.train import TrainingConfig, TypeCheckArgs
+from spot.tokenized_src import PreprocessArgs
 from termcolor import colored
 
 gpu_id = 0
 eval_only = False
 
+
 config = TrainingConfig(
     quicktest=False,
-    all_labels=True,
-    stub_in_preamble=True,
-    show_callees=True,
-    show_callers=True,
+    pre_args=PreprocessArgs(
+        drop_env_types=False,
+    ),
     preamble_size=512 + 256,
     left_margin=1024 + 512,
     right_margin=2048,
-    # inline_prev_gold=True,
-    # dec_max_labels=1,
     func_only=True,
 )
-if config.show_callees and not config.show_callers:
-    config = config._replace(left_margin=4096 - 512, right_margin=1)
-elif config.show_callers and not config.show_callees:
-    config = config._replace(
-        left_margin=config.preamble_size + 1,
-        right_margin=4096 - 512 - config.preamble_size,
-    )
 
 TypeCheckSettings.temp_path = f"GPU-{gpu_id}"
 print(colored(f"Use GPU: {gpu_id}", "green"))
@@ -62,7 +54,7 @@ dec_args = DecodingArgs(
     ctx_args=config.dec_ctx_args(),
 )
 
-datasets_name = get_dataset_name(config.get_preprocess_args(), config.func_only)
+datasets_name = get_dataset_name(config.pre_args, config.func_only)
 
 src_datasets = load_src_datasets(
     datadir,

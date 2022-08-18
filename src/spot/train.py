@@ -59,11 +59,7 @@ class ModelTrainingArgs:
 class TrainingConfig(NamedTuple):
     quicktest: bool = False
     func_only: bool = False
-    drop_comments: bool = True
-    imports_in_preamble: bool = True
-    stub_in_preamble: bool = False
-    show_callees: bool = True
-    show_callers: bool = True
+    pre_args: PreprocessArgs = PreprocessArgs()
     data_reduction: int = 1
     check_in_isolation: bool = False
     all_labels: bool = True
@@ -79,28 +75,17 @@ class TrainingConfig(NamedTuple):
     grad_accum_labels = 32
     modifications: str = ""
 
-    def modified_params(self) -> dict[str, Any]:
-        default = TrainingConfig()
-        changed = dict[str, Any]()
-        # collect all attributes that are different from default
-        for attr in self.__annotations__:
-            if getattr(self, attr) != getattr(default, attr):
-                changed[attr] = getattr(self, attr)
-        return changed
-
     def as_dict(self) -> dict[str, Any]:
         return {attr: getattr(self, attr) for attr in self.__annotations__}
 
     def as_name(self) -> str:
-        if len(self.modified_params()) > 0:
-            return "-".join(
-                f"{str(k)}={str(v)}" for k, v in self.modified_params().items()
-            )
-        else:
-            return "default"
+        return self.get_model_name()
+
+    def __repr__(self):
+        return repr_modified_args(self, flatten=True)
 
     def get_model_name(self) -> str:
-        return "model-v3--" + self.as_name()
+        return "model-v4--" + repr_modified_args(self, flatten=True)
 
     def train_ctx_args(self) -> CtxArgs:
         return CtxArgs(
@@ -113,13 +98,7 @@ class TrainingConfig(NamedTuple):
         )
 
     def get_preprocess_args(self):
-        return PreprocessArgs(
-            drop_comments=self.drop_comments,
-            imports_in_preamble=self.imports_in_preamble,
-            stub_in_preamble=self.stub_in_preamble,
-            show_callees=self.show_callees,
-            show_callers=self.show_callers,
-        )
+        return self.pre_args
 
     def dec_ctx_args(self) -> CtxArgs:
         r = self.train_ctx_args()

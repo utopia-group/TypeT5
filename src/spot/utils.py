@@ -622,30 +622,51 @@ def safe_div(a, b):
     return a / b
 
 
-def get_modified_args(instance, recursive: bool = False) -> dict[str, Any] | Any:
+def get_modified_args(instance, flatten: bool = False) -> dict[str, Any] | None:
     """Collect only the arguments that differ from the default value, or return the value
     itself if `instance` does not contain `__annotations__`."""
     if not hasattr(instance, "__annotations__"):
-        return instance
+        return None
 
     cls = type(instance)
     delta = dict[str, Any]()
     # collect all values that are different from the default
+    if hasattr(cls, "_field_defaults"):
+        default_values = cls._field_defaults
+    else:
+        default_values = {
+            attr: getattr(cls, attr)
+            for attr in instance.__annotations__
+            if hasattr(cls, attr)
+        }
     for attr in instance.__annotations__:
         v = getattr(instance, attr)
-        if hasattr(cls, attr) and getattr(cls, attr) == v:
+        if attr in default_values and default_values[attr] == v:
             continue
-        delta[attr] = get_modified_args(v) if recursive else v
+        rec_args = get_modified_args(v, flatten=flatten)
+        if rec_args is None:
+            delta[attr] = v
+        else:
+            if flatten:
+                delta.update(rec_args)
+            else:
+                delta[attr] = rec_args
     return delta
 
 
-def repr_modified_args(instance) -> str:
-    ma = get_modified_args(instance, False)
-    if isinstance(ma, dict):
-        type_name = type(instance).__name__
-        return f"{type_name}({', '.join(f'{k}={v}' for k, v in ma.items())})"
-    else:
-        return repr(ma)
+def show_dict_as_tuple(d: dict) -> str:
+    elems = dict[str, str]()
+    for k, v in d.items():
+        if isinstance(v, dict):
+            v = show_dict_as_tuple(v)
+        elems[k] = str(v)
+    return "(" + ", ".join(f"{k}={v}" for k, v in elems.items()) + ")"
+
+
+def repr_modified_args(instance, flatten: bool = False) -> str:
+    ma = get_modified_args(instance, flatten=flatten)
+    type_name = type(instance).__name__
+    return type_name + show_dict_as_tuple(ma) if ma else type_name + "()"
 
 
 def merge_dicts(dicts: Sequence[dict[T1, Any]]) -> dict[T1, list]:
