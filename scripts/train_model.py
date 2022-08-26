@@ -78,7 +78,7 @@ if not eval_only:
         dec_args,
         train_max_tokens=max_tokens_per_file,
         eval_max_tokens=2 * max_tokens_per_file,
-        max_epochs=2,
+        max_epochs=1,
         tc_args=tc_args,
     )
 
@@ -98,6 +98,7 @@ if not eval_only:
             gpus=[gpu_id],
             quicktest=config.quicktest,
             use_small_model=config.use_small_model,
+            use_early_stop=False,
         )
 else:
     wrapper = ModelWrapper.from_pretrained(
