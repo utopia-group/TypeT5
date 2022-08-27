@@ -8,7 +8,7 @@ from .tokenized_src import (
 )
 from .data import SrcDataset
 from .static_analysis import (
-    FunctionUsage,
+    ProjectUsage,
     PythonFunction,
     UsageAnalysis,
     PythonProject,
@@ -121,16 +121,16 @@ def repo_to_tk_srcs(
                 # Right context: assemble code for callers
                 caller_us = [
                     u
-                    for u in not_none(analysis).callee2callers.get(fun.path, [])
-                    if u.caller != u.callee
+                    for u in not_none(analysis).used2user.get(fun.path, [])
+                    if u.user != u.used
                 ]
                 # want certain and smaller usages to come first
                 certain_callers = sorted(
-                    [not_none(p2tks)[u.caller] for u in caller_us if u.is_certain],
+                    [not_none(p2tks)[u.user] for u in caller_us if u.is_certain],
                     key=len,
                 )
                 potential_callers = sorted(
-                    [not_none(p2tks)[u.caller] for u in caller_us if not u.is_certain],
+                    [not_none(p2tks)[u.user] for u in caller_us if not u.is_certain],
                     key=len,
                 )
                 right_tks = list(seq_flatten(certain_callers + potential_callers))
@@ -140,17 +140,17 @@ def repo_to_tk_srcs(
                 # Left context: assemble code for callees
                 callee_us = [
                     u
-                    for u in not_none(analysis).caller2callees.get(fun.path, [])
-                    if u.caller != u.callee
+                    for u in not_none(analysis).user2used.get(fun.path, [])
+                    if u.user != u.used
                 ]
                 # want certain and smaller usages to come last
                 certain_callees = sorted(
-                    [not_none(p2tks)[u.callee] for u in callee_us if u.is_certain],
+                    [not_none(p2tks)[u.used] for u in callee_us if u.is_certain],
                     key=len,
                     reverse=True,
                 )
                 potential_callees = sorted(
-                    [not_none(p2tks)[u.callee] for u in callee_us if not u.is_certain],
+                    [not_none(p2tks)[u.used] for u in callee_us if not u.is_certain],
                     key=len,
                     reverse=True,
                 )

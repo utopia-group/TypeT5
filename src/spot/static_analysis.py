@@ -3,6 +3,7 @@
 
 from collections import defaultdict
 from posixpath import islink
+import enum
 
 from libcst import CSTNode
 
@@ -47,14 +48,25 @@ class PythonFunction:
 
 
 @dataclass
+class PythonAttribute:
+    name: str
+    path: ProjectPath
+    initializer: cst.BaseExpression | None
+
+    def __repr__(self):
+        return f"PythonAttribute(path={self.path})"
+
+
+@dataclass
 class PythonClass:
     name: str
     path: ProjectPath
+    attributes: dict[str, cst.AnnAssign]
     methods: dict[str, PythonFunction]
     tree: cst.ClassDef
 
     def __repr__(self):
-        return f"PythonClass(path={self.path}, n_methods={len(self.methods)})"
+        return f"PythonClass(path={self.path}, n_attrs={len(self.attributes)}, n_methods={len(self.methods)})"
 
 
 @dataclass
@@ -184,14 +196,16 @@ def split_import_path(path: str):
 
 
 @dataclass
-class FunctionUsage:
-    caller: ProjectPath
-    callee: ProjectPath
+class ProjectUsage:
+    user: ProjectPath
+    used: ProjectPath
     call_site: CodeRange
-    is_certain: bool  # some usage might not be certain, e.g. if it's a method call on a variable
+    is_certain: bool  # some usage might not be certain, e.g. if it's a method call on an expression
 
     def __str__(self):
-        return f"{self.caller} {'' if self.is_certain else 'potentially '}calls {self.callee}"
+        return (
+            f"{self.user} {'' if self.is_certain else 'potentially '}uses {self.used}"
+        )
 
 
 class ModuleNamespace:
@@ -233,10 +247,11 @@ class ModuleNamespace:
 
 
 class UsageAnalysis:
-    all_usages: list[FunctionUsage]
-    caller2callees: dict[ProjectPath, list[FunctionUsage]]
-    callee2callers: dict[ProjectPath, list[FunctionUsage]]
+    func_usages: list[ProjectUsage]
     path2func: dict[ProjectPath, PythonFunction]
+    path2attr: dict[ProjectPath, PythonAttribute]
+    user2used: dict[ProjectPath, list[ProjectUsage]]
+    used2user: dict[ProjectPath, list[ProjectUsage]]
     namespaces: dict[str, str | dict]
 
     def __init__(self, project: PythonProject):
@@ -254,7 +269,7 @@ class UsageAnalysis:
                     # skip common methods like __init__
                     return
                 for f in all_methods.get(method_name, []):
-                    yield FunctionUsage(caller, f.path, span, is_certain=False)
+                    yield ProjectUsage(caller, f.path, span, is_certain=False)
 
             match qname.source:
                 case QualifiedNameSource.IMPORT:
@@ -268,11 +283,11 @@ class UsageAnalysis:
                     if callee is None:
                         return
                     if callee in path2func:
-                        yield FunctionUsage(caller, callee, span, is_certain=True)
+                        yield ProjectUsage(caller, callee, span, is_certain=True)
                     elif (
                         cons := ProjectPath(callee.module, callee.path + ".__init__")
                     ) in path2func:
-                        yield FunctionUsage(caller, cons, span, is_certain=True)
+                        yield ProjectUsage(caller, cons, span, is_certain=True)
                 case QualifiedNameSource.LOCAL:
                     segs = qname.name.split(".")
                     match segs:
@@ -285,21 +300,21 @@ class UsageAnalysis:
 
                     callee = ProjectPath(mname, ".".join(segs))
                     if callee in path2func:
-                        yield FunctionUsage(caller, callee, span, is_certain=True)
+                        yield ProjectUsage(caller, callee, span, is_certain=True)
                     elif (
                         cons := ProjectPath(callee.module, callee.path + ".__init__")
                     ) in path2func:
-                        yield FunctionUsage(caller, cons, span, is_certain=True)
+                        yield ProjectUsage(caller, cons, span, is_certain=True)
                     elif len(segs) >= 2 and segs[-2] != "<locals>":
                         # method fuzzy match case 3
                         yield from gen_method_usages(segs[-1])
 
-        best_usages = dict[tuple[ProjectPath, ProjectPath], FunctionUsage]()
+        best_usages = dict[tuple[ProjectPath, ProjectPath], ProjectUsage]()
         for mname, mod in project.modules.items():
             mod_usages = compute_module_usages(mod)
             for caller, span, qname in mod_usages:
                 for u in generate_usages(mname, caller, span, qname):
-                    up = u.caller, u.callee
+                    up = u.user, u.used
                     if (
                         up not in best_usages
                         or u.is_certain > best_usages[up].is_certain
@@ -307,9 +322,9 @@ class UsageAnalysis:
                         best_usages[up] = u
         all_usages = list(best_usages.values())
         self.path2func = path2func
-        self.all_usages = all_usages
-        self.caller2callees = groupby(all_usages, lambda u: u.caller)
-        self.callee2callers = groupby(all_usages, lambda u: u.callee)
+        self.func_usages = all_usages
+        self.user2used = groupby(all_usages, lambda u: u.user)
+        self.used2user = groupby(all_usages, lambda u: u.used)
 
 
 def compute_module_usages(mod: PythonModule):
@@ -341,6 +356,12 @@ def compute_module_usages(mod: PythonModule):
 # utilities for static analysis
 
 
+class _VisitType(enum.Enum):
+    Root = enum.auto()
+    Class = enum.auto()
+    Func = enum.auto()
+
+
 class PythonModuleBuilder(cst.CSTVisitor):
     """Construct a `PythonModule` from a `cst.Module`.
     If multiple definitions of the same name are found, only the last one is kept."""
@@ -351,6 +372,8 @@ class PythonModuleBuilder(cst.CSTVisitor):
         self.functions = dict[str, PythonFunction]()
         self.classes = dict[str, PythonClass]()
         self.current_class: PythonClass | None = None
+        self.type_stack = [_VisitType.Root]
+        self.name_stack = list[str]()
         self.module = None
         self.module_name = module_name
 
@@ -364,12 +387,16 @@ class PythonModuleBuilder(cst.CSTVisitor):
         )
 
     def visit_FunctionDef(self, node: cst.FunctionDef):
+        if self.type_stack[-1] == _VisitType.Func:
+            # skip inner functions
+            self.type_stack.append(_VisitType.Func)
+            return
         for dec in node.decorators:
             match dec.decorator:
                 case cst.Name("overload") | cst.Attribute(attr=cst.Name("overload")):
                     # ignore overload signatures
                     return False
-        is_method = self.current_class is not None
+        is_method = self.type_stack[-1] == _VisitType.Class
         name = node.name.value
         path = self.current_class.name + "." + name if self.current_class else name
         func = PythonFunction(
@@ -380,7 +407,17 @@ class PythonModuleBuilder(cst.CSTVisitor):
         )
         fs = self.current_class.methods if self.current_class else self.functions
         fs[func.name] = func
-        return False  # don't visit inner functions
+        self.type_stack.append(_VisitType.Func)
+        self.name_stack.append(func.name)
+
+    def leave_FunctionDef(self, node) -> None:
+        assert self.type_stack[-1] == _VisitType.Func
+        if (
+            self.type_stack[-2] == _VisitType.Class
+            or self.type_stack[-2] == _VisitType.Root
+        ):
+            self.name_stack.pop()
+        self.type_stack.pop()
 
     def visit_ClassDef(self, node: cst.ClassDef):
         if self.current_class is not None:
@@ -388,18 +425,33 @@ class PythonModuleBuilder(cst.CSTVisitor):
         cls = PythonClass(
             name=node.name.value,
             path=ProjectPath(self.module_name, node.name.value),
+            attributes=dict(),
             methods=dict(),
             tree=node,
         )
         self.current_class = cls
+        self.type_stack.append(_VisitType.Class)
 
     def leave_ClassDef(self, node: cst.ClassDef):
         if self.current_class is not None:
             self.classes[self.current_class.name] = self.current_class
             self.current_class = None
+        assert self.type_stack[-1] == _VisitType.Class
+        self.type_stack.pop()
+
+    def visit_AnnAssign(self, node: cst.AnnAssign) -> Optional[bool]:
+        ...
 
     def visit_Module(self, node: cst.Module):
         self.module = node
+
+
+class PythonClassNormalizer(cst.CSTTransformer):
+    def visit_ClassDef(self, node) -> Optional[bool]:
+        return False
+
+    def visit_FunctionDef(self, node) -> Optional[bool]:
+        return False
 
 
 class UsageRecorder(cst.CSTVisitor):

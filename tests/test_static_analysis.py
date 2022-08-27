@@ -172,8 +172,7 @@ def dual():
             expect.add((callee_p, certain))
 
         actual = {
-            (u.callee, u.is_certain)
-            for u in analysis.caller2callees.get(caller_p, list())
+            (u.used, u.is_certain) for u in analysis.user2used.get(caller_p, list())
         }
 
         assert_eq(actual, expect)
@@ -244,4 +243,67 @@ def dual():
 
     assert_usages(
         "root.file2/dual",
+    )
+
+
+def test_attribute_analysis():
+    code1 = """
+# root.file1
+def bernouli():
+    return random.random() > 0.5
+
+class A:
+    x: int
+    y: str = "y_init"
+    z: bool = bernouli()
+
+    def __init__(self):
+        self.u: bool = bernouli()
+
+    def foo(self):
+        return self.x + 1
+
+def bar():
+    return A().y
+"""
+
+    project = PythonProject.from_modules(
+        [PythonModule.from_cst(cst.parse_module(code1), "root.file1")]
+    )
+    analysis = UsageAnalysis(project)
+
+    def check_attr(attr_path: str, has_initializer: bool, *usages: tuple[str, bool]):
+        attr_p = ProjectPath.from_str(attr_path)
+        expect = set()
+        for caller, certain in usages:
+            caller_p = ProjectPath.from_str(caller)
+            expect.add((caller_p, certain))
+
+        actual = {
+            (u.user, u.is_certain) for u in analysis.used2user.get(attr_p, list())
+        }
+
+        assert_eq(actual, expect)
+
+    check_attr(
+        "root.file1/A.x",
+        False,
+        ("root.file1/A.foo", True),
+    )
+
+    check_attr(
+        "root.file1/A.y",
+        True,
+        ("root.file1/bar", False),
+    )
+
+    check_attr(
+        "root.file1/A.z",
+        True,
+    )
+
+    check_attr(
+        "root.file1/A.u",
+        False,
+        ("root.file1/A.__init__", True),
     )
