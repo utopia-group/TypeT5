@@ -1,7 +1,7 @@
 from pathlib import Path
 import spot
 from spot.static_analysis import (
-    ModuleNamespace,
+    ModuleHierarchy,
     ProjectPath,
     PythonModule,
     PythonProject,
@@ -41,7 +41,7 @@ def test_namespace_resolution():
         "foo.bar",
         "z",
     ]
-    namespace = ModuleNamespace.from_modules(modules)
+    namespace = ModuleHierarchy.from_modules(modules)
 
     with pytest.raises(AssertionError):
         namespace.resolve_path(["foo"])
@@ -56,6 +56,19 @@ def test_namespace_resolution():
     assert namespace.resolve_path(["foo", "bar", "C", "x"]) == ProjectPath(
         "foo.bar", "C.x"
     )
+
+
+def test_module_imports():
+    import_code = """
+import A
+import B.C
+from D import a, b as c
+from .utils import x
+from ..top import *
+from infer.type import *   
+"""
+    mod = PythonModule.from_cst(cst.parse_module(import_code), "root.file1")
+    assert mod.imported_modules == {"A", "B.C", "D", "root.utils", "top", "infer.type"}
 
 
 def test_usage_analysis():
@@ -154,11 +167,34 @@ def dual():
     # this one should be ignored as well
     gf_with_inner(5)
 """
+    code3 = """
+# root.file3
+from .file1 import *
+
+def usage1(x):
+    gf(5)
+    C(5)
+    
+"""
+
+    code4 = """
+# root.file4
+from .file3 import *
+from root.file2 import *
+
+def usage4():
+    dual()  # from file2
+    usage1(5)  # from file2, which shadows file3
+    C(5)  # from file1
+
+"""
 
     project = PythonProject.from_modules(
         [
             PythonModule.from_cst(cst.parse_module(code1), "root.file1"),
             PythonModule.from_cst(cst.parse_module(code2), "root.file2"),
+            PythonModule.from_cst(cst.parse_module(code3), "root.file3"),
+            PythonModule.from_cst(cst.parse_module(code4), "root.file4"),
         ]
     )
 
@@ -245,7 +281,22 @@ def dual():
         "root.file2/dual",
     )
 
+    # test star imports
+    assert_usages(
+        "root.file3/usage1",
+        ("root.file1/gf", True),
+        ("root.file1/C.__init__", True),
+    )
 
+    assert_usages(
+        "root.file4/usage4",
+        ("root.file2/dual", True),
+        ("root.file2/usage1", True),
+        ("root.file1/C.__init__", True),
+    )
+
+
+@pytest.mark.skip(reason="not implemented yet.")
 def test_attribute_analysis():
     code1 = """
 # root.file1

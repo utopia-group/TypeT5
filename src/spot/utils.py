@@ -51,6 +51,10 @@ T1 = TypeVar("T1")
 T2 = TypeVar("T2")
 
 
+def raise_error(msg: str) -> T1:  # type: ignore
+    raise RuntimeError(msg)
+
+
 def load_model_spot(path) -> ModelSPOT:
     return cast(ModelSPOT, ModelSPOT.from_pretrained(path))
 

@@ -1,6 +1,7 @@
 # -----------------------------------------------------------
 # project-level static analysis
 
+from ast import Str
 from collections import defaultdict
 from posixpath import islink
 import enum
@@ -17,12 +18,15 @@ from libcst.metadata import (
     PositionProvider,
 )
 
+ModuleName = str
+ModulePath = str
+
 
 class ProjectPath(NamedTuple):
     """The path of a top-level function or method in a project."""
 
-    module: str
-    path: str
+    module: ModuleName
+    path: ModulePath
 
     def __str__(self) -> str:
         return f"{self.module}/{self.path}"
@@ -34,6 +38,16 @@ class ProjectPath(NamedTuple):
     def from_str(s: str) -> "ProjectPath":
         module, path = s.split("/")
         return ProjectPath(module, path)
+
+
+ProjNamespace = dict[str, ProjectPath]
+
+# @dataclass
+# class ProjectNamespace:
+#     children: "PMap[str, ProjectNamespace | ProjectPath]"
+
+#     def add_member(self, name: str, path: ProjectPath) -> "ProjectNamespace":
+#         return ProjectNamespace(self.children.set(name, path))
 
 
 @dataclass
@@ -57,6 +71,9 @@ class PythonAttribute:
         return f"PythonAttribute(path={self.path})"
 
 
+Python = PythonFunction | PythonAttribute
+
+
 @dataclass
 class PythonClass:
     name: str
@@ -74,6 +91,8 @@ class PythonModule:
     functions: list[PythonFunction]
     classes: list[PythonClass]
     name: str
+    imported_modules: set[ModuleName]
+    defined_symbols: dict[str, ProjectPath]
     tree: cst.Module
 
     @staticmethod
@@ -95,8 +114,8 @@ class PythonModule:
 
 @dataclass
 class PythonProject:
-    modules: dict[str, PythonModule]
-    symlinks: dict[str, str]
+    modules: dict[ModuleName, PythonModule]
+    symlinks: dict[ModuleName, ModuleName]
 
     @staticmethod
     def from_modules(modules: Iterable[PythonModule]) -> "PythonProject":
@@ -155,7 +174,7 @@ class PythonProject:
             yield from module.all_funcs()
 
     @staticmethod
-    def rel_path_to_module_name(rel_path: Path) -> str:
+    def rel_path_to_module_name(rel_path: Path) -> ModuleName:
         parts = rel_path.parts
         assert parts[-1].endswith(".py")
         if parts[0] == "src":
@@ -167,7 +186,7 @@ class PythonProject:
             return ".".join([*parts[:-1], parts[-1][:-3]])
 
 
-def to_abs_import_path(current_mod: str, path: str) -> str:
+def to_abs_import_path(current_mod: ModuleName, path: str) -> ModuleName:
     # find all leading dots
     dots = 0
     while dots < len(path) and path[dots] == ".":
@@ -208,9 +227,9 @@ class ProjectUsage:
         )
 
 
-class ModuleNamespace:
+class ModuleHierarchy:
     def __init__(self):
-        self.children = dict[str, "ModuleNamespace"]()
+        self.children = dict[str, "ModuleHierarchy"]()
 
     def __repr__(self):
         return f"ModuleNamespace({self.children})"
@@ -221,7 +240,7 @@ class ModuleNamespace:
             if s in namespace.children:
                 namespace = namespace.children[s]
             else:
-                namespace.children[s] = ModuleNamespace()
+                namespace.children[s] = ModuleHierarchy()
                 namespace = namespace.children[s]
 
     def resolve_path(self, segs: list[str]) -> ProjectPath | None:
@@ -239,27 +258,94 @@ class ModuleNamespace:
         return ProjectPath(".".join(segs[:matched]), ".".join(segs[matched:]))
 
     @staticmethod
-    def from_modules(modules: Iterable[str]) -> "ModuleNamespace":
-        root = ModuleNamespace()
+    def from_modules(modules: Iterable[str]) -> "ModuleHierarchy":
+        root = ModuleHierarchy()
         for m in modules:
             root.add_module(split_import_path(m))
         return root
 
 
+def sort_modules_by_imports(project: PythonProject) -> list[str]:
+    "Sort modules topologically according to imports"
+    sorted_modules = list[str]()
+    visited = set[str]()
+
+    def visit(m: str) -> None:
+        if m in visited or m not in project.modules:
+            return
+        visited.add(m)
+        if m in project.modules:
+            for m2 in project.modules[m].imported_modules:
+                visit(m2)
+        sorted_modules.append(m)
+
+    for m in project.modules:
+        visit(m)
+    return sorted_modules
+
+
+def build_project_namespaces(
+    project: PythonProject,
+) -> Mapping[ModuleName, Mapping[str, ProjectPath]]:
+    """Return the visible project-defined symbols in each module."""
+    sorted_modules = sort_modules_by_imports(project)
+    result = dict[ModuleName, ProjNamespace]()
+    for mod in sorted_modules:
+        mv = _NsBuilder(mod, result)
+        project.modules[mod].tree.visit(mv)
+        new_ns = mv.namespace
+        new_ns.update(project.modules[mod].defined_symbols)
+        result[mod] = new_ns
+    return result
+
+
+class _NsBuilder(cst.CSTVisitor):
+    def __init__(self, module_path: str, module2ns: Mapping[ModuleName, ProjNamespace]):
+        self.module_path = module_path
+        self.module2ns = module2ns
+        self.namespace: ProjNamespace = dict()
+
+    # todo: handle imported modules and renamed modules
+
+    def visit_ImportFrom(self, node: cst.ImportFrom) -> None:
+        src_mod = ".".join(
+            parse_module_path(node.module, self.module_path, len(node.relative))
+        )
+        if src_mod not in self.module2ns:
+            return
+        src_ns = self.module2ns[src_mod]
+        match node.names:
+            case cst.ImportStar():
+                self.namespace.update(src_ns)
+            case _:
+                for name in node.names:
+                    match name.name:
+                        case cst.Name(value=n1) if n1 in src_ns:
+                            n2 = (
+                                name.asname.value
+                                if isinstance(name.asname, cst.Name)
+                                else n1
+                            )
+                            self.namespace[n2] = src_ns[n1]
+
+
 class UsageAnalysis:
-    func_usages: list[ProjectUsage]
-    path2func: dict[ProjectPath, PythonFunction]
-    path2attr: dict[ProjectPath, PythonAttribute]
+    all_usages: list[ProjectUsage]
+    path2elem: dict[ProjectPath, PythonFunction | PythonAttribute | PythonClass]
     user2used: dict[ProjectPath, list[ProjectUsage]]
     used2user: dict[ProjectPath, list[ProjectUsage]]
-    namespaces: dict[str, str | dict]
 
     def __init__(self, project: PythonProject):
         path2func = {f.path: f for f in project.all_funcs()}
+        for f in list(path2func.values()):
+            if f.is_method and f.name == "__init__":
+                cons_p = ProjectPath(f.path.module, f.path.path[: -len(".__init__")])
+                path2func[cons_p] = f
         all_methods = groupby(
             (f for f in project.all_funcs() if f.is_method), lambda f: f.name
         )
-        namespaces = ModuleNamespace.from_modules(project.modules.keys())
+        ns_hier = ModuleHierarchy.from_modules(project.modules.keys())
+        module2ns = build_project_namespaces(project)
 
         def generate_usages(
             mname: str, caller: ProjectPath, span: CodeRange, qname: QualifiedName
@@ -274,20 +360,21 @@ class UsageAnalysis:
             match qname.source:
                 case QualifiedNameSource.IMPORT:
                     segs = to_abs_import_path(mname, qname.name).split(".")
-                    if len(segs) < 2:
+                    if (target := module2ns[caller.module].get(qname.name)) is not None:
+                        # caused by star imports
+                        yield ProjectUsage(caller, target, span, is_certain=True)
+                    elif len(segs) == 0:
                         logging.warning(
                             f"Cannot resolve import '{qname.name}' in module: '{mname}'."
                         )
-                        return
-                    callee = namespaces.resolve_path(segs)
-                    if callee is None:
-                        return
-                    if callee in path2func:
-                        yield ProjectUsage(caller, callee, span, is_certain=True)
-                    elif (
-                        cons := ProjectPath(callee.module, callee.path + ".__init__")
-                    ) in path2func:
-                        yield ProjectUsage(caller, cons, span, is_certain=True)
+                    elif len(segs) >= 2:
+                        callee = ns_hier.resolve_path(segs)
+                        if callee is None:
+                            return
+                        if callee in path2func:
+                            yield ProjectUsage(
+                                caller, path2func[callee].path, span, is_certain=True
+                            )
                 case QualifiedNameSource.LOCAL:
                     segs = qname.name.split(".")
                     match segs:
@@ -300,11 +387,9 @@ class UsageAnalysis:
 
                     callee = ProjectPath(mname, ".".join(segs))
                     if callee in path2func:
-                        yield ProjectUsage(caller, callee, span, is_certain=True)
-                    elif (
-                        cons := ProjectPath(callee.module, callee.path + ".__init__")
-                    ) in path2func:
-                        yield ProjectUsage(caller, cons, span, is_certain=True)
+                        yield ProjectUsage(
+                            caller, path2func[callee].path, span, is_certain=True
+                        )
                     elif len(segs) >= 2 and segs[-2] != "<locals>":
                         # method fuzzy match case 3
                         yield from gen_method_usages(segs[-1])
@@ -322,7 +407,7 @@ class UsageAnalysis:
                         best_usages[up] = u
         all_usages = list(best_usages.values())
         self.path2func = path2func
-        self.func_usages = all_usages
+        self.all_usages = all_usages
         self.user2used = groupby(all_usages, lambda u: u.user)
         self.used2user = groupby(all_usages, lambda u: u.used)
 
@@ -359,7 +444,7 @@ def compute_module_usages(mod: PythonModule):
 class _VisitType(enum.Enum):
     Root = enum.auto()
     Class = enum.auto()
-    Func = enum.auto()
+    Function = enum.auto()
 
 
 class PythonModuleBuilder(cst.CSTVisitor):
@@ -372,9 +457,11 @@ class PythonModuleBuilder(cst.CSTVisitor):
         self.functions = dict[str, PythonFunction]()
         self.classes = dict[str, PythonClass]()
         self.current_class: PythonClass | None = None
-        self.type_stack = [_VisitType.Root]
-        self.name_stack = list[str]()
+        self.visit_stack = [_VisitType.Root]
         self.module = None
+        self.imported_modules = set[str]()
+        self.defined_symbols = dict[str, ProjectPath]()
+
         self.module_name = module_name
 
     def get_module(self) -> PythonModule:
@@ -383,20 +470,24 @@ class PythonModuleBuilder(cst.CSTVisitor):
             functions=list(self.functions.values()),
             classes=list(self.classes.values()),
             name=self.module_name,
+            imported_modules=self.imported_modules,
+            defined_symbols=self.defined_symbols,
             tree=self.module,
         )
 
     def visit_FunctionDef(self, node: cst.FunctionDef):
-        if self.type_stack[-1] == _VisitType.Func:
+        parent_type = self.visit_stack[-1]
+        self.visit_stack.append(_VisitType.Function)
+        if parent_type == _VisitType.Function:
             # skip inner functions
-            self.type_stack.append(_VisitType.Func)
-            return
+            return False
         for dec in node.decorators:
             match dec.decorator:
                 case cst.Name("overload") | cst.Attribute(attr=cst.Name("overload")):
                     # ignore overload signatures
                     return False
-        is_method = self.type_stack[-1] == _VisitType.Class
+
+        is_method = parent_type == _VisitType.Class
         name = node.name.value
         path = self.current_class.name + "." + name if self.current_class else name
         func = PythonFunction(
@@ -407,21 +498,19 @@ class PythonModuleBuilder(cst.CSTVisitor):
         )
         fs = self.current_class.methods if self.current_class else self.functions
         fs[func.name] = func
-        self.type_stack.append(_VisitType.Func)
-        self.name_stack.append(func.name)
+
+        if parent_type == _VisitType.Root:
+            # record top-level function
+            self.defined_symbols[func.name] = func.path
 
     def leave_FunctionDef(self, node) -> None:
-        assert self.type_stack[-1] == _VisitType.Func
-        if (
-            self.type_stack[-2] == _VisitType.Class
-            or self.type_stack[-2] == _VisitType.Root
-        ):
-            self.name_stack.pop()
-        self.type_stack.pop()
+        assert self.visit_stack[-1] == _VisitType.Function
+        self.visit_stack.pop()
 
     def visit_ClassDef(self, node: cst.ClassDef):
+        self.visit_stack.append(_VisitType.Class)
         if self.current_class is not None:
-            return False  # don't visit inner classes
+            return False  # skip inner classes all together
         cls = PythonClass(
             name=node.name.value,
             path=ProjectPath(self.module_name, node.name.value),
@@ -430,28 +519,52 @@ class PythonModuleBuilder(cst.CSTVisitor):
             tree=node,
         )
         self.current_class = cls
-        self.type_stack.append(_VisitType.Class)
 
     def leave_ClassDef(self, node: cst.ClassDef):
-        if self.current_class is not None:
-            self.classes[self.current_class.name] = self.current_class
+        assert self.visit_stack[-1] == _VisitType.Class
+        if (cls := self.current_class) is not None:
+            self.classes[cls.name] = cls
+            if "__init__" in cls.methods:
+                self.defined_symbols[cls.name] = cls.methods["__init__"].path
             self.current_class = None
-        assert self.type_stack[-1] == _VisitType.Class
-        self.type_stack.pop()
+        self.visit_stack.pop()
 
-    def visit_AnnAssign(self, node: cst.AnnAssign) -> Optional[bool]:
-        ...
+    def visit_Import(self, node: cst.Import):
+        for alias in node.names:
+            self.imported_modules.add(
+                ".".join(parse_module_path(alias.name, self.module_name, 0))
+            )
+
+    def visit_ImportFrom(self, node: cst.ImportFrom):
+        self.imported_modules.add(
+            ".".join(
+                parse_module_path(node.module, self.module_name, len(node.relative))
+            )
+        )
 
     def visit_Module(self, node: cst.Module):
         self.module = node
 
 
-class PythonClassNormalizer(cst.CSTTransformer):
-    def visit_ClassDef(self, node) -> Optional[bool]:
-        return False
+def parse_module_path(
+    path_ex: cst.Attribute | cst.Name | None, cur_mod: str, dots: int
+) -> list[str]:
+    result = list[str]() if dots == 0 else cur_mod.split(".")[:-dots]
 
-    def visit_FunctionDef(self, node) -> Optional[bool]:
-        return False
+    def rec(ex):
+        match ex:
+            case None:
+                pass
+            case cst.Name(value=name):
+                result.append(name)
+            case cst.Attribute(value=attr, attr=cst.Name(value=name)):
+                rec(attr)
+                result.append(name)
+            case _:
+                raise ValueError(f"Cannot parse {ex} as module path")
+
+    rec(path_ex)
+    return result
 
 
 class UsageRecorder(cst.CSTVisitor):
@@ -475,8 +588,13 @@ class UsageRecorder(cst.CSTVisitor):
         span = self.span_mapping[node]
         match lhs:
             case _ if is_access_chain(lhs) and lhs in self.name_mapping:
-                for qn in self.name_mapping[lhs]:
+                for qn in (qs := self.name_mapping[lhs]):
                     self.usages.append((span, qn))
+                if len(qs) == 0 and isinstance(lhs, cst.Name):
+                    # unresolved symbols are put into the 'IMPORT' category for later processing.
+                    self.usages.append(
+                        (span, QualifiedName(lhs.value, QualifiedNameSource.IMPORT))
+                    )
             case cst.Attribute(attr=cst.Name(attr)):
                 # if the lhs cannot be resolved (e.g., is an expression), we record
                 # the usage as potential method access.
@@ -489,6 +607,8 @@ class UsageRecorder(cst.CSTVisitor):
 
 
 def is_access_chain(node: cst.CSTNode) -> bool:
+    """Return whether the node is an access chain of the form `a.b.c`. A simple name
+    is also considered an access chain."""
     match node:
         case cst.Attribute(lhs, cst.Name()):
             return is_access_chain(lhs)
