@@ -301,7 +301,7 @@ def sort_modules_by_imports(project: PythonProject) -> list[str]:
 
 def build_project_namespaces(
     project: PythonProject,
-):
+) -> dict[ModuleName, ProjNamespace]:
     """Return the visible project-defined symbols in each module."""
     sorted_modules = sort_modules_by_imports(project)
     result = dict[ModuleName, ProjNamespace]()
@@ -311,7 +311,7 @@ def build_project_namespaces(
         new_ns = mv.namespace
         new_ns.update(project.modules[mod].defined_symbols)
         result[mod] = new_ns
-    return result, sorted_modules
+    return result
 
 
 class _NsBuilder(cst.CSTVisitor):
@@ -363,19 +363,34 @@ class UsageAnalysis:
     def __init__(self, project: PythonProject):
         self.project = project
         self.ns_hier = ModuleHierarchy.from_modules(project.modules.keys())
-        self.module2ns, self.sorted_modules = build_project_namespaces(project)
+        module2ns = build_project_namespaces(project)
+        self.sorted_modules = list(module2ns.keys())
+
+        self.path2elem = {
+            v.path: v for v in list(project.all_vars()) + list(project.all_funcs())
+        }
         self.path2classes = {
             cls.path: cls for mod in project.modules.values() for cls in mod.classes
         }
 
-        # subtyping relations are resolved in this step
+        # add mapping for star imports
+        for mname, ns in module2ns.items():
+            for s, p in ns.items():
+                if p in self.path2classes:
+                    cls = self.path2classes[p]
+                    self.path2classes.setdefault(ProjectPath(mname, s), cls)
+                    if "__init__" in cls.methods:
+                        self.path2elem.setdefault(
+                            ProjectPath(mname, s),
+                            self.path2classes[p].methods["__init__"],
+                        )
+                elif p in self.path2elem:
+                    self.path2elem.setdefault(ProjectPath(mname, s), self.path2elem[p])
+
+        # resolve subtyping relations using `compute_module_usages`
         mod2usages = {
             mname: compute_module_usages(project.modules[mname])
             for mname in self.sorted_modules
-        }
-
-        self.path2elem = {
-            v.path: v for v in list(project.all_vars()) + list(project.all_funcs())
         }
         # add elements from parents to subclass
         for mname in self.sorted_modules:
@@ -430,10 +445,7 @@ class UsageAnalysis:
         cls_path = None
         match qname.source:
             case QualifiedNameSource.IMPORT:
-                if (target := self.module2ns[mname].get(qname.name)) is not None:
-                    # caused by star imports
-                    cls_path = target
-                elif len(segs := to_abs_import_path(mname, qname.name).split(".")) >= 2:
+                if len(segs := to_abs_import_path(mname, qname.name).split(".")) >= 2:
                     cls_path = self.ns_hier.resolve_path(segs)
             case QualifiedNameSource.LOCAL:
                 cls_path = ProjectPath(mname, qname.name)
@@ -459,17 +471,11 @@ class UsageAnalysis:
         match qname.source:
             case QualifiedNameSource.IMPORT:
                 segs = to_abs_import_path(mname, qname.name).split(".")
-                # todo: replace the case below with direct path
-                if (
-                    target := self.module2ns[caller.module].get(qname.name)
-                ) is not None:
-                    # caused by star imports
-                    yield ProjectUsage(caller, target, span, is_certain=True)
-                elif len(segs) == 0:
+                if len(segs) < 2:
                     logging.warning(
                         f"Cannot resolve import '{qname.name}' in module: '{mname}'."
                     )
-                elif len(segs) >= 2:
+                else:
                     callee = self.ns_hier.resolve_path(segs)
                     if callee is None:
                         return
@@ -521,9 +527,15 @@ def compute_module_usages(mod: PythonModule):
         recorder.usages.clear()
 
     for cls in mod.classes:
-        cls.superclasses = [
-            x for b in cls.tree.bases for x in name_map.get(b.value, [])
-        ]
+        cls.superclasses = list()
+        for b in cls.tree.bases:
+            if b.value in name_map and name_map[b.value]:
+                cls.superclasses.extend(name_map[b.value])
+            elif isinstance(b.value, cst.Name):
+                # unresovled parent class is treated as local for later processing
+                cls.superclasses.append(
+                    QualifiedName(b.value.value, QualifiedNameSource.LOCAL)
+                )
 
     return result
 
@@ -618,9 +630,10 @@ class PythonModuleBuilder(cst.CSTVisitor):
         if (cls := self.current_class) is not None:
             self.classes[cls.name] = cls
             self.generate_init_(cls)
-            if "__init__" in cls.methods:
-                # The name of the class will be mapped to its __init__ function.
-                self.defined_symbols[cls.name] = cls.methods["__init__"].path
+            self.defined_symbols[cls.name] = cls.path
+            # if "__init__" in cls.methods:
+            #     # The name of the class will be mapped to its __init__ function.
+            #     self.defined_symbols[cls.name] = cls.methods["__init__"].path
             self.current_class = None
         self.visit_stack.pop()
 
@@ -748,8 +761,9 @@ class UsageRecorder(cst.CSTVisitor):
         if is_access_chain(name) and name in self.name_mapping:
             srcs = self.name_mapping[name]
             if len(srcs) == 0 and isinstance(name, cst.Name):
-                # unresolved symbols are put into the 'IMPORT' category for later processing.
-                return [QualifiedName(name.value, QualifiedNameSource.IMPORT)]
+                # unresolved symbols are put into the 'LOCAL' category for later processing
+                # due to star imports.
+                return [QualifiedName(name.value, QualifiedNameSource.LOCAL)]
             else:
                 return [s for s in srcs if s.name != "builtins.None"]
         return []

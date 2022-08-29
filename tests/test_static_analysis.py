@@ -5,6 +5,7 @@ from spot.static_analysis import (
     PythonModule,
     PythonProject,
     UsageAnalysis,
+    build_project_namespaces,
     cst,
     compute_module_usages,
     to_abs_import_path as to_abs,
@@ -346,7 +347,8 @@ def bar():
     )
     analysis = UsageAnalysis(project)
 
-    A_attrs = set(project.modules["root.file1"].classes[0].attributes.keys())
+    A_cls = project.modules["root.file1"].classes[0]
+    A_attrs = set(A_cls.attributes.keys())
     assert_eq(A_attrs, {"x", "y", "z", "s", "u", "v"})
 
     def check_var(attr_path: str, n_initializers: int, *usages: tuple[str, bool]):
@@ -399,6 +401,7 @@ def bar():
     # test inheritance
     code2 = """
 from root.file1 import A as Parent
+from root.file1 import *
 
 class B(Parent):
     new_mem1: bool
@@ -410,10 +413,10 @@ class C():
     y = "y_C"
 
 
-class D(Parent, C):
+class D(A, C):
     def __init__(self):
         self.y += 1  # should use y from C
-        self.z * 2 # should use z from Parent
+        self.z * 2 # should use z from A
 
 """
 
@@ -427,6 +430,9 @@ class D(Parent, C):
 
     B_cls = project.modules["root.file2"].classes[0]
     assert {n.name for n in not_none(B_cls.superclasses)} == {"root.file1.A"}
+
+    # test star import of classes
+    assert build_project_namespaces(project)["root.file2"]["A"] == A_cls.path
 
     check_var(
         "root.file1/A.x",
