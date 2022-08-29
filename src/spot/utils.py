@@ -220,9 +220,7 @@ def groupby(iterable: Iterable[T1], keyfunc: Callable[[T1], T2]) -> dict[T2, lis
     groups = dict[T2, list[T1]]()
     for item in iterable:
         key = keyfunc(item)
-        if key not in groups:
-            groups[key] = list[T1]()
-        groups[key].append(item)
+        groups.setdefault(key, []).append(item)
     return groups
 
 

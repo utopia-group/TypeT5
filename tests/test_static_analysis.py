@@ -11,7 +11,7 @@ from spot.static_analysis import (
 )
 import pytest
 
-from spot.utils import assert_eq, groupby
+from spot.utils import assert_eq, groupby, not_none
 
 
 def test_path_to_module():
@@ -267,8 +267,7 @@ def usage4():
 
     assert_usages(
         "root.file2/SubClass.use",
-        ("root.file2/UsageClass.foo", False),
-        ("root.file1/C.foo", False),
+        ("root.file2/UsageClass.foo", True),
         ("root.file1/C.s_method", True),
     )
 
@@ -343,12 +342,12 @@ def bar():
 """
 
     project = PythonProject.from_modules(
-        [PythonModule.from_cst(cst.parse_module(code1), "root.file1")]
+        [PythonModule.from_cst(cst.parse_module(code1), "root.file1")],
     )
     analysis = UsageAnalysis(project)
 
-    attr_set = set(project.modules["root.file1"].classes[0].attributes.keys())
-    assert_eq(attr_set, {"x", "y", "z", "s", "u", "v"})
+    A_attrs = set(project.modules["root.file1"].classes[0].attributes.keys())
+    assert_eq(A_attrs, {"x", "y", "z", "s", "u", "v"})
 
     def check_var(attr_path: str, n_initializers: int, *usages: tuple[str, bool]):
         attr_p = ProjectPath.from_str(attr_path)
@@ -395,4 +394,57 @@ def bar():
         "root.file1/A.u",
         0,
         ("root.file1/A.__init__", True),
+    )
+
+    # test inheritance
+    code2 = """
+from root.file1 import A as Parent
+
+class B(Parent):
+    new_mem1: bool
+    def fly(self):
+        self.new_mem2 = self.foo()
+        return self.x
+
+class C():
+    y = "y_C"
+
+
+class D(Parent, C):
+    def __init__(self):
+        self.y += 1  # should use y from C
+        self.z * 2 # should use z from Parent
+
+"""
+
+    project = PythonProject.from_modules(
+        [
+            PythonModule.from_cst(cst.parse_module(code1), "root.file1"),
+            PythonModule.from_cst(cst.parse_module(code2), "root.file2"),
+        ],
+    )
+    analysis = UsageAnalysis(project)
+
+    B_cls = project.modules["root.file2"].classes[0]
+    assert {n.name for n in not_none(B_cls.superclasses)} == {"root.file1.A"}
+
+    check_var(
+        "root.file1/A.x",
+        0,
+        ("root.file1/A.foo", True),
+        ("root.file1/bar", False),
+        ("root.file2/B.fly", True),
+    )
+
+    check_var(
+        "root.file2/C.y",
+        1,
+        ("root.file1/bar", False),
+        ("root.file2/D.__init__", True),
+    )
+
+    check_var(
+        "root.file1/A.z",
+        1,
+        ("root.file2/D.__init__", True),
     )

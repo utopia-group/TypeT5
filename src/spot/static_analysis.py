@@ -3,6 +3,7 @@
 
 from ast import Str
 from collections import defaultdict
+import copy
 from functools import lru_cache
 from posixpath import islink
 import enum
@@ -86,6 +87,7 @@ class PythonClass:
     attributes: dict[str, PythonVariable]
     methods: dict[str, PythonFunction]
     tree: cst.ClassDef
+    superclasses: list[QualifiedName] | None = None
 
     def __repr__(self):
         return f"PythonClass(path={self.path}, n_attrs={len(self.attributes)}, n_methods={len(self.methods)})"
@@ -299,7 +301,7 @@ def sort_modules_by_imports(project: PythonProject) -> list[str]:
 
 def build_project_namespaces(
     project: PythonProject,
-) -> Mapping[ModuleName, Mapping[str, ProjectPath]]:
+):
     """Return the visible project-defined symbols in each module."""
     sorted_modules = sort_modules_by_imports(project)
     result = dict[ModuleName, ProjNamespace]()
@@ -309,7 +311,7 @@ def build_project_namespaces(
         new_ns = mv.namespace
         new_ns.update(project.modules[mod].defined_symbols)
         result[mod] = new_ns
-    return result
+    return result, sorted_modules
 
 
 class _NsBuilder(cst.CSTVisitor):
@@ -359,76 +361,60 @@ class UsageAnalysis:
         return v
 
     def __init__(self, project: PythonProject):
-        path2func = {f.path: f for f in project.all_funcs()}
-        for f in list(path2func.values()):
+        self.project = project
+        self.ns_hier = ModuleHierarchy.from_modules(project.modules.keys())
+        self.module2ns, self.sorted_modules = build_project_namespaces(project)
+        self.path2classes = {
+            cls.path: cls for mod in project.modules.values() for cls in mod.classes
+        }
+
+        # subtyping relations are resolved in this step
+        mod2usages = {
+            mname: compute_module_usages(project.modules[mname])
+            for mname in self.sorted_modules
+        }
+
+        self.path2elem = {
+            v.path: v for v in list(project.all_vars()) + list(project.all_funcs())
+        }
+        # add elements from parents to subclass
+        for mname in self.sorted_modules:
+            mod = project.modules[mname]
+            for cls in mod.classes:
+                path_prefix = ProjectPath(mname, cls.name)
+                bases = not_none(cls.superclasses)
+                parents = [
+                    x for p in bases if (x := self.find_class(mname, p)) is not None
+                ]
+                for parent in parents:
+                    for a_name, a in parent.attributes.items():
+                        self.path2elem[path_prefix.append(a_name)] = a
+                    for m_name, m in parent.methods.items():
+                        self.path2elem[path_prefix.append(m_name)] = m
+                for m in cls.methods.values():
+                    self.path2elem[m.path] = m
+                for a in cls.attributes.values():
+                    self.path2elem[a.path] = a
+
+        # add path mapping for class constructors
+        for f in list(self.path2elem.values()):
             if f.in_class and f.name == "__init__":
                 cons_p = ProjectPath(f.path.module, f.path.path[: -len(".__init__")])
-                path2func[cons_p] = f
-        path2var = {a.path: a for a in project.all_vars()}
-        path2elem = path2var | path2func
+                self.path2elem[cons_p] = f
 
-        all_class_members = [
-            x
+        all_class_members = {
+            x.path
             for x in list(project.all_vars()) + list(project.all_funcs())
             if x.in_class
-        ]
-        name2class_member = groupby(all_class_members, lambda e: e.name)
-
-        ns_hier = ModuleHierarchy.from_modules(project.modules.keys())
-        module2ns = build_project_namespaces(project)
-
-        def generate_usages(
-            mname: str, caller: ProjectPath, span: CodeRange, qname: QualifiedName
-        ):
-            def gen_class_usages(member_name: str):
-                if member_name.startswith("__") and member_name.endswith("__"):
-                    # skip common methods like __init__
-                    return
-                for f in name2class_member.get(member_name, []):
-                    yield ProjectUsage(caller, f.path, span, is_certain=False)
-
-            match qname.source:
-                case QualifiedNameSource.IMPORT:
-                    segs = to_abs_import_path(mname, qname.name).split(".")
-                    if (target := module2ns[caller.module].get(qname.name)) is not None:
-                        # caused by star imports
-                        yield ProjectUsage(caller, target, span, is_certain=True)
-                    elif len(segs) == 0:
-                        logging.warning(
-                            f"Cannot resolve import '{qname.name}' in module: '{mname}'."
-                        )
-                    elif len(segs) >= 2:
-                        callee = ns_hier.resolve_path(segs)
-                        if callee is None:
-                            return
-                        if callee in path2elem:
-                            yield ProjectUsage(
-                                caller, path2elem[callee].path, span, is_certain=True
-                            )
-                case QualifiedNameSource.LOCAL:
-                    segs = qname.name.split(".")
-                    match segs:
-                        case ["<attr>", m]:
-                            # method fuzzy match case 1
-                            yield from gen_class_usages(m)
-                            return
-                        case [cls, _, "<locals>", "self", m]:
-                            segs = [cls, m]
-
-                    callee = ProjectPath(mname, ".".join(segs))
-                    if callee in path2elem:
-                        yield ProjectUsage(
-                            caller, path2elem[callee].path, span, is_certain=True
-                        )
-                    elif len(segs) >= 2 and segs[-2] != "<locals>":
-                        # method fuzzy match case 3
-                        yield from gen_class_usages(segs[-1])
+        }
+        self.name2class_member = groupby(
+            [self.path2elem[p] for p in all_class_members], lambda e: e.name
+        )
 
         best_usages = dict[tuple[ProjectPath, ProjectPath], ProjectUsage]()
-        for mname, mod in project.modules.items():
-            mod_usages = compute_module_usages(mod)
-            for caller, span, qname in mod_usages:
-                for u in generate_usages(mname, caller, span, qname):
+        for mname, usages in mod2usages.items():
+            for caller, span, qname in usages:
+                for u in self.generate_usages(mname, caller, span, qname):
                     up = u.user, u.used
                     if (
                         up not in best_usages
@@ -436,15 +422,85 @@ class UsageAnalysis:
                     ):
                         best_usages[up] = u
         all_usages = list(best_usages.values())
-        self.path2elem = path2elem
         self.all_usages = all_usages
         self.user2used = groupby(all_usages, lambda u: u.user)
         self.used2user = groupby(all_usages, lambda u: u.used)
+
+    def find_class(self, mname: ModuleName, qname: QualifiedName) -> PythonClass | None:
+        cls_path = None
+        match qname.source:
+            case QualifiedNameSource.IMPORT:
+                if (target := self.module2ns[mname].get(qname.name)) is not None:
+                    # caused by star imports
+                    cls_path = target
+                elif len(segs := to_abs_import_path(mname, qname.name).split(".")) >= 2:
+                    cls_path = self.ns_hier.resolve_path(segs)
+            case QualifiedNameSource.LOCAL:
+                cls_path = ProjectPath(mname, qname.name)
+
+        if cls_path in self.path2classes:
+            return self.path2classes[cls_path]
+        return None
+
+    def generate_usages(
+        self,
+        mname: ModuleName,
+        caller: ProjectPath,
+        span: CodeRange,
+        qname: QualifiedName,
+    ):
+        def gen_class_usages(member_name: str):
+            if member_name.startswith("__") and member_name.endswith("__"):
+                # skip common methods like __init__
+                return
+            for f in self.name2class_member.get(member_name, []):
+                yield ProjectUsage(caller, f.path, span, is_certain=False)
+
+        match qname.source:
+            case QualifiedNameSource.IMPORT:
+                segs = to_abs_import_path(mname, qname.name).split(".")
+                # todo: replace the case below with direct path
+                if (
+                    target := self.module2ns[caller.module].get(qname.name)
+                ) is not None:
+                    # caused by star imports
+                    yield ProjectUsage(caller, target, span, is_certain=True)
+                elif len(segs) == 0:
+                    logging.warning(
+                        f"Cannot resolve import '{qname.name}' in module: '{mname}'."
+                    )
+                elif len(segs) >= 2:
+                    callee = self.ns_hier.resolve_path(segs)
+                    if callee is None:
+                        return
+                    if callee in self.path2elem:
+                        yield ProjectUsage(
+                            caller, self.path2elem[callee].path, span, is_certain=True
+                        )
+            case QualifiedNameSource.LOCAL:
+                segs = qname.name.split(".")
+                match segs:
+                    case ["<attr>", m]:
+                        # method fuzzy match case 1
+                        yield from gen_class_usages(m)
+                        return
+                    case [cls, _, "<locals>", "self", m]:
+                        segs = [cls, m]
+
+                callee = ProjectPath(mname, ".".join(segs))
+                if callee in self.path2elem:
+                    yield ProjectUsage(
+                        caller, self.path2elem[callee].path, span, is_certain=True
+                    )
+                elif len(segs) >= 2 and segs[-2] != "<locals>":
+                    # method fuzzy match case 3
+                    yield from gen_class_usages(segs[-1])
 
 
 def compute_module_usages(mod: PythonModule):
     """
     Compute a mapping from each method/function to the methods and functions they use.
+    Also resolve the qualified name of superclasses.
     """
     wrapper = cst.MetadataWrapper(mod.tree, unsafe_skip_copy=True)
     name_map = wrapper.resolve(QualifiedNameProvider)
@@ -463,6 +519,11 @@ def compute_module_usages(mod: PythonModule):
             result.append((f.path, u[0], u[1]))
             callee_set.add(u[1])
         recorder.usages.clear()
+
+    for cls in mod.classes:
+        cls.superclasses = [
+            x for b in cls.tree.bases for x in name_map.get(b.value, [])
+        ]
 
     return result
 
@@ -556,6 +617,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
         assert self.visit_stack[-1] == _VisitType.Class
         if (cls := self.current_class) is not None:
             self.classes[cls.name] = cls
+            self.generate_init_(cls)
             if "__init__" in cls.methods:
                 # The name of the class will be mapped to its __init__ function.
                 self.defined_symbols[cls.name] = cls.methods["__init__"].path
@@ -640,6 +702,10 @@ class PythonModuleBuilder(cst.CSTVisitor):
     def visit_Module(self, node: cst.Module):
         self.module = node
 
+    def generate_init_(self, cls: PythonClass):
+        # todo: implement this
+        pass
+
 
 def parse_module_path(
     path_ex: cst.Attribute | cst.Name | None, cur_mod: str, dots: int
@@ -689,18 +755,17 @@ class UsageRecorder(cst.CSTVisitor):
         return []
 
     def record_name_use(self, name: cst.CSTNode):
-        span = self.span_mapping[name]
         for src in self._resolve(name):
-            self.usages.append((span, src))
+            self.usages.append((self.span_mapping[name], src))
 
     def visit_Attribute(self, node: cst.Attribute):
-        span = self.span_mapping[node]
         if not self._resolve(node):
             # if the access cannot be resolved (e.g., is an expression), we record
             # the usage as potential method access.
             qname = QualifiedName(
                 f"<attr>.{node.attr.value}", QualifiedNameSource.LOCAL
             )
+            span = self.span_mapping[node]
             self.usages.append((span, qname))
             return True
         else:
