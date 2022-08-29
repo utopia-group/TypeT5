@@ -3,10 +3,9 @@
 
 from ast import Str
 from collections import defaultdict
+from functools import lru_cache
 from posixpath import islink
 import enum
-
-from libcst import CSTNode
 
 from .utils import *
 from .type_env import AnnotInfo, AnnotPath, CodePathManager, collect_user_annotations
@@ -34,6 +33,9 @@ class ProjectPath(NamedTuple):
     def __repr__(self) -> str:
         return f"proj'{str(self)}'"
 
+    def append(self, path: ModulePath) -> "ProjectPath":
+        return ProjectPath(self.module, self.path + "." + path)
+
     @staticmethod
     def from_str(s: str) -> "ProjectPath":
         module, path = s.split("/")
@@ -54,7 +56,7 @@ ProjNamespace = dict[str, ProjectPath]
 class PythonFunction:
     name: str
     path: ProjectPath
-    is_method: bool
+    in_class: bool
     tree: cst.FunctionDef
 
     def __repr__(self):
@@ -62,23 +64,26 @@ class PythonFunction:
 
 
 @dataclass
-class PythonAttribute:
+class PythonVariable:
     name: str
     path: ProjectPath
-    initializer: cst.BaseExpression | None
+    in_class: bool
+    initializers: list[
+        cst.BaseExpression
+    ]  # only record assignments outside of functions
 
     def __repr__(self):
         return f"PythonAttribute(path={self.path})"
 
 
-Python = PythonFunction | PythonAttribute
+PythonElem = PythonFunction | PythonVariable
 
 
 @dataclass
 class PythonClass:
     name: str
     path: ProjectPath
-    attributes: dict[str, cst.AnnAssign]
+    attributes: dict[str, PythonVariable]
     methods: dict[str, PythonFunction]
     tree: cst.ClassDef
 
@@ -89,6 +94,7 @@ class PythonClass:
 @dataclass
 class PythonModule:
     functions: list[PythonFunction]
+    global_vars: list[PythonVariable]
     classes: list[PythonClass]
     name: str
     imported_modules: set[ModuleName]
@@ -105,11 +111,14 @@ class PythonModule:
         return f"PythonModule(n_functions={len(self.functions)}, n_classes={len(self.classes)})"
 
     def all_funcs(self) -> Generator[PythonFunction, None, None]:
-        for f in self.functions:
-            yield f
+        yield from self.functions
         for c in self.classes:
-            for f in c.methods.values():
-                yield f
+            yield from c.methods.values()
+
+    def all_vars(self) -> Generator[PythonVariable, None, None]:
+        yield from self.global_vars
+        for c in self.classes:
+            yield from c.attributes.values()
 
 
 @dataclass
@@ -172,6 +181,10 @@ class PythonProject:
     def all_funcs(self) -> Generator[PythonFunction, None, None]:
         for module in self.modules.values():
             yield from module.all_funcs()
+
+    def all_vars(self) -> Generator[PythonVariable, None, None]:
+        for module in self.modules.values():
+            yield from module.all_vars()
 
     @staticmethod
     def rel_path_to_module_name(rel_path: Path) -> ModuleName:
@@ -331,30 +344,47 @@ class _NsBuilder(cst.CSTVisitor):
 
 class UsageAnalysis:
     all_usages: list[ProjectUsage]
-    path2elem: dict[ProjectPath, PythonFunction | PythonAttribute | PythonClass]
+    path2elem: dict[ProjectPath, PythonElem]
     user2used: dict[ProjectPath, list[ProjectUsage]]
     used2user: dict[ProjectPath, list[ProjectUsage]]
+
+    def get_var(self, path: ProjectPath) -> PythonVariable:
+        v = self.path2elem[path]
+        assert isinstance(v, PythonVariable)
+        return v
+
+    def get_func(self, path: ProjectPath) -> PythonFunction:
+        v = self.path2elem[path]
+        assert isinstance(v, PythonFunction)
+        return v
 
     def __init__(self, project: PythonProject):
         path2func = {f.path: f for f in project.all_funcs()}
         for f in list(path2func.values()):
-            if f.is_method and f.name == "__init__":
+            if f.in_class and f.name == "__init__":
                 cons_p = ProjectPath(f.path.module, f.path.path[: -len(".__init__")])
                 path2func[cons_p] = f
-        all_methods = groupby(
-            (f for f in project.all_funcs() if f.is_method), lambda f: f.name
-        )
+        path2var = {a.path: a for a in project.all_vars()}
+        path2elem = path2var | path2func
+
+        all_class_members = [
+            x
+            for x in list(project.all_vars()) + list(project.all_funcs())
+            if x.in_class
+        ]
+        name2class_member = groupby(all_class_members, lambda e: e.name)
+
         ns_hier = ModuleHierarchy.from_modules(project.modules.keys())
         module2ns = build_project_namespaces(project)
 
         def generate_usages(
             mname: str, caller: ProjectPath, span: CodeRange, qname: QualifiedName
         ):
-            def gen_method_usages(method_name: str):
-                if method_name.startswith("__") and method_name.endswith("__"):
+            def gen_class_usages(member_name: str):
+                if member_name.startswith("__") and member_name.endswith("__"):
                     # skip common methods like __init__
                     return
-                for f in all_methods.get(method_name, []):
+                for f in name2class_member.get(member_name, []):
                     yield ProjectUsage(caller, f.path, span, is_certain=False)
 
             match qname.source:
@@ -371,28 +401,28 @@ class UsageAnalysis:
                         callee = ns_hier.resolve_path(segs)
                         if callee is None:
                             return
-                        if callee in path2func:
+                        if callee in path2elem:
                             yield ProjectUsage(
-                                caller, path2func[callee].path, span, is_certain=True
+                                caller, path2elem[callee].path, span, is_certain=True
                             )
                 case QualifiedNameSource.LOCAL:
                     segs = qname.name.split(".")
                     match segs:
-                        case ["<method>", m]:
+                        case ["<attr>", m]:
                             # method fuzzy match case 1
-                            yield from gen_method_usages(m)
+                            yield from gen_class_usages(m)
                             return
                         case [cls, _, "<locals>", "self", m]:
                             segs = [cls, m]
 
                     callee = ProjectPath(mname, ".".join(segs))
-                    if callee in path2func:
+                    if callee in path2elem:
                         yield ProjectUsage(
-                            caller, path2func[callee].path, span, is_certain=True
+                            caller, path2elem[callee].path, span, is_certain=True
                         )
                     elif len(segs) >= 2 and segs[-2] != "<locals>":
                         # method fuzzy match case 3
-                        yield from gen_method_usages(segs[-1])
+                        yield from gen_class_usages(segs[-1])
 
         best_usages = dict[tuple[ProjectPath, ProjectPath], ProjectUsage]()
         for mname, mod in project.modules.items():
@@ -406,7 +436,7 @@ class UsageAnalysis:
                     ):
                         best_usages[up] = u
         all_usages = list(best_usages.values())
-        self.path2func = path2func
+        self.path2elem = path2elem
         self.all_usages = all_usages
         self.user2used = groupby(all_usages, lambda u: u.user)
         self.used2user = groupby(all_usages, lambda u: u.used)
@@ -424,7 +454,7 @@ def compute_module_usages(mod: PythonModule):
     result = list[tuple[ProjectPath, CodeRange, QualifiedName]]()
 
     for f in mod.all_funcs():
-        f.tree.visit(recorder)
+        f.tree.body.visit(recorder)
         # we only keep the first usage of each qualified name to avoid quadratic blow up
         callee_set = set[QualifiedName]()
         for u in recorder.usages:
@@ -455,6 +485,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
         super().__init__()
 
         self.functions = dict[str, PythonFunction]()
+        self.global_vars = dict[str, PythonVariable]()
         self.classes = dict[str, PythonClass]()
         self.current_class: PythonClass | None = None
         self.visit_stack = [_VisitType.Root]
@@ -467,6 +498,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
     def get_module(self) -> PythonModule:
         assert self.module is not None, "Must visit a module first"
         return PythonModule(
+            global_vars=list(self.global_vars.values()),
             functions=list(self.functions.values()),
             classes=list(self.classes.values()),
             name=self.module_name,
@@ -494,7 +526,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
             name=node.name.value,
             path=ProjectPath(self.module_name, path),
             tree=node,
-            is_method=is_method,
+            in_class=is_method,
         )
         fs = self.current_class.methods if self.current_class else self.functions
         fs[func.name] = func
@@ -525,9 +557,72 @@ class PythonModuleBuilder(cst.CSTVisitor):
         if (cls := self.current_class) is not None:
             self.classes[cls.name] = cls
             if "__init__" in cls.methods:
+                # The name of the class will be mapped to its __init__ function.
                 self.defined_symbols[cls.name] = cls.methods["__init__"].path
             self.current_class = None
         self.visit_stack.pop()
+
+    # record global_vars and class attributes
+    def visit_AnnAssign(self, node: cst.AnnAssign) -> Optional[bool]:
+        cls = self.current_class
+        var = None
+        match (parent_type := self.visit_stack[-1]), node.target:
+            case (_VisitType.Root, cst.Name(value=n)):
+                # global var assignment
+                var = self.global_vars.get(
+                    n, PythonVariable(n, ProjectPath(self.module_name, n), False, [])
+                )
+            case (_VisitType.Class, cst.Name(value=n)) if cls:
+                # initialized outside of methods
+                var = cls.attributes[n] = PythonVariable(
+                    n, cls.path.append(n), True, []
+                )
+            case (
+                _VisitType.Function,
+                cst.Attribute(value=cst.Name(value="self"), attr=cst.Name(value=n)),
+            ) if cls:
+                # initialized/accessed inside methods
+                if n not in cls.attributes:
+                    var = cls.attributes[n] = PythonVariable(
+                        n, cls.path.append(n), True, []
+                    )
+        if (
+            var is not None
+            and node.value is not None
+            and parent_type != _VisitType.Function
+        ):
+            var.initializers.append(node.value)
+
+    # record global_vars and class attributes
+    def visit_Assign(self, node: cst.Assign) -> Optional[bool]:
+        cls = self.current_class
+
+        # class member declaration
+        for target in node.targets:
+            var = None
+            match self.visit_stack[-1], target.target:
+                case (_VisitType.Root, cst.Name(value=n)):
+                    # global var assignment
+                    var = self.global_vars.setdefault(
+                        n,
+                        PythonVariable(n, ProjectPath(self.module_name, n), False, []),
+                    )
+                case (_VisitType.Class, cst.Name(value=n)) if cls:
+                    # initialized outside of methods
+                    var = cls.attributes.setdefault(
+                        n, PythonVariable(n, cls.path.append(n), True, [])
+                    )
+                case (
+                    _VisitType.Function,
+                    cst.Attribute(value=cst.Name(value="self"), attr=cst.Name(value=n)),
+                ) if cls:
+                    # initialized/accessed inside methods
+                    if n not in cls.attributes:
+                        var = cls.attributes[n] = PythonVariable(
+                            n, cls.path.append(n), True, []
+                        )
+            if var is not None and node.value is not None:
+                var.initializers.append(node.value)
 
     def visit_Import(self, node: cst.Import):
         for alias in node.names:
@@ -583,29 +678,46 @@ class UsageRecorder(cst.CSTVisitor):
         self.span_mapping = span_mapping
         self.usages = list[tuple[CodeRange, QualifiedName]]()
 
-    def visit_Call(self, node: cst.Call) -> None:
-        lhs = node.func
-        span = self.span_mapping[node]
-        match lhs:
-            case _ if is_access_chain(lhs) and lhs in self.name_mapping:
-                for qn in (qs := self.name_mapping[lhs]):
-                    self.usages.append((span, qn))
-                if len(qs) == 0 and isinstance(lhs, cst.Name):
-                    # unresolved symbols are put into the 'IMPORT' category for later processing.
-                    self.usages.append(
-                        (span, QualifiedName(lhs.value, QualifiedNameSource.IMPORT))
-                    )
-            case cst.Attribute(attr=cst.Name(attr)):
-                # if the lhs cannot be resolved (e.g., is an expression), we record
-                # the usage as potential method access.
-                qname = QualifiedName(f"<method>.{attr}", QualifiedNameSource.LOCAL)
-                self.usages.append((span, qname))
+    def _resolve(self, name: cst.CSTNode):
+        if is_access_chain(name) and name in self.name_mapping:
+            srcs = self.name_mapping[name]
+            if len(srcs) == 0 and isinstance(name, cst.Name):
+                # unresolved symbols are put into the 'IMPORT' category for later processing.
+                return [QualifiedName(name.value, QualifiedNameSource.IMPORT)]
+            else:
+                return [s for s in srcs if s.name != "builtins.None"]
+        return []
 
+    def record_name_use(self, name: cst.CSTNode):
+        span = self.span_mapping[name]
+        for src in self._resolve(name):
+            self.usages.append((span, src))
+
+    def visit_Attribute(self, node: cst.Attribute):
+        span = self.span_mapping[node]
+        if not self._resolve(node):
+            # if the access cannot be resolved (e.g., is an expression), we record
+            # the usage as potential method access.
+            qname = QualifiedName(
+                f"<attr>.{node.attr.value}", QualifiedNameSource.LOCAL
+            )
+            self.usages.append((span, qname))
+            return True
+        else:
+            # if this access is resolved, do not record prefixes as usages
+            return False
+
+    def on_visit(self, node: cst.CSTNode) -> Optional[bool]:
+        self.record_name_use(node)
+        return super().on_visit(node)
+
+    # avoid visiting the following nodes
     def visit_Decorator(self, node: cst.Decorator):
         # do not count the calls in decorators
         return False
 
 
+@lru_cache(maxsize=128)
 def is_access_chain(node: cst.CSTNode) -> bool:
     """Return whether the node is an access chain of the form `a.b.c`. A simple name
     is also considered an access chain."""

@@ -480,7 +480,7 @@ def assert_eq(x: T1, *xs: T1, extra_message: Callable[[], str] = lambda: "") -> 
         x = xs[i - 1] if i > 0 else x
         y = xs[i]
         assert x == y, (
-            f"{x} (of type {type(x).__name__}) != {y} (of type {type(y).__name__}) at index {i}.\n"
+            f"{x} (of type {type(x).__name__}) != {y} (of type {type(y).__name__}) at equality {i}.\n"
             + extra_message()
         )
 

@@ -1,5 +1,4 @@
 from pathlib import Path
-import spot
 from spot.static_analysis import (
     ModuleHierarchy,
     ProjectPath,
@@ -7,11 +6,12 @@ from spot.static_analysis import (
     PythonProject,
     UsageAnalysis,
     cst,
+    compute_module_usages,
     to_abs_import_path as to_abs,
 )
 import pytest
 
-from spot.utils import assert_eq
+from spot.utils import assert_eq, groupby
 
 
 def test_path_to_module():
@@ -82,7 +82,7 @@ def gf(x):
 # with inner function
 def gf_with_inner(x):
     def inner(y):
-        return y * y
+        return not y
     return inner(x)
 
 # class
@@ -116,7 +116,7 @@ def usage2(x):
 
 def usage_method1(x):
     x = f1.C(5)
-    1 + x.foo(3)
+    return  {x: x.foo(3)}
 
 def usage_method2(x):
     (1 + f1.C(5)).foo(3)
@@ -131,8 +131,8 @@ def usage_dec():
 
 class UsageClass:
     def __init__(self, x):
-        self.x = gf_with_inner(x)
-        self.y = self.foo(5)
+        gf_with_inner(x)
+        self.foo(5)
 
     def foo(self, y):
         return usage_local(f1.gf(y))
@@ -153,7 +153,7 @@ def use_nonexist():
     nonexist.use(5)
 
 def use_nonexist2():
-    nonexist().use(5)
+    weird(1).use(5)
 
 def dual():
     gf(5)
@@ -186,6 +186,7 @@ def usage4():
     dual()  # from file2
     usage1(5)  # from file2, which shadows file3
     C(5)  # from file1
+    nonexist()
 
 """
 
@@ -211,7 +212,15 @@ def usage4():
             (u.used, u.is_certain) for u in analysis.user2used.get(caller_p, list())
         }
 
-        assert_eq(actual, expect)
+        try:
+            assert_eq(actual, expect)
+        except:
+            usages = compute_module_usages(project.modules[caller_p.module])
+            usages = groupby(usages, lambda x: x[0]).get(caller_p, [])
+            print(f"Raw callees:")
+            for u in usages:
+                print("\t", u[2])
+            raise
 
     assert_usages(
         "root.file2/usage1",
@@ -296,26 +305,41 @@ def usage4():
     )
 
 
-@pytest.mark.skip(reason="not implemented yet.")
 def test_attribute_analysis():
     code1 = """
 # root.file1
 def bernouli():
     return random.random() > 0.5
 
+Count = 1
+Count = 2
+
 class A:
     x: int
     y: str = "y_init"
     z: bool = bernouli()
+    s = 1
 
     def __init__(self):
         self.u: bool = bernouli()
+        self.v = self.foo()
 
     def foo(self):
-        return self.x + 1
+        return {self.x: self.undefined}
+
+def inc():
+    global Count
+    Count += 1
+
+def list():
+    return [Count]
+
+def loop():
+    for x in Count:
+        print(x)
 
 def bar():
-    return A().y
+    return A().y.x
 """
 
     project = PythonProject.from_modules(
@@ -323,8 +347,13 @@ def bar():
     )
     analysis = UsageAnalysis(project)
 
-    def check_attr(attr_path: str, has_initializer: bool, *usages: tuple[str, bool]):
+    attr_set = set(project.modules["root.file1"].classes[0].attributes.keys())
+    assert_eq(attr_set, {"x", "y", "z", "s", "u", "v"})
+
+    def check_var(attr_path: str, n_initializers: int, *usages: tuple[str, bool]):
         attr_p = ProjectPath.from_str(attr_path)
+        assert_eq(len(analysis.get_var(attr_p).initializers), n_initializers)
+
         expect = set()
         for caller, certain in usages:
             caller_p = ProjectPath.from_str(caller)
@@ -336,25 +365,34 @@ def bar():
 
         assert_eq(actual, expect)
 
-    check_attr(
-        "root.file1/A.x",
-        False,
-        ("root.file1/A.foo", True),
+    check_var(
+        "root.file1/Count",
+        2,
+        ("root.file1/inc", True),
+        ("root.file1/list", True),
+        ("root.file1/loop", True),
     )
 
-    check_attr(
-        "root.file1/A.y",
-        True,
+    check_var(
+        "root.file1/A.x",
+        0,
+        ("root.file1/A.foo", True),
         ("root.file1/bar", False),
     )
 
-    check_attr(
-        "root.file1/A.z",
-        True,
+    check_var(
+        "root.file1/A.y",
+        1,
+        ("root.file1/bar", False),
     )
 
-    check_attr(
+    check_var(
+        "root.file1/A.z",
+        1,
+    )
+
+    check_var(
         "root.file1/A.u",
-        False,
+        0,
         ("root.file1/A.__init__", True),
     )
