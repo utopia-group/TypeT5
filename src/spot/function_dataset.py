@@ -64,15 +64,6 @@ def repo_to_tk_srcs(
         width = max(len(l) for l in text.split("\n"))
         return width <= max_line_width
 
-    def get_masked_fun_code(f: PythonFunction) -> list[int]:
-        tree = f.tree
-        if pre_args.drop_env_types:
-            tree = remove_types(tree)
-        f_location = str(f.path)[: -(len(f.name) + 1)]
-        el = cst.EmptyLine(comment=cst.Comment("# " + f_location))
-        code = cst.Module([tree.with_changes(leading_lines=[el])]).code
-        return DefaultTokenizer.encode(code, add_special_tokens=False)
-
     proj = PythonProject.from_root(
         repo,
         True,
@@ -99,9 +90,8 @@ def repo_to_tk_srcs(
         tokenized_preamble = DefaultTokenizer.encode(preamble, add_special_tokens=False)
 
         mask_annot = cst.Annotation(cst.Name(SpecialNames.TypeMask))
-        all_elems = list(mod.all_funcs()) + list(mod.all_vars())
 
-        for elem in all_elems:
+        for elem in mod.all_elements():
             # the main code is the function body
             main_m = module_from_elems([elem], analysis.path2class)
             annots_info, types = collect_user_annotations(main_m)

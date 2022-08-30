@@ -3,7 +3,6 @@
 
 from ast import Str
 from collections import defaultdict
-import copy
 from functools import lru_cache
 from posixpath import islink
 import enum
@@ -127,8 +126,11 @@ class PythonModule:
             yield from c.attributes.values()
 
     def all_elements(self) -> Generator[PythonElem, None, None]:
-        yield from self.all_vars()
-        yield from self.all_funcs()
+        yield from self.global_vars
+        yield from self.functions
+        for c in self.classes:
+            yield from c.attributes.values()
+            yield from c.methods.values()
 
 
 @dataclass
@@ -197,8 +199,8 @@ class PythonProject:
             yield from module.all_vars()
 
     def all_elems(self) -> Generator[PythonElem, None, None]:
-        yield from self.all_vars()
-        yield from self.all_funcs()
+        for module in self.modules.values():
+            yield from module.all_elements()
 
     @staticmethod
     def rel_path_to_module_name(rel_path: Path) -> ModuleName:
@@ -826,6 +828,10 @@ class UsageRecorder(cst.CSTVisitor):
         # do not count the calls in decorators
         return False
 
+    # avoid using type annotation to track usages
+    def visit_Annotation(self, node: cst.Annotation):
+        return False
+
 
 @lru_cache(maxsize=128)
 def is_access_chain(node: cst.CSTNode) -> bool:
@@ -890,6 +896,7 @@ class StubGenerator(cst.CSTTransformer):
 
     def __init__(self):
         self.ns_stack = list[ClassNamespace]()
+        self.nest_level = 0
 
     def register_elem(self, name: str, declared: bool):
         if self.ns_stack:
@@ -899,6 +906,7 @@ class StubGenerator(cst.CSTTransformer):
                 s.declared_elems.add(name)
 
     def visit_ClassDef(self, node: cst.ClassDef):
+        self.nest_level += 1
         self.ns_stack.append(ClassNamespace())
 
     def leave_ClassDef(self, node, updated: cst.ClassDef):
@@ -910,10 +918,15 @@ class StubGenerator(cst.CSTTransformer):
             updated = updated.with_changes(
                 body=updated.body.with_changes(body=new_stmts)
             )
+        self.nest_level -= 1
         return updated
+
+    def visit_FunctionDef(self, node):
+        self.nest_level += 1
 
     def leave_FunctionDef(self, node, updated: cst.FunctionDef):
         self.register_elem(updated.name.value, True)
+        self.nest_level -= 1
         return updated.with_changes(body=StubGenerator.OMIT, returns=None)
 
     def leave_Annotation(self, node, updated: cst.Annotation):
@@ -926,20 +939,25 @@ class StubGenerator(cst.CSTTransformer):
         return updated.with_changes(annotation=None)
 
     def leave_AnnAssign(self, node, updated: cst.AnnAssign):
+        if self.nest_level == 0:
+            return updated
         # omit rhs of annotated assignments (if any)
         if updated.value is not None:
             updated = updated.with_changes(value=cst.Ellipsis())
         return updated
 
     def leave_Assign(self, node, updated: cst.AnnAssign):
+        if self.nest_level == 0:
+            return updated
         # omit rhs of assignments unless it's a type variable
-        match updated.value:
-            case cst.Call(func=cst.Name("TypeVar")) | cst.Call(
-                func=cst.Attribute(attr=cst.Name("TypeVar"))
-            ) | None:
-                return updated
-            case _:
-                return updated.with_changes(value=cst.Ellipsis())
+        return updated.with_changes(value=cst.Ellipsis())
+        # match updated.value:
+        #     case cst.Call(func=cst.Name("TypeVar")) | cst.Call(
+        #         func=cst.Attribute(attr=cst.Name("TypeVar"))
+        #     ) | None:
+        #         return updated
+        #     case _:
+        #         return updated.with_changes(value=cst.Ellipsis())
 
     def leave_Attribute(self, node, updated: cst.Assign):
         # record all atribute accesses involving `self`

@@ -394,6 +394,9 @@ class D(A, C):
         self.y += 1  # should use y from C
         self.z * 2 # should use z from A
 
+def test_annot():
+    x: D = undefined
+
 """
 
     project = PythonProject.from_modules(
@@ -421,4 +424,8 @@ class D(A, C):
         "root.file2/D.__init__",
         ("root.file2/C.y", True),
         ("root.file1/A.z", True),
+    )
+
+    analysis.assert_usages(
+        "root.file2/test_annot",
     )
