@@ -60,24 +60,30 @@ ProjNamespace = dict[str, ProjectPath]
 class PythonFunction:
     name: str
     path: ProjectPath
-    in_class: bool
+    parent_class: ProjectPath | None
     tree: cst.FunctionDef
 
     def __repr__(self):
         return f"PythonFunction(path={self.path})"
+
+    def in_class(self) -> bool:
+        return self.parent_class is not None
 
 
 @dataclass
 class PythonVariable:
     name: str
     path: ProjectPath
-    in_class: bool
+    parent_class: ProjectPath | None
     assignments: list[
         cst.Assign | cst.AnnAssign
     ]  # only record assignments outside of functions
 
     def __repr__(self):
         return f"PythonAttribute(path={self.path})"
+
+    def in_class(self) -> bool:
+        return self.parent_class is not None
 
 
 PythonElem = PythonFunction | PythonVariable
@@ -273,7 +279,8 @@ class ModuleHierarchy:
                 namespace = namespace.children[s]
 
     def resolve_path(self, segs: list[str]) -> ProjectPath | None:
-        assert len(segs) >= 2, "Path should be at least 2 segments long."
+        if len(segs) < 2:
+            return None
         namespace = self
         matched = 0
         for s in segs[:-1]:
@@ -479,18 +486,13 @@ class UsageAnalysis:
         match qname.source:
             case QualifiedNameSource.IMPORT:
                 segs = to_abs_import_path(mname, qname.name).split(".")
-                if len(segs) < 2:
-                    logging.warning(
-                        f"Cannot resolve import '{qname.name}' in module: '{mname}'."
+                callee = self.ns_hier.resolve_path(segs)
+                if callee is None:
+                    return
+                if callee in self.path2elem:
+                    yield ProjectUsage(
+                        caller, self.path2elem[callee].path, span, is_certain=True
                     )
-                else:
-                    callee = self.ns_hier.resolve_path(segs)
-                    if callee is None:
-                        return
-                    if callee in self.path2elem:
-                        yield ProjectUsage(
-                            caller, self.path2elem[callee].path, span, is_certain=True
-                        )
             case QualifiedNameSource.LOCAL:
                 segs = qname.name.split(".")
                 match segs:
@@ -625,14 +627,13 @@ class PythonModuleBuilder(cst.CSTVisitor):
                     # ignore overload signatures
                     return False
 
-        is_method = parent_type == _VisitType.Class
         name = node.name.value
         path = self.current_class.name + "." + name if self.current_class else name
         func = PythonFunction(
             name=node.name.value,
             path=ProjectPath(self.module_name, path),
             tree=node,
-            in_class=is_method,
+            parent_class=self.current_class.path if self.current_class else None,
         )
         fs = self.current_class.methods if self.current_class else self.functions
         fs[func.name] = func
@@ -673,17 +674,18 @@ class PythonModuleBuilder(cst.CSTVisitor):
     # record global_vars and class attributes
     def visit_AnnAssign(self, node: cst.AnnAssign) -> Optional[bool]:
         cls = self.current_class
+        cls_path = cls.path if cls else None
         var = None
         match (parent_type := self.visit_stack[-1]), node.target:
             case (_VisitType.Root, cst.Name(value=n)):
                 # global var assignment
                 var = self.global_vars.get(
-                    n, PythonVariable(n, ProjectPath(self.module_name, n), False, [])
+                    n, PythonVariable(n, ProjectPath(self.module_name, n), None, [])
                 )
             case (_VisitType.Class, cst.Name(value=n)) if cls:
                 # initialized outside of methods
                 var = cls.attributes[n] = PythonVariable(
-                    n, cls.path.append(n), True, []
+                    n, cls.path.append(n), cls_path, []
                 )
             case (
                 _VisitType.Function,
@@ -692,7 +694,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
                 # initialized/accessed inside methods
                 if n not in cls.attributes:
                     var = cls.attributes[n] = PythonVariable(
-                        n, cls.path.append(n), True, []
+                        n, cls.path.append(n), cls_path, []
                     )
         if var is not None and parent_type != _VisitType.Function:
             var.assignments.append(node)
@@ -700,6 +702,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
     # record global_vars and class attributes
     def visit_Assign(self, node: cst.Assign) -> Optional[bool]:
         cls = self.current_class
+        cls_path = cls.path if cls else None
 
         # class member declaration
         for target in node.targets:
@@ -709,12 +712,12 @@ class PythonModuleBuilder(cst.CSTVisitor):
                     # global var assignment
                     var = self.global_vars.setdefault(
                         n,
-                        PythonVariable(n, ProjectPath(self.module_name, n), False, []),
+                        PythonVariable(n, ProjectPath(self.module_name, n), None, []),
                     )
                 case (_VisitType.Class, cst.Name(value=n)) if cls:
                     # initialized outside of methods
                     var = cls.attributes.setdefault(
-                        n, PythonVariable(n, cls.path.append(n), True, [])
+                        n, PythonVariable(n, cls.path.append(n), cls_path, [])
                     )
                 case (
                     _VisitType.Function,
@@ -723,7 +726,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
                     # initialized/accessed inside methods
                     if n not in cls.attributes:
                         var = cls.attributes[n] = PythonVariable(
-                            n, cls.path.append(n), True, []
+                            n, cls.path.append(n), cls_path, []
                         )
             if (
                 var is not None

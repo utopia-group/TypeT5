@@ -194,8 +194,8 @@ def module_from_elems(
     gclasses = dict[ProjectPath, list[PythonElem]]()
 
     for elem in elems:
-        if elem.in_class:
-            used = gclasses.setdefault(elem.path.pop(), [])
+        if elem.parent_class:
+            used = gclasses.setdefault(elem.parent_class, [])
             used.append(elem)
         else:
             if isinstance(elem, PythonVariable):
@@ -226,7 +226,6 @@ def module_from_elems(
 
     for path, elems in gclasses.items():
         cls = path2class[path]
-        stmts = []
         cls_body = []
         for e in elems:
             if isinstance(e, PythonVariable):
@@ -235,14 +234,16 @@ def module_from_elems(
             if isinstance(e, PythonFunction):
                 cls_body.append(e.tree)
                 cls_body.append(cst.EmptyLine())
+        if not cls_body:
+            continue
         new_body = cst.IndentedBlock(body=cls_body)
-        stmts.append(
+        stmts = [
             cls.tree.with_changes(
                 leading_lines=location_lines(cls.path),
                 body=new_body,
             ),
-        )
-        stmts.append(cst.EmptyLine())
+            cst.EmptyLine(),
+        ]
         stmt_groups.append(stmts)
 
     if reversed:

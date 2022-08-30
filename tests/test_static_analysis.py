@@ -44,10 +44,8 @@ def test_namespace_resolution():
     ]
     namespace = ModuleHierarchy.from_modules(modules)
 
-    with pytest.raises(AssertionError):
-        namespace.resolve_path(["foo"])
-    with pytest.raises(AssertionError):
-        namespace.resolve_path(["z"])
+    assert namespace.resolve_path(["foo"]) == None
+    assert namespace.resolve_path(["z"]) == None
 
     assert namespace.resolve_path(["z", "x"]) == ProjectPath("z", "x")
     assert namespace.resolve_path(["foo", "a"]) == ProjectPath("foo", "a")
