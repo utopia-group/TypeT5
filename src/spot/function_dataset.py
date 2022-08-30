@@ -8,11 +8,16 @@ from .tokenized_src import (
 )
 from .data import SrcDataset
 from .static_analysis import (
+    ProjectPath,
     ProjectUsage,
+    PythonClass,
+    PythonElem,
     PythonFunction,
+    PythonVariable,
     UsageAnalysis,
     PythonProject,
     PythonModule,
+    build_project_namespaces,
     remove_types,
     stub_from_module,
 )
@@ -74,14 +79,15 @@ def repo_to_tk_srcs(
         src_filter,
         drop_comments=pre_args.drop_comments,
     )
-    analysis = None
-    p2tks = None
-    if pre_args.show_callees or pre_args.show_callers:
-        analysis = UsageAnalysis(proj)
-        p2tks = {p: get_masked_fun_code(f) for p, f in analysis.path2func.items()}
+
+    analysis = UsageAnalysis(proj)
+    sorted_moduels = analysis.sorted_modules
+
+    # p2tks = {p: get_masked_fun_code(f) for p, f in analysis.path2func.items()}
 
     srcs = list[TokenizedSrc]()
-    for mpath, mod in proj.modules.items():
+    for mpath in sorted_moduels:
+        mod = proj.modules[mpath]
         preamble_segs = list[str]()
         if pre_args.imports_in_preamble:
             wo_imports, imports = remove_imports(mod.tree)
@@ -93,24 +99,27 @@ def repo_to_tk_srcs(
         tokenized_preamble = DefaultTokenizer.encode(preamble, add_special_tokens=False)
 
         mask_annot = cst.Annotation(cst.Name(SpecialNames.TypeMask))
+        all_elems = list(mod.all_funcs()) + list(mod.all_vars())
 
-        for fun in mod.all_funcs():
+        for elem in all_elems:
             # the main code is the function body
-            fm = functions_to_module([fun])
-            annots_info, types = collect_user_annotations(fm)
+            main_m = module_from_elems([elem], analysis.path2class)
+            annots_info, types = collect_user_annotations(main_m)
             if len(annots_info) == 0:
                 continue  # skip files with no label
             for info in annots_info:
                 # the current implementation invalidates the src locations
                 info.annot_range = None
             types_str = [
-                fm.code_for_node(not_none(info.annot).annotation)
+                main_m.code_for_node(not_none(info.annot).annotation)
                 for info in annots_info
             ]
             replaces = dict()
             for info in annots_info:
                 replaces[info.path] = mask_annot
-            new_code = apply_annotations(fm, replaces).code
+            new_code = (
+                "# BEGIN\n" + apply_annotations(main_m, replaces).code + "# END\n"
+            )
             code_segs = new_code.split(SpecialNames.TypeMask)
             assert (
                 len(code_segs) == len(types) + 1
@@ -121,42 +130,51 @@ def repo_to_tk_srcs(
                 # Right context: assemble code for callers
                 caller_us = [
                     u
-                    for u in not_none(analysis).used2user.get(fun.path, [])
+                    for u in not_none(analysis).used2user.get(elem.path, [])
                     if u.user != u.used
                 ]
-                # want certain and smaller usages to come first
-                certain_callers = sorted(
-                    [not_none(p2tks)[u.user] for u in caller_us if u.is_certain],
-                    key=len,
+                # want certain usages to come first
+                certain_callers = [u for u in caller_us if u.is_certain]
+                potential_callers = [u for u in caller_us if not u.is_certain]
+                right_m = module_from_elems(
+                    [
+                        analysis.path2elem[p.user]
+                        for p in certain_callers + potential_callers
+                    ],
+                    analysis.path2class,
                 )
-                potential_callers = sorted(
-                    [not_none(p2tks)[u.user] for u in caller_us if not u.is_certain],
-                    key=len,
+                if pre_args.drop_env_types:
+                    right_m = remove_types(right_m)
+                right_tks = DefaultTokenizer.encode(
+                    right_m.code, add_special_tokens=False
                 )
-                right_tks = list(seq_flatten(certain_callers + potential_callers))
 
             left_tks = None
             if pre_args.show_callees:
                 # Left context: assemble code for callees
                 callee_us = [
                     u
-                    for u in not_none(analysis).user2used.get(fun.path, [])
+                    for u in not_none(analysis).user2used.get(elem.path, [])
                     if u.user != u.used
                 ]
                 # want certain and smaller usages to come last
-                certain_callees = sorted(
-                    [not_none(p2tks)[u.used] for u in callee_us if u.is_certain],
-                    key=len,
-                    reverse=True,
+                certain_callees = [u for u in callee_us if u.is_certain]
+                potential_callees = [u for u in callee_us if not u.is_certain]
+                left_m = module_from_elems(
+                    [
+                        analysis.path2elem[p.used]
+                        for p in certain_callees + potential_callees
+                    ],
+                    analysis.path2class,
+                    reversed=True,
                 )
-                potential_callees = sorted(
-                    [not_none(p2tks)[u.used] for u in callee_us if not u.is_certain],
-                    key=len,
-                    reverse=True,
+                if pre_args.drop_env_types:
+                    left_m = remove_types(left_m)
+                left_tks = DefaultTokenizer.encode(
+                    left_m.code, add_special_tokens=False
                 )
-                left_tks = list(seq_flatten(potential_callees + certain_callees))
 
-            file = Path(fun.path.module) / fun.path.path
+            file = Path(elem.path.module) / elem.path.path
 
             src = tokenized_src_from_segs(
                 file=file,
@@ -167,7 +185,7 @@ def repo_to_tk_srcs(
                 types=types,
                 types_str=types_str,
                 annots_info=annots_info,
-                cst_code=fm.code,
+                cst_code=main_m.code,
                 left_extra_tks=left_tks,
                 right_extra_tks=right_tks,
             )
@@ -176,11 +194,68 @@ def repo_to_tk_srcs(
     return srcs
 
 
-def functions_to_module(fun: Sequence[PythonFunction]) -> cst.Module:
-    # TODO: put into classes
-    stmts = []
-    for f in fun:
-        f_location = str(f.path)[: -(len(f.name) + 1)]
-        el = cst.EmptyLine(comment=cst.Comment("# " + f_location))
-        stmts.append(f.tree.with_changes(leading_lines=[el]))
-    return cst.Module(stmts)
+def module_from_elems(
+    elems: Sequence[PythonElem],
+    path2class: dict[ProjectPath, PythonClass],
+    reversed: bool = False,
+) -> cst.Module:
+    gvars = list[PythonVariable]()
+    gfuncs = list[PythonFunction]()
+    gclasses = dict[ProjectPath, list[PythonElem]]()
+
+    for elem in elems:
+        if elem.in_class:
+            used = gclasses.setdefault(elem.path.pop(), [])
+            used.append(elem)
+        else:
+            if isinstance(elem, PythonVariable):
+                gvars.append(elem)
+            elif isinstance(elem, PythonFunction):
+                gfuncs.append(elem)
+
+    stmt_groups = list[list]()
+
+    def location_lines(path: ProjectPath):
+        return [
+            cst.EmptyLine(comment=cst.Comment("# " + path.module)),
+        ]
+
+    for var in gvars:
+        stmt_groups.append(
+            location_lines(var.path) + var.assignments + [cst.EmptyLine()]
+        )
+
+    for func in gfuncs:
+        stmt_groups.append(
+            [
+                func.tree.with_changes(leading_lines=location_lines(func.path)),
+                cst.EmptyLine(),
+            ]
+        )
+        # stmt_groups.append([cst.EmptyLine(comment=cst.Comment(loc_comment)), func.tree])
+
+    for path, elems in gclasses.items():
+        cls = path2class[path]
+        stmts = []
+        cls_body = []
+        for e in elems:
+            if isinstance(e, PythonVariable):
+                cls_body.extend([cst.SimpleStatementLine([a]) for a in e.assignments])
+        for e in elems:
+            if isinstance(e, PythonFunction):
+                cls_body.append(e.tree)
+                cls_body.append(cst.EmptyLine())
+        new_body = cst.IndentedBlock(body=cls_body)
+        stmts.append(
+            cls.tree.with_changes(
+                leading_lines=location_lines(cls.path),
+                body=new_body,
+            ),
+        )
+        stmts.append(cst.EmptyLine())
+        stmt_groups.append(stmts)
+
+    if reversed:
+        stmt_groups.reverse()
+
+    return cst.Module(body=list(seq_flatten(stmt_groups)))

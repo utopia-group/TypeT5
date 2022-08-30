@@ -37,6 +37,10 @@ class ProjectPath(NamedTuple):
     def append(self, path: ModulePath) -> "ProjectPath":
         return ProjectPath(self.module, self.path + "." + path)
 
+    def pop(self) -> "ProjectPath":
+        p1 = ".".join(self.path.split(".")[:-1])
+        return ProjectPath(self.module, p1)
+
     @staticmethod
     def from_str(s: str) -> "ProjectPath":
         module, path = s.split("/")
@@ -69,8 +73,8 @@ class PythonVariable:
     name: str
     path: ProjectPath
     in_class: bool
-    initializers: list[
-        cst.BaseExpression
+    assignments: list[
+        cst.Assign | cst.AnnAssign
     ]  # only record assignments outside of functions
 
     def __repr__(self):
@@ -121,6 +125,10 @@ class PythonModule:
         yield from self.global_vars
         for c in self.classes:
             yield from c.attributes.values()
+
+    def all_elements(self) -> Generator[PythonElem, None, None]:
+        yield from self.all_vars()
+        yield from self.all_funcs()
 
 
 @dataclass
@@ -187,6 +195,10 @@ class PythonProject:
     def all_vars(self) -> Generator[PythonVariable, None, None]:
         for module in self.modules.values():
             yield from module.all_vars()
+
+    def all_elems(self) -> Generator[PythonElem, None, None]:
+        yield from self.all_vars()
+        yield from self.all_funcs()
 
     @staticmethod
     def rel_path_to_module_name(rel_path: Path) -> ModuleName:
@@ -366,23 +378,21 @@ class UsageAnalysis:
         module2ns = build_project_namespaces(project)
         self.sorted_modules = list(module2ns.keys())
 
-        self.path2elem = {
-            v.path: v for v in list(project.all_vars()) + list(project.all_funcs())
-        }
-        self.path2classes = {
+        self.path2elem = {v.path: v for v in project.all_elems()}
+        self.path2class = {
             cls.path: cls for mod in project.modules.values() for cls in mod.classes
         }
 
         # add mapping for star imports
         for mname, ns in module2ns.items():
             for s, p in ns.items():
-                if p in self.path2classes:
-                    cls = self.path2classes[p]
-                    self.path2classes.setdefault(ProjectPath(mname, s), cls)
+                if p in self.path2class:
+                    cls = self.path2class[p]
+                    self.path2class.setdefault(ProjectPath(mname, s), cls)
                     if "__init__" in cls.methods:
                         self.path2elem.setdefault(
                             ProjectPath(mname, s),
-                            self.path2classes[p].methods["__init__"],
+                            self.path2class[p].methods["__init__"],
                         )
                 elif p in self.path2elem:
                     self.path2elem.setdefault(ProjectPath(mname, s), self.path2elem[p])
@@ -417,11 +427,7 @@ class UsageAnalysis:
                 cons_p = ProjectPath(f.path.module, f.path.path[: -len(".__init__")])
                 self.path2elem[cons_p] = f
 
-        all_class_members = {
-            x.path
-            for x in list(project.all_vars()) + list(project.all_funcs())
-            if x.in_class
-        }
+        all_class_members = {x.path for x in project.all_elems() if x.in_class}
         self.name2class_member = groupby(
             [self.path2elem[p] for p in all_class_members], lambda e: e.name
         )
@@ -450,8 +456,8 @@ class UsageAnalysis:
             case QualifiedNameSource.LOCAL:
                 cls_path = ProjectPath(mname, qname.name)
 
-        if cls_path in self.path2classes:
-            return self.path2classes[cls_path]
+        if cls_path in self.path2class:
+            return self.path2class[cls_path]
         return None
 
     def generate_usages(
@@ -502,6 +508,25 @@ class UsageAnalysis:
                     # method fuzzy match case 3
                     yield from gen_class_usages(segs[-1])
 
+    def assert_usages(self, caller: str, *callees: tuple[str, bool]) -> None:
+        caller_p = ProjectPath.from_str(caller)
+        expect = set()
+        for callee, certain in callees:
+            callee_p = ProjectPath.from_str(callee)
+            expect.add((callee_p, certain))
+
+        actual = {(u.used, u.is_certain) for u in self.user2used.get(caller_p, list())}
+
+        try:
+            assert_eq(actual, expect)
+        except:
+            usages = compute_module_usages(self.project.modules[caller_p.module])
+            usages = groupby(usages, lambda x: x[0]).get(caller_p, [])
+            print(f"Raw callees:")
+            for u in usages:
+                print("\t", u[2])
+            raise
+
 
 def compute_module_usages(mod: PythonModule):
     """
@@ -515,14 +540,20 @@ def compute_module_usages(mod: PythonModule):
     recorder = UsageRecorder(name_map, pos_map)
     result = list[tuple[ProjectPath, CodeRange, QualifiedName]]()
 
-    for f in mod.all_funcs():
-        f.tree.body.visit(recorder)
-        # we only keep the first usage of each qualified name to avoid quadratic blow up
+    for e in mod.all_elements():
+        match e:
+            case PythonFunction():
+                e.tree.body.visit(recorder)
+            case PythonVariable():
+                for a in e.assignments:
+                    if a.value:
+                        a.value.visit(recorder)
+        # we only keep the first occurance of each qualified name to save space
         callee_set = set[QualifiedName]()
         for u in recorder.usages:
             if u[1] in callee_set:
                 continue
-            result.append((f.path, u[0], u[1]))
+            result.append((e.path, u[0], u[1]))
             callee_set.add(u[1])
         recorder.usages.clear()
 
@@ -661,12 +692,8 @@ class PythonModuleBuilder(cst.CSTVisitor):
                     var = cls.attributes[n] = PythonVariable(
                         n, cls.path.append(n), True, []
                     )
-        if (
-            var is not None
-            and node.value is not None
-            and parent_type != _VisitType.Function
-        ):
-            var.initializers.append(node.value)
+        if var is not None and parent_type != _VisitType.Function:
+            var.assignments.append(node)
 
     # record global_vars and class attributes
     def visit_Assign(self, node: cst.Assign) -> Optional[bool]:
@@ -675,7 +702,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
         # class member declaration
         for target in node.targets:
             var = None
-            match self.visit_stack[-1], target.target:
+            match (parent_type := self.visit_stack[-1]), target.target:
                 case (_VisitType.Root, cst.Name(value=n)):
                     # global var assignment
                     var = self.global_vars.setdefault(
@@ -696,8 +723,12 @@ class PythonModuleBuilder(cst.CSTVisitor):
                         var = cls.attributes[n] = PythonVariable(
                             n, cls.path.append(n), True, []
                         )
-            if var is not None and node.value is not None:
-                var.initializers.append(node.value)
+            if (
+                var is not None
+                and parent_type != _VisitType.Function
+                and node.value is not None
+            ):
+                var.assignments.append(node)
 
     def visit_Import(self, node: cst.Import):
         for alias in node.names:

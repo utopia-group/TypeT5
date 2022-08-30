@@ -202,102 +202,81 @@ def usage4():
 
     analysis = UsageAnalysis(project)
 
-    def assert_usages(caller: str, *callees: tuple[str, bool]):
-        caller_p = ProjectPath.from_str(caller)
-        expect = set()
-        for callee, certain in callees:
-            callee_p = ProjectPath.from_str(callee)
-            expect.add((callee_p, certain))
-
-        actual = {
-            (u.used, u.is_certain) for u in analysis.user2used.get(caller_p, list())
-        }
-
-        try:
-            assert_eq(actual, expect)
-        except:
-            usages = compute_module_usages(project.modules[caller_p.module])
-            usages = groupby(usages, lambda x: x[0]).get(caller_p, [])
-            print(f"Raw callees:")
-            for u in usages:
-                print("\t", u[2])
-            raise
-
-    assert_usages(
+    analysis.assert_usages(
         "root.file2/usage1",
         ("root.file1/gf", True),
         ("root.file1/C.__init__", True),
     )
 
-    assert_usages(
+    analysis.assert_usages(
         "root.file2/usage2",
         ("root.file1/gf_with_inner", True),
     )
 
-    assert_usages(
+    analysis.assert_usages(
         "root.file2/usage_method1",
         ("root.file1/C.__init__", True),
         ("root.file1/C.foo", False),
         ("root.file2/UsageClass.foo", False),
     )
 
-    assert_usages(
+    analysis.assert_usages(
         "root.file2/usage_method2",
         ("root.file1/C.__init__", True),
         ("root.file1/C.foo", False),
         ("root.file2/UsageClass.foo", False),
     )
 
-    assert_usages(
+    analysis.assert_usages(
         "root.file2/usage_local",
         ("root.file2/usage1", True),
         ("root.file2/UsageClass.__init__", True),
     )
 
-    assert_usages(
+    analysis.assert_usages(
         "root.file2/UsageClass.__init__",
         ("root.file1/gf_with_inner", True),
         ("root.file2/UsageClass.foo", True),
     )
 
-    assert_usages(
+    analysis.assert_usages(
         "root.file2/UsageClass.foo",
         ("root.file2/usage_local", True),
         ("root.file1/gf", True),
     )
 
-    assert_usages(
+    analysis.assert_usages(
         "root.file2/SubClass.use",
         ("root.file2/UsageClass.foo", True),
         ("root.file1/C.s_method", True),
     )
 
     # We should not cound decorator as a usage to avoid blowing up
-    assert_usages(
+    analysis.assert_usages(
         "root.file2/usage_dec",
     )
 
-    assert_usages(
+    analysis.assert_usages(
         "root.file2/use_nonexist",
     )
 
-    assert_usages(
+    analysis.assert_usages(
         "root.file2/use_nonexist2",
         ("root.file2/SubClass.use", False),
     )
 
-    assert_usages(
+    analysis.assert_usages(
         "root.file2/dual",
     )
 
     # test star imports
-    assert_usages(
+    analysis.assert_usages(
         "root.file3/usage1",
         ("root.file1/gf", True),
         ("root.file1/C.__init__", True),
     )
 
-    assert_usages(
+    analysis.assert_usages(
         "root.file4/usage4",
         ("root.file2/dual", True),
         ("root.file2/usage1", True),
@@ -312,7 +291,7 @@ def bernouli():
     return random.random() > 0.5
 
 Count = 1
-Count = 2
+Count = bernouli()
 
 class A:
     x: int
@@ -351,52 +330,49 @@ def bar():
     A_attrs = set(A_cls.attributes.keys())
     assert_eq(A_attrs, {"x", "y", "z", "s", "u", "v"})
 
-    def check_var(attr_path: str, n_initializers: int, *usages: tuple[str, bool]):
+    def check_var(attr_path: str, n_initializers: int):
         attr_p = ProjectPath.from_str(attr_path)
-        assert_eq(len(analysis.get_var(attr_p).initializers), n_initializers)
+        assert_eq(len(analysis.get_var(attr_p).assignments), n_initializers)
 
-        expect = set()
-        for caller, certain in usages:
-            caller_p = ProjectPath.from_str(caller)
-            expect.add((caller_p, certain))
+    check_var("root.file1/Count", 2)
+    check_var("root.file1/A.x", 1)
+    check_var("root.file1/A.y", 1)
+    check_var("root.file1/A.z", 1)
+    check_var("root.file1/A.s", 1)
+    check_var("root.file1/A.u", 0)
+    check_var("root.file1/A.v", 0)
 
-        actual = {
-            (u.user, u.is_certain) for u in analysis.used2user.get(attr_p, list())
-        }
-
-        assert_eq(actual, expect)
-
-    check_var(
-        "root.file1/Count",
-        2,
-        ("root.file1/inc", True),
-        ("root.file1/list", True),
-        ("root.file1/loop", True),
-    )
-
-    check_var(
-        "root.file1/A.x",
-        0,
-        ("root.file1/A.foo", True),
-        ("root.file1/bar", False),
-    )
-
-    check_var(
-        "root.file1/A.y",
-        1,
-        ("root.file1/bar", False),
-    )
-
-    check_var(
-        "root.file1/A.z",
-        1,
-    )
-
-    check_var(
-        "root.file1/A.u",
-        0,
+    analysis.assert_usages("root.file1/inc", ("root.file1/Count", True))
+    analysis.assert_usages("root.file1/list", ("root.file1/Count", True))
+    analysis.assert_usages("root.file1/loop", ("root.file1/Count", True))
+    analysis.assert_usages(
+        "root.file1/bar",
         ("root.file1/A.__init__", True),
+        ("root.file1/A.y", False),
+        ("root.file1/A.x", False),
     )
+
+    analysis.assert_usages(
+        "root.file1/A.__init__",
+        ("root.file1/A.u", True),
+        ("root.file1/A.v", True),
+        ("root.file1/A.foo", True),
+        ("root.file1/bernouli", True),
+    )
+
+    analysis.assert_usages(
+        "root.file1/A.foo",
+        ("root.file1/A.x", True),
+    )
+
+    # initializer usages
+    analysis.assert_usages("root.file1/Count", ("root.file1/bernouli", True))
+    analysis.assert_usages("root.file1/A.x")
+    analysis.assert_usages("root.file1/A.y")
+    analysis.assert_usages("root.file1/A.z", ("root.file1/bernouli", True))
+    analysis.assert_usages("root.file1/A.s")
+    analysis.assert_usages("root.file1/A.u")
+    analysis.assert_usages("root.file1/A.v")
 
     # test inheritance
     code2 = """
@@ -434,23 +410,15 @@ class D(A, C):
     # test star import of classes
     assert build_project_namespaces(project)["root.file2"]["A"] == A_cls.path
 
-    check_var(
-        "root.file1/A.x",
-        0,
+    analysis.assert_usages(
+        "root.file2/B.fly",
+        ("root.file1/A.x", True),
         ("root.file1/A.foo", True),
-        ("root.file1/bar", False),
-        ("root.file2/B.fly", True),
+        ("root.file2/B.new_mem2", True),
     )
 
-    check_var(
-        "root.file2/C.y",
-        1,
-        ("root.file1/bar", False),
-        ("root.file2/D.__init__", True),
-    )
-
-    check_var(
-        "root.file1/A.z",
-        1,
-        ("root.file2/D.__init__", True),
+    analysis.assert_usages(
+        "root.file2/D.__init__",
+        ("root.file2/C.y", True),
+        ("root.file1/A.z", True),
     )
