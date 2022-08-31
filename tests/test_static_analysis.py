@@ -427,3 +427,69 @@ def test_annot():
     analysis.assert_usages(
         "root.file2/test_annot",
     )
+
+
+def test_constructors():
+    code1 = """
+# root.file1
+class A:
+    x: int
+
+    def __init__(self, x):
+        self.x = x
+
+@dataclass
+class B:
+    x: int
+    y: int = field(init=False)
+
+from typing import NamedTuple
+
+class C(NamedTuple):
+    u: int
+    v: int
+
+def use():
+    A(1)
+    B(1, 2)
+    C(1, 2)
+"""
+
+    project = PythonProject.from_modules(
+        [PythonModule.from_cst(cst.parse_module(code1), "root.file1")],
+    )
+    analysis = UsageAnalysis(project)
+
+    analysis.assert_usages(
+        "root.file1/use",
+        ("root.file1/A.__init__", True),
+        ("root.file1/B.x", True),
+        ("root.file1/B.y", True),
+        ("root.file1/C.u", True),
+        ("root.file1/C.v", True),
+    )
+
+    code2 = """
+# root.file2
+
+@dataclass
+class B:
+    x: int
+    y: int = field(init=False)
+
+def use():
+    # these should not trigger constructor usage.
+    B
+    isinstance(x, B)
+    list[B]()
+
+    """
+
+    project = PythonProject.from_modules(
+        [PythonModule.from_cst(cst.parse_module(code2), "root.file2")],
+    )
+    analysis = UsageAnalysis(project)
+
+    analysis.assert_usages(
+        "root.file2/use",
+    )

@@ -88,6 +88,7 @@ class PythonVariable:
 
 PythonElem = PythonFunction | PythonVariable
 
+from functools import cached_property
 
 @dataclass
 class PythonClass:
@@ -100,6 +101,20 @@ class PythonClass:
 
     def __repr__(self):
         return f"PythonClass(path={self.path}, n_attrs={len(self.attributes)}, n_methods={len(self.methods)})"
+
+    @cached_property
+    def is_dataclass(self) -> bool:
+        for dec in self.tree.decorators:
+            match dec.decorator:
+                case cst.Name(value="dataclass") | cst.Call(
+                    func=cst.Name(value="dataclass")
+                ):
+                    return True
+        if self.superclasses:
+            for sc in self.superclasses:
+                if "NamedTuple" in sc.name.split("."):
+                    return True
+        return False
 
 
 @dataclass
@@ -443,8 +458,8 @@ class UsageAnalysis:
 
         best_usages = dict[tuple[ProjectPath, ProjectPath], ProjectUsage]()
         for mname, usages in mod2usages.items():
-            for caller, span, qname in usages:
-                for u in self.generate_usages(mname, caller, span, qname):
+            for caller, span, qname, is_call in usages:
+                for u in self.generate_usages(mname, caller, span, qname, is_call):
                     up = u.user, u.used
                     if (
                         up not in best_usages
@@ -475,6 +490,7 @@ class UsageAnalysis:
         caller: ProjectPath,
         span: CodeRange,
         qname: QualifiedName,
+        is_call: bool,
     ):
         def gen_class_usages(member_name: str):
             if member_name.startswith("__") and member_name.endswith("__"):
@@ -483,13 +499,27 @@ class UsageAnalysis:
             for f in self.name2class_member.get(member_name, []):
                 yield ProjectUsage(caller, f.path, span, is_certain=False)
 
+        def gen_constructor_usages(path: ProjectPath):
+            if not is_call or (cls := self.path2class.get(path)) is None:
+                return
+            used_elems = []
+            if cls.is_dataclass:
+                for v in cls.attributes.values():
+                    used_elems.append(v.path)
+            elif "__init__" in cls.methods:
+                used_elems.append(cls.methods["__init__"].path)
+            for u in used_elems:
+                yield ProjectUsage(caller, u, span, is_certain=True)
+
         match qname.source:
             case QualifiedNameSource.IMPORT:
                 segs = to_abs_import_path(mname, qname.name).split(".")
                 callee = self.ns_hier.resolve_path(segs)
                 if callee is None:
                     return
-                if callee in self.path2elem:
+                if callee in self.path2class:
+                    yield from gen_constructor_usages(callee)
+                elif callee in self.path2elem:
                     yield ProjectUsage(
                         caller, self.path2elem[callee].path, span, is_certain=True
                     )
@@ -504,7 +534,9 @@ class UsageAnalysis:
                         segs = [cls, m]
 
                 callee = ProjectPath(mname, ".".join(segs))
-                if callee in self.path2elem:
+                if callee in self.path2class:
+                    yield from gen_constructor_usages(callee)
+                elif callee in self.path2elem:
                     yield ProjectUsage(
                         caller, self.path2elem[callee].path, span, is_certain=True
                     )
@@ -542,7 +574,7 @@ def compute_module_usages(mod: PythonModule):
     pos_map = wrapper.resolve(PositionProvider)
 
     recorder = UsageRecorder(name_map, pos_map)
-    result = list[tuple[ProjectPath, CodeRange, QualifiedName]]()
+    result = list[tuple[ProjectPath, CodeRange, QualifiedName, bool]]()
 
     for e in mod.all_elements():
         match e:
@@ -553,12 +585,12 @@ def compute_module_usages(mod: PythonModule):
                     if a.value:
                         a.value.visit(recorder)
         # we only keep the first occurance of each qualified name to save space
-        callee_set = set[QualifiedName]()
-        for u in recorder.usages:
-            if u[1] in callee_set:
-                continue
-            result.append((e.path, u[0], u[1]))
-            callee_set.add(u[1])
+        best_callee = dict[QualifiedName, tuple[bool, CodeRange]]()
+        for span, qn, is_call in recorder.usages:
+            if qn not in best_callee or int(is_call) > int(best_callee[qn][0]):
+                best_callee[qn] = (is_call, span)
+        for qn, (is_call, span) in best_callee.items():
+            result.append((e.path, span, qn, is_call))
         recorder.usages.clear()
 
     for cls in mod.classes:
@@ -791,7 +823,8 @@ class UsageRecorder(cst.CSTVisitor):
 
         self.name_mapping = name_mapping
         self.span_mapping = span_mapping
-        self.usages = list[tuple[CodeRange, QualifiedName]]()
+        self.parents = list[cst.CSTNode]()
+        self.usages = list[tuple[CodeRange, QualifiedName, bool]]()
 
     def _resolve(self, name: cst.CSTNode):
         if is_access_chain(name) and name in self.name_mapping:
@@ -804,9 +837,12 @@ class UsageRecorder(cst.CSTVisitor):
                 return [s for s in srcs if s.name != "builtins.None"]
         return []
 
+    def is_call_name(self) -> bool:
+        return len(self.parents) > 0 and isinstance(self.parents[-1], cst.Call)
+
     def record_name_use(self, name: cst.CSTNode):
         for src in self._resolve(name):
-            self.usages.append((self.span_mapping[name], src))
+            self.usages.append((self.span_mapping[name], src, self.is_call_name()))
 
     def visit_Attribute(self, node: cst.Attribute):
         if not self._resolve(node):
@@ -816,7 +852,7 @@ class UsageRecorder(cst.CSTVisitor):
                 f"<attr>.{node.attr.value}", QualifiedNameSource.LOCAL
             )
             span = self.span_mapping[node]
-            self.usages.append((span, qname))
+            self.usages.append((span, qname, self.is_call_name()))
             return True
         else:
             # if this access is resolved, do not record prefixes as usages
@@ -824,7 +860,11 @@ class UsageRecorder(cst.CSTVisitor):
 
     def on_visit(self, node: cst.CSTNode) -> Optional[bool]:
         self.record_name_use(node)
+        self.parents.append(node)
         return super().on_visit(node)
+
+    def on_leave(self, node: cst.CSTNode) -> Optional[bool]:
+        self.parents.pop()
 
     # avoid visiting the following nodes
     def visit_Decorator(self, node: cst.Decorator):
