@@ -522,6 +522,11 @@ def get_subset(data, key: slice | Iterable):
         return [data[i] for i in key]
 
 
+def dict_subset(d: dict[T1, T2], n: int) -> dict[T1, T2]:
+    keys = list(d)[:n]
+    return {k: d[k] for k in keys}
+
+
 def pretty_print_dict(
     d: dict,
     level: int = 0,

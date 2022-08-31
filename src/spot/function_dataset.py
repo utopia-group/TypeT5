@@ -93,7 +93,7 @@ def repo_to_tk_srcs(
 
         for elem in mod.all_elements():
             # the main code is the function body
-            main_m = module_from_elems([elem], analysis.path2class)
+            main_m = cst.Module(reformat_elems([elem], analysis.path2class))
             annots_info, types = collect_user_annotations(main_m)
             if len(annots_info) == 0:
                 continue  # skip files with no label
@@ -116,7 +116,7 @@ def repo_to_tk_srcs(
             ), f"{len(code_segs)} != {len(types) + 1}. replaces: {replaces}\ncode: {new_code}"
 
             right_tks = None
-            if pre_args.show_callers:
+            if pre_args.max_callers > 0:
                 # Right context: assemble code for callers
                 caller_us = [
                     u
@@ -124,14 +124,24 @@ def repo_to_tk_srcs(
                     if u.user != u.used
                 ]
                 # want certain usages to come first
-                certain_callers = [u for u in caller_us if u.is_certain]
-                potential_callers = [u for u in caller_us if not u.is_certain]
-                right_m = module_from_elems(
-                    [
-                        analysis.path2elem[p.user]
-                        for p in certain_callers + potential_callers
-                    ],
-                    analysis.path2class,
+                certain_callers = dict_subset(
+                    {u.user: None for u in caller_us if u.is_certain},
+                    pre_args.max_callers,
+                )
+                max_potential = pre_args.max_callers - len(certain_callers)
+                potential_callers = dict_subset(
+                    {u.user: None for u in caller_us if not u.is_certain}, max_potential
+                )
+
+                right_m = cst.Module(
+                    reformat_elems(
+                        [analysis.path2elem[u] for u in certain_callers],
+                        analysis.path2class,
+                    )
+                    + reformat_elems(
+                        [analysis.path2elem[u] for u in potential_callers],
+                        analysis.path2class,
+                    )
                 )
                 if pre_args.drop_env_types:
                     right_m = remove_types(right_m)
@@ -140,7 +150,7 @@ def repo_to_tk_srcs(
                 )
 
             left_tks = None
-            if pre_args.show_callees:
+            if pre_args.max_callees > 0:
                 # Left context: assemble code for callees
                 callee_us = [
                     u
@@ -148,15 +158,26 @@ def repo_to_tk_srcs(
                     if u.user != u.used
                 ]
                 # want certain and smaller usages to come last
-                certain_callees = [u for u in callee_us if u.is_certain]
-                potential_callees = [u for u in callee_us if not u.is_certain]
-                left_m = module_from_elems(
-                    [
-                        analysis.path2elem[p.used]
-                        for p in certain_callees + potential_callees
-                    ],
-                    analysis.path2class,
-                    reversed=True,
+                certain_callees = dict_subset(
+                    {u.used: None for u in callee_us if u.is_certain},
+                    pre_args.max_callees,
+                )
+                max_potential = pre_args.max_callees - len(certain_callees)
+                potential_callees = dict_subset(
+                    {u.used: None for u in callee_us if not u.is_certain}, max_potential
+                )
+
+                left_m = cst.Module(
+                    reformat_elems(
+                        [analysis.path2elem[p] for p in potential_callees],
+                        analysis.path2class,
+                        reversed=True,
+                    )
+                    + reformat_elems(
+                        [analysis.path2elem[p] for p in certain_callees],
+                        analysis.path2class,
+                        reversed=True,
+                    )
                 )
                 if pre_args.drop_env_types:
                     left_m = remove_types(left_m)
@@ -184,36 +205,43 @@ def repo_to_tk_srcs(
     return srcs
 
 
-def module_from_elems(
+def reformat_elems(
     elems: Sequence[PythonElem],
     path2class: dict[ProjectPath, PythonClass],
     reversed: bool = False,
-) -> cst.Module:
+):
+    """Generate code for the given list of python elements by
+    reordering them and group class memebers into classes."""
+
     gvars = list[PythonVariable]()
     gfuncs = list[PythonFunction]()
-    gclasses = dict[ProjectPath, list[PythonElem]]()
+    gclasses = dict[ProjectPath, dict[str, PythonElem]]()
 
     for elem in elems:
         if elem.parent_class:
-            used = gclasses.setdefault(elem.parent_class, [])
-            used.append(elem)
+            used = gclasses.setdefault(elem.parent_class, dict())
+            used[elem.name] = elem
         else:
             if isinstance(elem, PythonVariable):
                 gvars.append(elem)
             elif isinstance(elem, PythonFunction):
                 gfuncs.append(elem)
-
-    stmt_groups = list[list]()
+    stmt_groups = list[
+        Sequence[cst.SimpleStatementLine | cst.BaseCompoundStatement | cst.EmptyLine]
+    ]()
 
     def location_lines(path: ProjectPath):
         return [
+            cst.EmptyLine(),
             cst.EmptyLine(comment=cst.Comment("# " + path.module)),
         ]
 
     for var in gvars:
-        stmt_groups.append(
-            location_lines(var.path) + var.assignments + [cst.EmptyLine()]
-        )
+        if var.assignments:
+            to_add: list[Any] = [cst.SimpleStatementLine([a]) for a in var.assignments]
+            to_add[0] = to_add[0].with_changes(leading_lines=location_lines(var.path))
+            to_add.append(cst.EmptyLine())
+            stmt_groups.append(to_add)
 
     for func in gfuncs:
         stmt_groups.append(
@@ -222,15 +250,14 @@ def module_from_elems(
                 cst.EmptyLine(),
             ]
         )
-        # stmt_groups.append([cst.EmptyLine(comment=cst.Comment(loc_comment)), func.tree])
 
-    for path, elems in gclasses.items():
+    for path, members in gclasses.items():
         cls = path2class[path]
         cls_body = []
-        for e in elems:
+        for e in members.values():
             if isinstance(e, PythonVariable):
                 cls_body.extend([cst.SimpleStatementLine([a]) for a in e.assignments])
-        for e in elems:
+        for e in members.values():
             if isinstance(e, PythonFunction):
                 cls_body.append(e.tree)
                 cls_body.append(cst.EmptyLine())
@@ -249,4 +276,6 @@ def module_from_elems(
     if reversed:
         stmt_groups.reverse()
 
-    return cst.Module(body=list(seq_flatten(stmt_groups)))
+    result = list(seq_flatten(stmt_groups))
+    # hide empty lines in the type signature to make the checker happy
+    return cast(list[cst.SimpleStatementLine | cst.BaseCompoundStatement], result)

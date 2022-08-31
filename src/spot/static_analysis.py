@@ -90,6 +90,7 @@ PythonElem = PythonFunction | PythonVariable
 
 from functools import cached_property
 
+
 @dataclass
 class PythonClass:
     name: str
@@ -496,20 +497,22 @@ class UsageAnalysis:
             if member_name.startswith("__") and member_name.endswith("__"):
                 # skip common methods like __init__
                 return
-            for f in self.name2class_member.get(member_name, []):
-                yield ProjectUsage(caller, f.path, span, is_certain=False)
+            for e in self.name2class_member.get(member_name, []):
+                yield ProjectUsage(caller, e.path, span, is_certain=False)
 
         def gen_constructor_usages(path: ProjectPath):
             if not is_call or (cls := self.path2class.get(path)) is None:
                 return
-            used_elems = []
+            used_elems = list[ProjectPath]()
             if cls.is_dataclass:
                 for v in cls.attributes.values():
                     used_elems.append(v.path)
             elif "__init__" in cls.methods:
                 used_elems.append(cls.methods["__init__"].path)
             for u in used_elems:
-                yield ProjectUsage(caller, u, span, is_certain=True)
+                yield ProjectUsage(
+                    caller, self.path2elem[u].path, span, is_certain=True
+                )
 
         match qname.source:
             case QualifiedNameSource.IMPORT:

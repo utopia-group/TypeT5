@@ -46,6 +46,12 @@ if eval_only:
 
 project_name = "test-SPOT" if config.quicktest else "SPOT"
 train_ctx_args = config.train_ctx_args()
+if train_ctx_args.window_size < 100:
+    print(
+        colored(
+            f"[Warning] window size is very small: {train_ctx_args.window_size}", "red"
+        )
+    )
 tc_args = TypeCheckArgs(check_in_isolation=config.check_in_isolation)
 
 max_tokens_per_file = config.ctx_size
