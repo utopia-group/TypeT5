@@ -638,6 +638,24 @@ class PythonModuleBuilder(cst.CSTVisitor):
 
         self.module_name = module_name
 
+    def _record_elem(self, e: PythonElem, cls: PythonClass | None):
+        vars = cls.attributes if cls else self.global_vars
+        funcs = cls.methods if cls else self.functions
+        if cls is None:
+            self.classes.pop(e.name, None)
+            self.defined_symbols[e.name] = e.path
+        match e:
+            case PythonFunction(n):
+                vars.pop(n, None)
+                funcs[n] = e
+            case PythonVariable(n, assignments=assignments):
+                funcs.pop(n, None)
+                if n in vars:
+                    assert_eq(vars[n].path, e.path)
+                    vars[n].assignments.extend(assignments)
+                else:
+                    vars[n] = e
+
     def get_module(self) -> PythonModule:
         assert self.module is not None, "Must visit a module first"
         return PythonModule(
@@ -670,12 +688,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
             tree=node,
             parent_class=self.current_class.path if self.current_class else None,
         )
-        fs = self.current_class.methods if self.current_class else self.functions
-        fs[func.name] = func
-
-        if parent_type == _VisitType.Root:
-            # record top-level function
-            self.defined_symbols[func.name] = func.path
+        self._record_elem(func, self.current_class)
 
     def leave_FunctionDef(self, node) -> None:
         assert self.visit_stack[-1] == _VisitType.Function
@@ -693,46 +706,38 @@ class PythonModuleBuilder(cst.CSTVisitor):
             tree=node,
         )
         self.current_class = cls
+        self.global_vars.pop(cls.name, None)
+        self.functions.pop(cls.name, None)
+        self.classes[cls.name] = cls
+        self.defined_symbols[cls.name] = cls.path
 
     def leave_ClassDef(self, node: cst.ClassDef):
         assert self.visit_stack[-1] == _VisitType.Class
-        if (cls := self.current_class) is not None:
-            self.classes[cls.name] = cls
-            self.generate_init_(cls)
-            self.defined_symbols[cls.name] = cls.path
-            # if "__init__" in cls.methods:
-            #     # The name of the class will be mapped to its __init__ function.
-            #     self.defined_symbols[cls.name] = cls.methods["__init__"].path
-            self.current_class = None
+        self.current_class = None
         self.visit_stack.pop()
 
     # record global_vars and class attributes
-    def visit_AnnAssign(self, node: cst.AnnAssign) -> Optional[bool]:
+    def visit_AnnAssign(self, node: cst.AnnAssign):
         cls = self.current_class
         cls_path = cls.path if cls else None
         var = None
-        match (parent_type := self.visit_stack[-1]), node.target:
+        match self.visit_stack[-1], node.target:
             case (_VisitType.Root, cst.Name(value=n)):
                 # global var assignment
-                var = self.global_vars.get(
-                    n, PythonVariable(n, ProjectPath(self.module_name, n), None, [])
-                )
+                var = PythonVariable(n, ProjectPath(self.module_name, n), None, [node])
             case (_VisitType.Class, cst.Name(value=n)) if cls:
                 # initialized outside of methods
-                var = cls.attributes[n] = PythonVariable(
-                    n, cls.path.append(n), cls_path, []
-                )
+                var = PythonVariable(n, cls.path.append(n), cls_path, [node])
             case (
                 _VisitType.Function,
                 cst.Attribute(value=cst.Name(value="self"), attr=cst.Name(value=n)),
             ) if cls:
                 # initialized/accessed inside methods
-                if n not in cls.attributes:
-                    var = cls.attributes[n] = PythonVariable(
-                        n, cls.path.append(n), cls_path, []
-                    )
-        if var is not None and parent_type != _VisitType.Function:
-            var.assignments.append(node)
+                # TODO: figure out how to move the annotation to class scope
+                var = PythonVariable(n, cls.path.append(n), cls_path, [])
+        if var is not None:
+            self._record_elem(var, cls)
+        return None
 
     # record global_vars and class attributes
     def visit_Assign(self, node: cst.Assign) -> Optional[bool]:
@@ -742,33 +747,23 @@ class PythonModuleBuilder(cst.CSTVisitor):
         # class member declaration
         for target in node.targets:
             var = None
-            match (parent_type := self.visit_stack[-1]), target.target:
+            match self.visit_stack[-1], target.target:
                 case (_VisitType.Root, cst.Name(value=n)):
                     # global var assignment
-                    var = self.global_vars.setdefault(
-                        n,
-                        PythonVariable(n, ProjectPath(self.module_name, n), None, []),
+                    var = PythonVariable(
+                        n, ProjectPath(self.module_name, n), None, [node]
                     )
                 case (_VisitType.Class, cst.Name(value=n)) if cls:
                     # initialized outside of methods
-                    var = cls.attributes.setdefault(
-                        n, PythonVariable(n, cls.path.append(n), cls_path, [])
-                    )
+                    var = PythonVariable(n, cls.path.append(n), cls_path, [node])
                 case (
                     _VisitType.Function,
                     cst.Attribute(value=cst.Name(value="self"), attr=cst.Name(value=n)),
                 ) if cls:
                     # initialized/accessed inside methods
-                    if n not in cls.attributes:
-                        var = cls.attributes[n] = PythonVariable(
-                            n, cls.path.append(n), cls_path, []
-                        )
-            if (
-                var is not None
-                and parent_type != _VisitType.Function
-                and node.value is not None
-            ):
-                var.assignments.append(node)
+                    var = PythonVariable(n, cls.path.append(n), cls_path, [])
+            if var is not None:
+                self._record_elem(var, cls)
 
     def visit_Import(self, node: cst.Import):
         for alias in node.names:
@@ -785,10 +780,6 @@ class PythonModuleBuilder(cst.CSTVisitor):
 
     def visit_Module(self, node: cst.Module):
         self.module = node
-
-    def generate_init_(self, cls: PythonClass):
-        # todo: implement this
-        pass
 
 
 def parse_module_path(

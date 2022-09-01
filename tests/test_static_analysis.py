@@ -493,3 +493,25 @@ def use():
     analysis.assert_usages(
         "root.file2/use",
     )
+
+
+def test_module_symbols():
+    code1 = """
+# root.file1
+
+A = 1
+
+def A():
+    pass
+
+# should shadow the global A
+class A:
+    pass
+
+"""
+
+    m1 = PythonModule.from_cst(cst.parse_module(code1), "root.file1")
+
+    assert len(m1.global_vars) == 0
+    assert len(m1.functions) == 0
+    assert len(m1.classes) == 1

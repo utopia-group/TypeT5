@@ -344,7 +344,7 @@ def chunk_srcs_per_file(
         srcs,
         label_ranges,
         [ctx_args] * len(srcs),
-        desc="map srcs_to_chunks",
+        desc="map src_to_chunks",
         tqdm_args=tqdm_args,
     )
 
@@ -939,7 +939,9 @@ class ChunkedDataset:
         """
 
         src_path_map = dict[Path, dict[AnnotPath, PythonType]]()
-        for f, src in srcs.file2src(resolve=False).items():
+        for f, src in tqdm(
+            srcs.file2src(resolve=False).items(), desc="building label map", **tqdm_args
+        ):
             src_path_map[f] = {
                 info.path: ty for ty, info in zip(src.types, src.types_info)
             }
