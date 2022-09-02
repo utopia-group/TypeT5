@@ -116,12 +116,12 @@ def repo_to_tk_srcs(
             ), f"{len(code_segs)} != {len(types) + 1}. replaces: {replaces}\ncode: {new_code}"
 
             right_tks = None
+            certain_callers = dict()
+            potential_callers = dict()
             if pre_args.max_callers > 0:
-                # Right context: assemble code for callers
+                # Right context: gather code for callers
                 caller_us = [
-                    u
-                    for u in not_none(analysis).used2user.get(elem.path, [])
-                    if u.user != u.used
+                    u for u in analysis.used2user.get(elem.path, []) if u.user != u.used
                 ]
                 # want certain usages to come first
                 certain_callers = dict_subset(
@@ -152,19 +152,35 @@ def repo_to_tk_srcs(
             left_tks = None
             if pre_args.max_callees > 0:
                 # Left context: assemble code for callees
-                callee_us = [
-                    u
-                    for u in not_none(analysis).user2used.get(elem.path, [])
-                    if u.user != u.used
-                ]
-                # want certain and smaller usages to come last
+                # map each displayed element to whether it's certainly relevant
+                displayed = dict[ProjectPath, bool]()
+                # the function of interest is certainly relevant
+                displayed[elem.path] = True
+                for p in certain_callers:
+                    displayed[p] = True
+                for p in potential_callers:
+                    displayed[p] = False
+
+                # the signature of these elements will be shown
+                callee2certainty = dict[ProjectPath, bool]()
+                for user, certain in displayed.items():
+                    for u in analysis.user2used.get(user, []):
+                        if not certain and not u.is_certain:
+                            continue  # skip doubly uncertain usages
+                        if u.used in displayed:
+                            continue  # skip already shown elements
+                        if callee2certainty.get(u.used, False) == False:
+                            callee2certainty[u.used] = certain and u.is_certain
+
+                # want certain usageså to come last
                 certain_callees = dict_subset(
-                    {u.used: None for u in callee_us if u.is_certain},
+                    {p: None for p in callee2certainty if callee2certainty[p]},
                     pre_args.max_callees,
                 )
                 max_potential = pre_args.max_callees - len(certain_callees)
                 potential_callees = dict_subset(
-                    {u.used: None for u in callee_us if not u.is_certain}, max_potential
+                    {p: None for p in callee2certainty if not callee2certainty[p]},
+                    max_potential,
                 )
 
                 left_m = cst.Module(
@@ -172,11 +188,13 @@ def repo_to_tk_srcs(
                         [analysis.path2elem[p] for p in potential_callees],
                         analysis.path2class,
                         reversed=True,
+                        signature_only=True,
                     )
                     + reformat_elems(
                         [analysis.path2elem[p] for p in certain_callees],
                         analysis.path2class,
                         reversed=True,
+                        signature_only=True,
                     )
                 )
                 if pre_args.drop_env_types:
@@ -209,6 +227,7 @@ def reformat_elems(
     elems: Sequence[PythonElem],
     path2class: dict[ProjectPath, PythonClass],
     reversed: bool = False,
+    signature_only=False,
 ):
     """Generate code for the given list of python elements by
     reordering them and group class memebers into classes."""
@@ -232,7 +251,6 @@ def reformat_elems(
 
     def location_lines(path: ProjectPath):
         return [
-            cst.EmptyLine(),
             cst.EmptyLine(comment=cst.Comment("# " + path.module)),
         ]
 
@@ -244,9 +262,13 @@ def reformat_elems(
             stmt_groups.append(to_add)
 
     for func in gfuncs:
+        func_node = func.tree.with_changes(leading_lines=location_lines(func.path))
+        if signature_only:
+            OMIT = cst.SimpleStatementSuite([cst.Expr(cst.Ellipsis())])
+            func_node = func_node.with_changes(body=OMIT)
         stmt_groups.append(
             [
-                func.tree.with_changes(leading_lines=location_lines(func.path)),
+                func_node,
                 cst.EmptyLine(),
             ]
         )
@@ -259,7 +281,12 @@ def reformat_elems(
                 cls_body.extend([cst.SimpleStatementLine([a]) for a in e.assignments])
         for e in members.values():
             if isinstance(e, PythonFunction):
-                cls_body.append(e.tree)
+                if signature_only:
+                    OMIT = cst.SimpleStatementSuite([cst.Expr(cst.Ellipsis())])
+                    method_node = e.tree.with_changes(body=OMIT, leading_lines=[])
+                else:
+                    method_node = e.tree.with_changes(leading_lines=[])
+                cls_body.append(method_node)
                 cls_body.append(cst.EmptyLine())
         if not cls_body:
             continue
