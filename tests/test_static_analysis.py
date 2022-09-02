@@ -7,7 +7,6 @@ from spot.static_analysis import (
     UsageAnalysis,
     build_project_namespaces,
     cst,
-    compute_module_usages,
     to_abs_import_path as to_abs,
 )
 import pytest

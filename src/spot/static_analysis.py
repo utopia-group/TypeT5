@@ -1,14 +1,10 @@
 # -----------------------------------------------------------
 # project-level static analysis
 
-from ast import Str
-from collections import defaultdict
 from functools import lru_cache
-from posixpath import islink
 import enum
 
 from .utils import *
-from .type_env import AnnotInfo, AnnotPath, CodePathManager, collect_user_annotations
 from libcst.metadata import (
     CodeRange,
     QualifiedNameProvider,
@@ -422,11 +418,13 @@ class UsageAnalysis:
                 elif p in self.path2elem:
                     self.path2elem.setdefault(ProjectPath(mname, s), self.path2elem[p])
 
-        # resolve subtyping relations using `compute_module_usages`
-        mod2usages = {
-            mname: compute_module_usages(project.modules[mname])
+        self.mod2analysis = {
+            mname: ModuleAnlaysis(project.modules[mname])
             for mname in self.sorted_modules
         }
+        # resolve subtyping relations
+        for ma in self.mod2analysis.values():
+            ma.udpate_superclasses_()
         # add elements from parents to subclass
         for mname in self.sorted_modules:
             mod = project.modules[mname]
@@ -458,7 +456,8 @@ class UsageAnalysis:
         )
 
         best_usages = dict[tuple[ProjectPath, ProjectPath], ProjectUsage]()
-        for mname, usages in mod2usages.items():
+        for mname, ma in self.mod2analysis.items():
+            usages = ma.compute_module_usages()
             for caller, span, qname, is_call in usages:
                 for u in self.generate_usages(mname, caller, span, qname, is_call):
                     up = u.user, u.used
@@ -559,7 +558,7 @@ class UsageAnalysis:
         try:
             assert_eq(actual, expect)
         except:
-            usages = compute_module_usages(self.project.modules[caller_p.module])
+            usages = self.mod2analysis[caller_p.module].compute_module_usages()
             usages = groupby(usages, lambda x: x[0]).get(caller_p, [])
             print(f"Raw callees:")
             for u in usages:
@@ -567,47 +566,52 @@ class UsageAnalysis:
             raise
 
 
-def compute_module_usages(mod: PythonModule):
-    """
-    Compute a mapping from each method/function to the methods and functions they use.
-    Also resolve the qualified name of superclasses.
-    """
-    wrapper = cst.MetadataWrapper(mod.tree, unsafe_skip_copy=True)
-    name_map = wrapper.resolve(QualifiedNameProvider)
-    pos_map = wrapper.resolve(PositionProvider)
+class ModuleAnlaysis:
+    def __init__(self, mod: PythonModule):
+        self.module = mod
+        wrapper = cst.MetadataWrapper(mod.tree, unsafe_skip_copy=True)
+        self.node2qnames = wrapper.resolve(QualifiedNameProvider)
+        self.node2pos = wrapper.resolve(PositionProvider)
 
-    recorder = UsageRecorder(name_map, pos_map)
-    result = list[tuple[ProjectPath, CodeRange, QualifiedName, bool]]()
+    def compute_module_usages(self):
+        """
+        Compute a mapping from each method/function to the methods and functions they use.
+        Also resolve the qualified name of superclasses.
+        """
 
-    for e in mod.all_elements():
-        match e:
-            case PythonFunction():
-                e.tree.body.visit(recorder)
-            case PythonVariable():
-                for a in e.assignments:
-                    if a.value:
-                        a.value.visit(recorder)
-        # we only keep the first occurance of each qualified name to save space
-        best_callee = dict[QualifiedName, tuple[bool, CodeRange]]()
-        for span, qn, is_call in recorder.usages:
-            if qn not in best_callee or int(is_call) > int(best_callee[qn][0]):
-                best_callee[qn] = (is_call, span)
-        for qn, (is_call, span) in best_callee.items():
-            result.append((e.path, span, qn, is_call))
-        recorder.usages.clear()
+        recorder = UsageRecorder(self.node2qnames, self.node2pos)
+        result = list[tuple[ProjectPath, CodeRange, QualifiedName, bool]]()
 
-    for cls in mod.classes:
-        cls.superclasses = list()
-        for b in cls.tree.bases:
-            if b.value in name_map and name_map[b.value]:
-                cls.superclasses.extend(name_map[b.value])
-            elif isinstance(b.value, cst.Name):
-                # unresovled parent class is treated as local for later processing
-                cls.superclasses.append(
-                    QualifiedName(b.value.value, QualifiedNameSource.LOCAL)
-                )
+        for e in self.module.all_elements():
+            match e:
+                case PythonFunction():
+                    e.tree.body.visit(recorder)
+                case PythonVariable():
+                    for a in e.assignments:
+                        if a.value:
+                            a.value.visit(recorder)
+            # we only keep the first occurance of each qualified name to save space
+            best_callee = dict[QualifiedName, tuple[bool, CodeRange]]()
+            for span, qn, is_call in recorder.usages:
+                if qn not in best_callee or int(is_call) > int(best_callee[qn][0]):
+                    best_callee[qn] = (is_call, span)
+            for qn, (is_call, span) in best_callee.items():
+                result.append((e.path, span, qn, is_call))
+            recorder.usages.clear()
 
-    return result
+        return result
+
+    def udpate_superclasses_(self):
+        for cls in self.module.classes:
+            cls.superclasses = list()
+            for b in cls.tree.bases:
+                if b.value in self.node2qnames and self.node2qnames[b.value]:
+                    cls.superclasses.extend(self.node2qnames[b.value])
+                elif isinstance(b.value, cst.Name):
+                    # unresovled parent class is treated as local for later processing
+                    cls.superclasses.append(
+                        QualifiedName(b.value.value, QualifiedNameSource.LOCAL)
+                    )
 
 
 # -----------------------------------------------------------

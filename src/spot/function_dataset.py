@@ -74,8 +74,6 @@ def repo_to_tk_srcs(
     analysis = UsageAnalysis(proj)
     sorted_moduels = analysis.sorted_modules
 
-    # p2tks = {p: get_masked_fun_code(f) for p, f in analysis.path2func.items()}
-
     srcs = list[TokenizedSrc]()
     for mpath in sorted_moduels:
         mod = proj.modules[mpath]
