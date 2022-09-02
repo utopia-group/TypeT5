@@ -1176,6 +1176,6 @@ def get_dataset_name(
     round_tag = f"-R{spot_round}" if spot_round > 0 else ""
     pre_parts = repr_modified_args(pre_args)
     if func_only:
-        return f"func_datasets-v3-{pre_parts}"
+        return f"func_datasets-v4-{pre_parts}"
     else:
         return f"src_datasets-v4-{round_tag}{pre_parts}"

@@ -21,7 +21,7 @@ from spot.train import TrainingConfig, TypeCheckArgs
 from spot.tokenized_src import PreprocessArgs
 from termcolor import colored
 
-gpu_id = 0
+gpu_id = 1
 eval_only = False
 
 
@@ -29,6 +29,7 @@ config = TrainingConfig(
     quicktest=False,
     pre_args=PreprocessArgs(
         drop_env_types=False,
+        stub_in_preamble=False,
     ),
     preamble_size=512 + 256,
     left_margin=1024 + 512,
