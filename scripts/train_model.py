@@ -2,11 +2,12 @@
 import os
 from typing import *
 
-from spot.utils import proj_root, get_data_dir
+from spot.utils import get_model_dir, proj_root, get_data_dir
 
 os.chdir(proj_root())
 
 datadir = get_data_dir()
+modeldir = get_model_dir()
 
 # %%
 # experiment configurations
@@ -21,14 +22,14 @@ from spot.train import TrainingConfig, TypeCheckArgs
 from spot.tokenized_src import PreprocessArgs
 from termcolor import colored
 
-gpu_id = 1
+gpu_id = 0
 eval_only = False
 
 
 config = TrainingConfig(
     quicktest=False,
     pre_args=PreprocessArgs(
-        drop_env_types=False,
+        drop_env_types=True,
         stub_in_preamble=False,
     ),
     preamble_size=512 + 256,
@@ -109,7 +110,7 @@ if not eval_only:
         )
 else:
     wrapper = ModelWrapper.from_pretrained(
-        datadir / f"checkpoints/lit-saved/{model_name}"
+        modeldir / f"checkpoints/lit-saved/{model_name}"
     )
 
 device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
@@ -131,7 +132,7 @@ bs_args = DecodingArgs(
 )
 wrapper.args = bs_args
 
-eval_cache = PickleCache(datadir / f"checkpoints/lit-saved/{model_name}/eval_cache")
+eval_cache = PickleCache(modeldir / f"checkpoints/lit-saved/{model_name}/eval_cache")
 # eval_cache.clear()
 r0_eval = eval_cache.cached(
     "dataset_pred.pkl",
@@ -166,7 +167,8 @@ export_preds = True
 
 if export_preds:
     max_samples = 1000
-    sub_ids = range(0, len(r0_eval.chunks), len(r0_eval.chunks) // max_samples)
+    sample_every = max(1, len(r0_eval.chunks) // max_samples)
+    sub_ids = range(0, len(r0_eval.chunks), sample_every)
     export_preds_on_code(
         r0_eval.chunks[sub_ids],
         [r0_eval.predictions[i] for i in sub_ids],

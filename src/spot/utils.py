@@ -157,6 +157,13 @@ def get_data_dir() -> Path:
         return proj_root() / "data"
 
 
+def get_model_dir() -> Path:
+    if (v := os.getenv("modeldir")) is not None:
+        return Path(v)
+    else:
+        return proj_root() / "models"
+
+
 def not_none(x: Optional[T1]) -> T1:
     assert x is not None
     return x

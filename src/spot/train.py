@@ -1,4 +1,5 @@
 import os
+import subprocess
 import warnings
 import copy
 from dataclasses import dataclass
@@ -120,12 +121,15 @@ def train_spot_model(
     train_ctx_args = train_args.train_ctx_args
     dec_args = train_args.dec_args
 
-    datadir = Path(os.getenv("datadir", "data"))
+    model_dir = get_model_dir()
 
-    running_dir = datadir / "checkpoints/lit-running" / model_name
+    running_dir = model_dir / "checkpoints/lit-running" / model_name
     if running_dir.exists():
         shutil.rmtree(running_dir)
     running_dir.mkdir(parents=True, exist_ok=True)
+
+    print("Disk space left:")
+    subprocess.run(["df", "-h", str(running_dir)])
 
     model_path = (
         "Salesforce/codet5-small" if use_small_model else "Salesforce/codet5-base"
@@ -202,7 +206,7 @@ def train_spot_model(
         )
 
     extra = dict[str, Any]()
-    save_dir = datadir / "checkpoints/lit-saved" / model_name
+    save_dir = model_dir / "checkpoints/lit-saved" / model_name
 
     final_eval = trainer.validate(model=lit_model, dataloaders=valid_dataloader)[0]
 
