@@ -120,6 +120,7 @@ class PythonModule:
     global_vars: list[PythonVariable]
     classes: list[PythonClass]
     name: str
+    # an over-approximation of the set of imported modules
     imported_modules: set[ModuleName]
     defined_symbols: dict[str, ProjectPath]
     tree: cst.Module
@@ -771,16 +772,24 @@ class PythonModuleBuilder(cst.CSTVisitor):
 
     def visit_Import(self, node: cst.Import):
         for alias in node.names:
-            self.imported_modules.add(
-                ".".join(parse_module_path(alias.name, self.module_name, 0))
-            )
+            segs = list[str]()
+            for seg in parse_module_path(alias.name, self.module_name, 0):
+                segs.append(seg)
+                self.imported_modules.add(".".join(segs))
 
     def visit_ImportFrom(self, node: cst.ImportFrom):
-        self.imported_modules.add(
-            ".".join(
-                parse_module_path(node.module, self.module_name, len(node.relative))
-            )
-        )
+        segs = list[str]()
+        for seg in parse_module_path(node.module, self.module_name, len(node.relative)):
+            segs.append(seg)
+            self.imported_modules.add(".".join(segs))
+        prefix = ".".join(segs)
+        if not isinstance(node.names, cst.ImportStar):
+            for alias in node.names:
+                posfix = [prefix]
+                # modules could also be imported via import from statements
+                for seg in parse_module_path(alias.name, "", 0):
+                    posfix.append(seg)
+                self.imported_modules.add(".".join(posfix))
 
     def visit_Module(self, node: cst.Module):
         self.module = node

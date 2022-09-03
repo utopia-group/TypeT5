@@ -64,9 +64,24 @@ from D import a, b as c
 from .utils import x
 from ..top import *
 from infer.type import *   
+from . import E
 """
     mod = PythonModule.from_cst(cst.parse_module(import_code), "root.file1")
-    assert mod.imported_modules == {"A", "B.C", "D", "root.utils", "top", "infer.type"}
+    assert mod.imported_modules == {
+        "A",
+        "B",
+        "B.C",
+        "D",
+        "D.a",
+        "D.b",
+        "root",
+        "root.utils",
+        "root.utils.x",
+        "top",
+        "infer",
+        "infer.type",
+        "root.E",
+    }
 
 
 def test_usage_analysis():
@@ -196,7 +211,6 @@ def usage4():
             PythonModule.from_cst(cst.parse_module(code4), "root.file4"),
         ]
     )
-
     analysis = UsageAnalysis(project)
 
     analysis.assert_usages(
@@ -279,6 +293,23 @@ def usage4():
         ("root.file2/usage1", True),
         ("root.file1/C.__init__", True),
     )
+
+    code5 = """
+# root.file5
+from . import file1
+
+def usage5():
+    file1.gf(5)
+    
+"""
+    project = PythonProject.from_modules(
+        [
+            PythonModule.from_cst(cst.parse_module(code1), "root.file1"),
+            PythonModule.from_cst(cst.parse_module(code5), "root.file5"),
+        ]
+    )
+    analysis = UsageAnalysis(project)
+    analysis.assert_usages("root.file5/usage5", ("root.file1/gf", True))
 
 
 def test_attribute_analysis():
