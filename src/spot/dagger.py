@@ -347,9 +347,10 @@ class DAggerEvalResult:
     final_srcs: list[TokenizedSrc]
     final_preds: list[dict[int, PythonType]]
 
-    @property
-    def accuracies(self):
-        return src_preds_to_accuracies(self.final_preds, self.final_srcs)
+    def accuracies(self, common_type_names: set[str]):
+        return src_preds_to_accuracies(
+            self.final_preds, self.final_srcs, common_type_names
+        )
 
 
 async def throttled_async_run(f, xs: Sequence, concurrency: int):

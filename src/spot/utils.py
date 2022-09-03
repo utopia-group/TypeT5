@@ -610,7 +610,7 @@ class GroupedAccCounter(Generic[T1]):
         self.total_counter[key] += total
 
     def grouped_accs(
-        self, key=lambda x: x, sort_by=lambda x: x
+        self, key: Callable = lambda x: x, sort_by: Callable = lambda x: x
     ) -> dict[Any, CountedAcc]:
         return {
             str(key(k)): CountedAcc(self.correct_counter[k], self.total_counter[k])

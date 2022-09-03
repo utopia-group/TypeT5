@@ -319,7 +319,6 @@ def R1_srcs_from_model(
     tc_args: TypeCheckArgs,
 ) -> dict[str, SrcDataset]:
     R1_src_datasets = dict[str, SrcDataset]()
-    tokenizer = wrapper.tokenizer
     chunk_datasets = {
         n: src_datasets[n].to_chunks(wrapper.args.ctx_args)
         for n in ["train", "valid", "test"]
@@ -336,7 +335,8 @@ def R1_srcs_from_model(
             tc_args=tc_args,
             max_workers=wrapper.args.max_workers,
         )
-        r0_accs = preds_to_accuracies(preds, cdata)
+        common_type_names = src_datasets["train"].common_type_names()
+        r0_accs = preds_to_accuracies(preds, cdata, common_type_names)
         R1_src_datasets[n].add_stats({"r0_full_acc": r0_accs["full_acc"]})
     return R1_src_datasets
 

@@ -61,9 +61,8 @@ class DatasetPredResult(Generic[T1]):
     predictions: list[list[PythonType]]
     extra_info: list[T1] = field(default_factory=list)
 
-    @property
-    def accuracies(self) -> dict:
-        return preds_to_accuracies(self.predictions, self.chunks)
+    def accuracies(self, common_type_names: set[str]) -> dict:
+        return preds_to_accuracies(self.predictions, self.chunks, common_type_names)
 
     def group_by_repo(self) -> dict[Path, "DatasetPredResult[T1]"]:
         chunk2repo = list[Path]()

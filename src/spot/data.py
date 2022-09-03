@@ -404,6 +404,14 @@ class SrcDataset:
             extra_stats=copy.deepcopy(self.extra_stats),
         )
 
+    def common_type_names(self, top_k=100) -> set[str]:
+        count = Counter()
+        for src in self.all_srcs:
+            for t in src.types:
+                for n in t.all_names():
+                    count[n] += 1
+        return {n for n, _ in count.most_common(top_k)}
+
     def get_src_by_file(self, file: Path) -> TokenizedSrc:
         assert isinstance(file, Path)
         for src in self.all_srcs:
@@ -1052,10 +1060,14 @@ def type_accuracies(
     label_types: Sequence[PythonType],
     types_cat: Sequence[AnnotCat],
     types_pos: Sequence[int],
+    common_type_names: set[str],
     normalize_types=True,
     allow_implicit_none=False,
 ) -> dict[str, Any]:
     assert_eq(len(pred_types), len(label_types), len(types_cat), len(types_pos))
+
+    def is_common_type(t: PythonType) -> bool:
+        return t.head_name() in common_type_names and all(map(is_common_type, t.args))
 
     if normalize_types:
         pred_types = [normalize_type(ty) for ty in pred_types]
@@ -1079,25 +1091,30 @@ def type_accuracies(
             return 0
         return 1 + sum(ast_overlap(a1, a2) for a1, a2 in zip(ty1.args, ty2.args))
 
-    partial_by_cat = GroupedAccCounter[AnnotCat]()
-    partial_by_pos = GroupedAccCounter[range]()
     full_acc = GroupedAccCounter[None]()
-    ast_acc = GroupedAccCounter[None]()
+    partial_acc = GroupedAccCounter[None]()
+    acc_by_cat = GroupedAccCounter[AnnotCat]()
+    acc_by_pos = GroupedAccCounter[range]()
+    acc_by_common = GroupedAccCounter[bool]()
 
     for p, l, cat, pos in zip(pred_types, label_types, types_cat, types_pos):
-        partial_by_cat.count(cat, p.head_name() == l.head_name(), 1)
-        partial_by_pos.count(i_to_range(pos), p.head_name() == l.head_name(), 1)
-        full_acc.count(None, p == l, 1)
-        ast_acc.count(None, ast_overlap(p, l), ast_size(l))
+        is_correct = p == l
+        full_acc.count(None, is_correct, 1)
+        partial_acc.count(None, p.head_name() == l.head_name(), 1)
+        acc_by_cat.count(cat, is_correct, 1)
+        acc_by_pos.count(i_to_range(pos), is_correct, 1)
+        if common_type_names is not None:
+            acc_by_common.count(is_common_type(l), is_correct, 1)
 
+    acc_by_common = acc_by_common.grouped_accs(key=lambda x: "common" if x else "rare")
     return {
-        "partial_acc": partial_by_cat.overall_acc(),
-        "ast_acc": ast_acc.overall_acc(),
+        "partial_acc": partial_acc.overall_acc(),
         "full_acc": full_acc.overall_acc(),
-        "partial_acc_by_cat": partial_by_cat.grouped_accs(
+        "full_acc_by_common": acc_by_common,
+        "full_acc_by_cat": acc_by_cat.grouped_accs(
             key=lambda x: x.name, sort_by=lambda x: x.value
         ),
-        "partial_acc_by_pos": partial_by_pos.grouped_accs(sort_by=lambda x: x.start),
+        "full_acc_by_pos": acc_by_pos.grouped_accs(sort_by=lambda x: x.start),
         "avg_label_size": safe_div(
             sum(ast_size(l) for l in label_types), len(label_types)
         ),
@@ -1110,32 +1127,27 @@ def type_accuracies(
 def preds_to_accuracies(
     preds: Sequence[Sequence[PythonType]],
     dataset: ChunkedDataset,
+    common_type_names: set[str],
     normalize_types=True,
 ):
     cats = [an.cat for info in dataset.chunks_info for an in info.annots_info]
     labels = [ty for info in dataset.chunks_info for ty in info.types]
     poses = [i for info in dataset.chunks_info for i in info.label_ids]
-    results = [
-        type_accuracies(
-            list(seq_flatten(preds)),
-            labels,
-            cats,
-            poses,
-            normalize_types=normalize_types,
-            allow_implicit_none=allow,
-        )
-        for allow in [False, True]
-    ]
-    result = dict[str, Any]()
-    result["partial_acc (ImNone)"] = results[1]["partial_acc"]
-    result["full_acc (ImNone)"] = results[1]["full_acc"]
-    result.update(results[0])
-    return result
+    return type_accuracies(
+        list(seq_flatten(preds)),
+        labels,
+        cats,
+        poses,
+        common_type_names,
+        normalize_types=normalize_types,
+        allow_implicit_none=True,
+    )
 
 
 def src_preds_to_accuracies(
     preds: Sequence[dict[int, PythonType]] | Sequence[Sequence[PythonType]],
     srcs: Sequence[TokenizedSrc],
+    common_type_names,
     normalize_types=True,
 ):
     pred_types = list[PythonType]()
@@ -1150,22 +1162,15 @@ def src_preds_to_accuracies(
             labels.append(src.types[t])
             poses.append(t)
 
-    results = [
-        type_accuracies(
-            pred_types,
-            labels,
-            cats,
-            poses,
-            normalize_types=normalize_types,
-            allow_implicit_none=allow,
-        )
-        for allow in [False, True]
-    ]
-    result = dict[str, Any]()
-    result["partial_acc (ImNone)"] = results[1]["partial_acc"]
-    result["full_acc (ImNone)"] = results[1]["full_acc"]
-    result.update(results[0])
-    return result
+    return type_accuracies(
+        pred_types,
+        labels,
+        cats,
+        poses,
+        common_type_names,
+        normalize_types=normalize_types,
+        allow_implicit_none=True,
+    )
 
 
 def get_dataset_name(

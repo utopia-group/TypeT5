@@ -137,7 +137,8 @@ r0_eval = eval_cache.cached(
     "dataset_pred.pkl",
     lambda: wrapper.eval_on_dataset(src_datasets["test"]),
 )
-r0_accs = r0_eval.accuracies
+common_names = src_datasets["train"].common_type_names()
+r0_accs = r0_eval.accuracies(common_names)
 pretty_print_dict(r0_accs)
 
 

@@ -48,6 +48,11 @@ class PythonType:
         for arg in self.args:
             yield from arg.all_heads()
 
+    def all_names(self):
+        yield self.head_name()
+        for arg in self.args:
+            yield from arg.all_names()
+
     def head_name(self) -> str:
         """Return the last part of the type head."""
         if self.head == ():
