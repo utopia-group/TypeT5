@@ -13,7 +13,7 @@ modeldir = get_model_dir()
 # experiment configurations
 
 from spot.data import (
-    get_dataset_name,
+    get_datasets_name,
     load_src_datasets,
     TypeCheckSettings,
 )
@@ -22,15 +22,15 @@ from spot.train import TrainingConfig, TypeCheckArgs
 from spot.tokenized_src import PreprocessArgs
 from termcolor import colored
 
-gpu_id = 0
+gpu_id = 1
 eval_only = False
 
 
 config = TrainingConfig(
     quicktest=False,
     pre_args=PreprocessArgs(
-        drop_env_types=True,
-        stub_in_preamble=False,
+        drop_env_types=False,
+        stub_in_preamble=True,
     ),
     preamble_size=512 + 256,
     left_margin=1024 + 512,
@@ -62,7 +62,7 @@ dec_args = DecodingArgs(
     ctx_args=config.dec_ctx_args(),
 )
 
-datasets_name = get_dataset_name(config.pre_args, config.func_only)
+datasets_name = get_datasets_name(config.pre_args, config.func_only)
 
 src_datasets = load_src_datasets(
     datadir,

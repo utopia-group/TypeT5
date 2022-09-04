@@ -7,11 +7,12 @@ from spot.static_analysis import (
     UsageAnalysis,
     build_project_namespaces,
     cst,
+    stub_from_module,
     to_abs_import_path as to_abs,
 )
 import pytest
 
-from spot.utils import assert_eq, groupby, not_none
+from spot.utils import assert_eq, groupby, not_none, show_string_diff
 
 
 def test_path_to_module():
@@ -82,6 +83,42 @@ from . import E
         "infer.type",
         "root.E",
     }
+
+
+def test_light_stub_gen():
+    code = """
+import typing
+
+T1 = typing.TypeVar("T1") # keep
+T2 = list[T1] # keep
+number = int # keep
+Count = 0 # drop
+
+class A(typing.Generic[T1]): # keep
+    # drop body
+    x = 0
+    def __init__(self, x: T1):
+        self.x = x
+    
+def some_f() -> number: # drop
+    return 1
+"""
+
+    expected = """
+import typing
+T1 = typing.TypeVar("T1")
+T2 = list[T1]
+number = int
+class A(typing.Generic[T1]):
+    ...
+"""
+
+    stub = stub_from_module(
+        cst.parse_module(code), lightweight=True, rm_comments=True, rm_imports=False
+    )
+    if stub.code.strip() != expected.strip():
+        print(show_string_diff(stub.code.strip(), expected.strip()))
+        assert False, "stub code does not match expected."
 
 
 def test_usage_analysis():

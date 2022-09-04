@@ -83,7 +83,7 @@ def repo_to_tk_srcs(
             imports_part = cst.Module([cst.SimpleStatementLine([s]) for s in imports])
             preamble_segs.append(imports_part.code)
         if pre_args.stub_in_preamble:
-            preamble_segs.append(stub_from_module(mod.tree).code)
+            preamble_segs.append(stub_from_module(mod.tree, lightweight=True).code)
         preamble = "".join(preamble_segs)
         tokenized_preamble = DefaultTokenizer.encode(preamble, add_special_tokens=False)
 

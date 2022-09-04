@@ -896,13 +896,34 @@ def is_access_chain(node: cst.CSTNode) -> bool:
             return False
 
 
-def stub_from_module(m: cst.Module, rm_comments=True, rm_imports=True) -> cst.Module:
+def as_access_chain(node: cst.CSTNode) -> list[str] | None:
+    result = list[str]()
+    while True:
+        match node:
+            case cst.Attribute(lhs, cst.Name(value=n)):
+                result.append(n)
+                node = lhs
+            case cst.Name(value=n):
+                result.append(n)
+                break
+            case _:
+                return None
+    result.reverse()
+    return result
+
+
+def stub_from_module(
+    m: cst.Module, lightweight=False, rm_comments=True, rm_imports=True
+) -> cst.Module:
     """Generate a stub module from normal python code."""
     if rm_comments:
         m = remove_comments(m)
     if rm_imports:
         m, _ = remove_imports(m)
-    m = m.visit(StubGenerator())
+    if lightweight:
+        m = m.visit(LightStubGenerator())
+    else:
+        m = m.visit(StubGenerator())
     m = remove_empty_lines(m)
     return m
 
@@ -937,6 +958,75 @@ def remove_types(m: CNode, type_mask="...") -> CNode:
 class ClassNamespace:
     all_elems: set[str] = field(default_factory=set)
     declared_elems: set[str] = field(default_factory=set)
+
+
+class LightStubGenerator(cst.CSTTransformer):
+    """Generate a light-weight stub module from a Python module.
+    Only class headers and global assignements involving potential type aliases are kept.
+    """
+
+    OMIT = cst.SimpleStatementLine([cst.Expr(cst.Ellipsis())])
+
+    def __init__(self):
+        self.nest_level = 0
+
+    def visit_ClassDef(self, node: cst.ClassDef):
+        self.nest_level += 1
+
+    def leave_ClassDef(self, node, updated: cst.ClassDef):
+        self.nest_level -= 1
+        return updated.with_changes(body=cst.IndentedBlock([self.OMIT]))
+
+    def visit_FunctionDef(self, node):
+        self.nest_level += 1
+
+    def leave_FunctionDef(self, node, updated: cst.FunctionDef):
+        self.nest_level -= 1
+        return cst.RemoveFromParent()
+
+    def leave_Annotation(self, node, updated: cst.Annotation):
+        return updated.with_changes(annotation=cst.Ellipsis())
+
+    def leave_AnnAssign(self, node, updated: cst.AnnAssign):
+        return cst.RemoveFromParent()
+
+    def leave_Assign(self, node, updated: cst.Assign):
+        match updated:
+            case cst.Assign(targets=targets, value=rhs) if self.nest_level == 0:
+                if all(map(is_type_lhs, targets)) and is_type_rhs(rhs):
+                    return updated
+        return cst.RemoveFromParent()
+
+    def leave_Decorator(self, node, updated: cst.Decorator):
+        # omit decorator call arguments
+        match updated.decorator:
+            case cst.Call(func=f):
+                new_call = cst.Call(f, [cst.Arg(cst.Ellipsis())])
+                updated = updated.with_changes(decorator=new_call)
+        return updated
+
+
+def is_type_lhs(target: cst.AssignTarget):
+    return isinstance(target.target, cst.Name)
+
+
+def is_type_rhs(expr: cst.BaseExpression):
+    # A type-declaring rhs can only be one of the following:
+    # - a simple type, e.g., A = a.Foo
+    # - a generic type, e.g., A = Foo[str, T]
+    # - a type var, e.g., A = TypeVar("A")
+    match expr:
+        case _ if is_access_chain(expr):
+            return True
+        case cst.Subscript(value=value):
+            return is_access_chain(value)
+        case cst.Call(
+            func=cst.Name(value="TypeVar")
+            | cst.Attribute(attr=cst.Name(value="TypeVar"))
+        ):
+            return True
+        case _:
+            return False
 
 
 class StubGenerator(cst.CSTTransformer):
@@ -999,15 +1089,7 @@ class StubGenerator(cst.CSTTransformer):
     def leave_Assign(self, node, updated: cst.AnnAssign):
         if self.nest_level == 0:
             return updated
-        # omit rhs of assignments unless it's a type variable
         return updated.with_changes(value=cst.Ellipsis())
-        # match updated.value:
-        #     case cst.Call(func=cst.Name("TypeVar")) | cst.Call(
-        #         func=cst.Attribute(attr=cst.Name("TypeVar"))
-        #     ) | None:
-        #         return updated
-        #     case _:
-        #         return updated.with_changes(value=cst.Ellipsis())
 
     def leave_Attribute(self, node, updated: cst.Assign):
         # record all atribute accesses involving `self`
@@ -1061,7 +1143,7 @@ class CommentRemover(cst.CSTTransformer):
 
     def leave_TrailingWhitespace(self, node, updated: cst.TrailingWhitespace):
         if updated.comment is not None:
-            return updated.with_changes(comment=None)
+            return updated.with_changes(comment=None, whitespace=cst.SimpleWhitespace(""))
         else:
             return updated
 

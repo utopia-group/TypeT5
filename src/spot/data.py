@@ -1173,7 +1173,7 @@ def src_preds_to_accuracies(
     )
 
 
-def get_dataset_name(
+def get_datasets_name(
     pre_args: PreprocessArgs,
     func_only: bool,
     spot_round: int = 0,
@@ -1181,6 +1181,6 @@ def get_dataset_name(
     round_tag = f"-R{spot_round}" if spot_round > 0 else ""
     pre_parts = repr_modified_args(pre_args)
     if func_only:
-        return f"func_datasets-v4-{pre_parts}"
+        return f"func_datasets-v5-{pre_parts}"
     else:
         return f"src_datasets-v4-{round_tag}{pre_parts}"

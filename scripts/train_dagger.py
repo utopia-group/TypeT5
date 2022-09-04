@@ -14,7 +14,7 @@ datadir = get_data_dir()
 # experiment configurations
 
 from spot.data import (
-    get_dataset_name,
+    get_datasets_name,
     load_src_datasets,
     TypeCheckSettings,
 )
@@ -42,7 +42,7 @@ project_name = "test-SPOT" if config.quicktest else "SPOT"
 train_ctx_args = config.train_ctx_args()
 tc_args = TypeCheckArgs(check_in_isolation=config.check_in_isolation)
 
-datasets_name = get_dataset_name(
+datasets_name = get_datasets_name(
     drop_comments=config.drop_comments,
     all_labels=config.all_labels,
 )
