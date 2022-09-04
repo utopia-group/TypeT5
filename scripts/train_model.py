@@ -13,6 +13,7 @@ modeldir = get_model_dir()
 # experiment configurations
 
 from spot.data import (
+    create_src_datasets,
     get_datasets_name,
     load_src_datasets,
     TypeCheckSettings,
@@ -22,8 +23,9 @@ from spot.train import TrainingConfig, TypeCheckArgs
 from spot.tokenized_src import PreprocessArgs
 from termcolor import colored
 
-gpu_id = 1
+gpu_id = 0
 eval_only = False
+recreate_dataset = False
 
 
 config = TrainingConfig(
@@ -36,6 +38,7 @@ config = TrainingConfig(
     left_margin=1024 + 512,
     right_margin=2048,
     func_only=True,
+    # data_reduction=4,
 )
 
 TypeCheckSettings.temp_path = f"GPU-{gpu_id}"
@@ -62,14 +65,25 @@ dec_args = DecodingArgs(
     ctx_args=config.dec_ctx_args(),
 )
 
-datasets_name = get_datasets_name(config.pre_args, config.func_only)
+datasets_name = get_datasets_name(
+    config.pre_args, config.func_only, data_reduction=config.data_reduction
+)
+datasets_path = get_data_dir() / "SPOT-data" / datasets_name
+if recreate_dataset or not datasets_path.exists():
+    create_src_datasets(
+        proj_root() / "data/repos_split.pkl",
+        datasets_path,
+        func_only=config.func_only,
+        pre_args=config.pre_args,
+        data_reduction=config.data_reduction,
+    )
 
 src_datasets = load_src_datasets(
     datadir,
     datasets_name,
-    data_reduction=config.data_reduction,
     quicktest=config.quicktest,
 )
+
 model_name = config.get_model_name()
 print(colored(f"Training model: {model_name}", "green"))
 

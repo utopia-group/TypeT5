@@ -743,23 +743,61 @@ def _try_parse_src(
         return None
 
 
+import spot.function_dataset as fd
+
+
+def create_src_datasets(
+    repos_split_path: Path,
+    datasets_path: Path,
+    func_only: bool,
+    pre_args: PreprocessArgs,
+    data_reduction: int = 1,
+):
+    with repos_split_path.open("rb") as f:
+        repos_split = pickle.load(f)
+    repos_dir = get_data_dir() / "SPOT-data/repos/"
+    datasets_path.mkdir(parents=True, exist_ok=True)
+
+    src_datasets: dict[str, SrcDataset] = {}
+    with run_long_task(f"Generating SrcDatasets: {datasets_path.name}"):
+        for name, repos in repos_split.items():
+            print(f"Creating: {name}")
+            if name == "train":
+                n_train = len(repos) // data_reduction
+                repos = repos[:n_train]
+            repo_paths = [r.repo_dir(repos_dir) for r in repos]
+            if func_only:
+                src_data = fd.dataset_from_repos(
+                    repos_dir / "downloaded", repo_paths, pre_args
+                )
+            else:
+                src_data = SrcDataset.from_repos(
+                    repos_dir / "downloaded",
+                    repo_paths,
+                    pre_args,
+                )
+            for s in src_data.all_srcs:
+                assert len(s.types) > 0, f"{s.file} has no labels."
+            src_datasets[name] = src_data
+            with open(datasets_path / f"{name}.pkl", "wb") as f:
+                pickle.dump(src_data, f)
+        print("Saved source datasets to:", datasets_path)
+
+
 def load_src_datasets(
     datadir: Path,
     datasets_name: str,
-    data_reduction: int = 1,
     quicktest: bool = False,
     sets_to_load=["train", "valid", "test"],
 ) -> dict[str, SrcDataset]:
     print("Loading datasets: ", datasets_name)
+    subprocess.run(["du", "-sh", datadir / "SPOT-data" / datasets_name])
     src_datasets = dict[str, SrcDataset]()
     for n in sets_to_load:
         with open(datadir / "SPOT-data" / datasets_name / f"{n}.pkl", "rb") as f:
             src: SrcDataset = pickle.load(f)
             _fix_src_paths_(src)
             src.repos_root = datadir / "SPOT-data/repos/downloaded"
-            if n == "train":
-                n_train = len(src.all_srcs) // data_reduction
-                src = src[:n_train]
             if quicktest:
                 ids = range(0, len(src.all_srcs), max(1, len(src.all_srcs) // 10))
                 src = src[ids]
@@ -1177,10 +1215,12 @@ def get_datasets_name(
     pre_args: PreprocessArgs,
     func_only: bool,
     spot_round: int = 0,
+    data_reduction: int = 1,
 ):
     round_tag = f"-R{spot_round}" if spot_round > 0 else ""
+    reduction_tag = f"-reduction={data_reduction}" if data_reduction != 1 else ""
     pre_parts = repr_modified_args(pre_args)
     if func_only:
-        return f"func_datasets-v5-{pre_parts}"
+        return f"func_datasets-v5{reduction_tag}-{pre_parts}"
     else:
-        return f"src_datasets-v4-{round_tag}{pre_parts}"
+        return f"src_datasets-v4{round_tag}{reduction_tag}-{pre_parts}"
