@@ -16,6 +16,43 @@ from libcst.metadata import (
 ModuleName = str
 ModulePath = str
 
+CNode = TypeVar("CNode", bound=cst.CSTNode)
+
+
+def remove_imports(
+    m: cst.Module,
+) -> tuple[cst.Module, list[cst.Import | cst.ImportFrom]]:
+    """Removes all top-level import statements and collect them into a list."""
+    remover = ImportsRemover()
+    m = m.visit(remover)
+    return m, list(remover.import_stmts)
+
+
+def remove_comments(m: CNode) -> CNode:
+    """Removes all comments and docstrings."""
+    return cast(CNode, m.visit(CommentRemover()))
+
+
+def remove_empty_lines(m: CNode) -> CNode:
+    m = cast(CNode, m.visit(EmptyLineRemove()))
+    return m
+
+
+def remove_types(m: CNode, type_mask="...") -> CNode:
+    """Removes all type annotations when possible; otherwise replace
+    with the provided type_mask"""
+    return cast(CNode, m.visit(AnnotRemover(type_mask)))
+
+
+def mask_types(m: CNode, type_mask=SpecialNames.TypeMask) -> CNode:
+    """Replace all type annotations with the provided type_mask"""
+
+    class AnnotMasker(cst.CSTTransformer):
+        def leave_Annotation(self, node, updated: cst.Annotation):
+            return updated.with_changes(annotation=cst.Name(value=type_mask))
+
+    return cast(CNode, m.visit(AnnotMasker()))
+
 
 class ProjectPath(NamedTuple):
     """The path of a top-level function or method in a project."""
@@ -65,6 +102,9 @@ class PythonFunction:
     def in_class(self) -> bool:
         return self.parent_class is not None
 
+    def get_signature(self) -> "FunctionSignature":
+        return FunctionSignature.from_function(self.tree)
+
 
 @dataclass
 class PythonVariable:
@@ -81,8 +121,63 @@ class PythonVariable:
     def in_class(self) -> bool:
         return self.parent_class is not None
 
+    def get_signature(self) -> "VariableSingature":
+        sig = None
+        for a in self.assignments:
+            if isinstance(a, cst.AnnAssign):
+                sig = a.annotation
+        return VariableSingature(sig)
+
 
 PythonElem = PythonFunction | PythonVariable
+
+
+@dataclass
+class VariableSingature:
+    annot: cst.Annotation | None
+
+
+@dataclass
+class FunctionSignature:
+    annots: list[cst.Annotation | None]
+
+    @staticmethod
+    def from_function(func: cst.FunctionDef) -> "FunctionSignature":
+        extractor = FunctionSignature._ParamsExtractor()
+        func.params.visit(extractor)
+        extractor.annots.append(func.returns)
+        return FunctionSignature(extractor.annots)
+
+    def apply(self, func: cst.FunctionDef) -> cst.FunctionDef:
+        applier = FunctionSignature._ParamsApplier(self)
+        new_params = func.params.visit(applier)
+        assert isinstance(new_params, cst.Parameters)
+        return func.with_changes(params=new_params, returns=applier.annots_left.pop())
+
+    class _ParamsExtractor(cst.CSTVisitor):
+        def __init__(self):
+            self.annots = list[cst.Annotation | None]()
+
+        def visit_Param(self, node: "cst.Param") -> Optional[bool]:
+            if node.name.value != "self":
+                self.annots.append(node.annotation)
+            return False  # skip default expressions
+
+    class _ParamsApplier(cst.CSTTransformer):
+        def __init__(self, func_signature: "FunctionSignature"):
+            self.annots_left = list(reversed(func_signature.annots))
+
+        def visit_Param(self, node):
+            return False  # skip default expressions
+
+        def leave_Param(self, node, updated: "cst.Param"):
+            if node.name.value == "self":
+                return updated
+            assert self.annots_left
+            return updated.with_changes(annotation=self.annots_left.pop())
+
+
+ElemSignature = VariableSingature | FunctionSignature
 
 from functools import cached_property
 
@@ -119,7 +214,7 @@ class PythonModule:
     functions: list[PythonFunction]
     global_vars: list[PythonVariable]
     classes: list[PythonClass]
-    name: str
+    name: ModuleName
     # an over-approximation of the set of imported modules
     imported_modules: set[ModuleName]
     defined_symbols: dict[str, ProjectPath]
@@ -166,8 +261,9 @@ class PythonProject:
         root: Path,
         discard_bad_files: bool = False,
         src_filter: Callable[[str], bool] = lambda s: True,
-        drop_comments: bool = True,
+        file_filter: Callable[[Path], bool] = lambda p: True,
         ignore_dirs: set[str] = {".venv"},
+        src_transform: Callable[[cst.Module], cst.Module] = remove_comments,
     ) -> "PythonProject":
         """Root is typically the `src/` directory or just the root of the project."""
         modules = dict()
@@ -176,7 +272,7 @@ class PythonProject:
         all_srcs = [
             p
             for p in root.rglob("*.py")
-            if p.relative_to(root).parts[0] not in ignore_dirs
+            if p.relative_to(root).parts[0] not in ignore_dirs and file_filter(p)
         ]
 
         for src in all_srcs:
@@ -194,8 +290,7 @@ class PythonProject:
                 raise
 
             mod_name = PythonProject.rel_path_to_module_name(src.relative_to(root))
-            if drop_comments:
-                mod = remove_comments(mod)
+            mod = src_transform(mod)
             modules[mod_name] = PythonModule.from_cst(mod, mod_name)
 
         for src in all_srcs:
@@ -571,8 +666,9 @@ class ModuleAnlaysis:
     def __init__(self, mod: PythonModule):
         self.module = mod
         wrapper = cst.MetadataWrapper(mod.tree, unsafe_skip_copy=True)
-        self.node2qnames = wrapper.resolve(QualifiedNameProvider)
-        self.node2pos = wrapper.resolve(PositionProvider)
+        # below need to be dict to be pickleable
+        self.node2qnames = dict(wrapper.resolve(QualifiedNameProvider))
+        self.node2pos = dict(wrapper.resolve(PositionProvider))
 
     def compute_module_usages(self):
         """
@@ -629,7 +725,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
     """Construct a `PythonModule` from a `cst.Module`.
     If multiple definitions of the same name are found, only the last one is kept."""
 
-    def __init__(self, module_name: str):
+    def __init__(self, module_name: ModuleName):
         super().__init__()
 
         self.functions = dict[str, PythonFunction]()
@@ -928,32 +1024,6 @@ def stub_from_module(
     return m
 
 
-CNode = TypeVar("CNode", bound=cst.CSTNode)
-
-
-def remove_imports(
-    m: cst.Module,
-) -> tuple[cst.Module, list[cst.Import | cst.ImportFrom]]:
-    """Removes all top-level import statements and collect them into a list."""
-    remover = ImportsRemover()
-    m = m.visit(remover)
-    return m, list(remover.import_stmts)
-
-
-def remove_comments(m: CNode) -> CNode:
-    """Removes all comments and docstrings."""
-    return cast(CNode, m.visit(CommentRemover()))
-
-
-def remove_empty_lines(m: CNode) -> CNode:
-    m = cast(CNode, m.visit(EmptyLineRemove()))
-    return m
-
-
-def remove_types(m: CNode, type_mask="...") -> CNode:
-    return cast(CNode, m.visit(AnnotRemover(type_mask)))
-
-
 @dataclass
 class ClassNamespace:
     all_elems: set[str] = field(default_factory=set)
@@ -1143,7 +1213,9 @@ class CommentRemover(cst.CSTTransformer):
 
     def leave_TrailingWhitespace(self, node, updated: cst.TrailingWhitespace):
         if updated.comment is not None:
-            return updated.with_changes(comment=None, whitespace=cst.SimpleWhitespace(""))
+            return updated.with_changes(
+                comment=None, whitespace=cst.SimpleWhitespace("")
+            )
         else:
             return updated
 
