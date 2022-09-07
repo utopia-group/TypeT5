@@ -718,6 +718,7 @@ class ModuleAnlaysis:
             match e:
                 case PythonFunction():
                     e.tree.body.visit(recorder)
+                    e.tree.params.visit(recorder)
                 case PythonVariable():
                     for a in e.assignments:
                         if a.value:

@@ -348,6 +348,21 @@ def usage5():
     analysis = UsageAnalysis(project)
     analysis.assert_usages("root.file5/usage5", ("root.file1/gf", True))
 
+    # test default argument usage
+    code6 = """
+# root.file6
+
+Count = 1
+
+def inc(x=Count):
+    return x + 1
+"""
+    project = PythonProject.from_modules(
+        [PythonModule.from_cst(cst.parse_module(code6), "root.file6")]
+    )
+    analysis = UsageAnalysis(project)
+    analysis.assert_usages("root.file6/inc", ("root.file6/Count", True))
+
 
 def test_attribute_analysis():
     code1 = """
