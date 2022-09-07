@@ -609,25 +609,17 @@ class UsageAnalysis:
                     caller, self.path2elem[u].path, span, is_certain=True
                 )
 
-        match qname.source:
-            case QualifiedNameSource.IMPORT:
-                segs = to_abs_import_path(mname, qname.name).split(".")
-                callee = self.ns_hier.resolve_path(segs)
-                if callee is None:
-                    return
-                if callee in self.path2class:
-                    yield from gen_constructor_usages(callee)
-                elif callee in self.path2elem:
-                    yield ProjectUsage(
-                        caller, self.path2elem[callee].path, span, is_certain=True
-                    )
-            case QualifiedNameSource.LOCAL:
-                segs = qname.name.split(".")
+        def resolve_local_usages(name: str):
+            segs = name.split(".")
+            # try resolve all usages in the access chain until a certain usage is found
+            # For example, if we have `a.b.c.d` and we can resolve `a.b` to a certain element,
+            # but not `a.b.c`, we will then also generate class usages for `.c` and `.d`.
+            while segs:
                 match segs:
                     case ["<attr>", m]:
                         # method fuzzy match case 1
                         yield from gen_class_usages(m)
-                        return
+                        break
                     case [cls, _, "<locals>", "self", m]:
                         segs = [cls, m]
 
@@ -641,6 +633,24 @@ class UsageAnalysis:
                 elif len(segs) >= 2 and segs[-2] != "<locals>":
                     # method fuzzy match case 3
                     yield from gen_class_usages(segs[-1])
+                    segs.pop()
+                    continue
+                break
+
+        match qname.source:
+            case QualifiedNameSource.IMPORT:
+                segs = to_abs_import_path(mname, qname.name).split(".")
+                callee = self.ns_hier.resolve_path(segs)
+                if callee is None:
+                    return
+                if callee in self.path2class:
+                    yield from gen_constructor_usages(callee)
+                elif callee in self.path2elem:
+                    yield ProjectUsage(
+                        caller, self.path2elem[callee].path, span, is_certain=True
+                    )
+            case QualifiedNameSource.LOCAL:
+                yield from resolve_local_usages(qname.name)
 
     def assert_usages(self, caller: str, *callees: tuple[str, bool]) -> None:
         caller_p = ProjectPath.from_str(caller)
@@ -958,7 +968,7 @@ class UsageRecorder(cst.CSTVisitor):
             self.usages.append((span, qname, self.is_call_name()))
             return True
         else:
-            # if this access is resolved, do not record prefixes as usages
+            # if this access is resolved, do not record remaining prefixes as usages
             return False
 
     def on_visit(self, node: cst.CSTNode) -> Optional[bool]:

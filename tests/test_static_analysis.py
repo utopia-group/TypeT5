@@ -495,6 +495,48 @@ def test_annot():
         "root.file2/test_annot",
     )
 
+    # now test a chain of accesses
+    code3 = """
+# root.file3
+from lib import Bar
+import lib
+
+class Foo:
+    x: Bar
+
+    def use1(self):
+        self.x.fly()
+
+    def use2(self):
+        Bar().x.fly()
+
+    def use3(self):
+        lib.x.fly()
+
+"""
+    project = PythonProject.from_modules(
+        [
+            PythonModule.from_cst(cst.parse_module(code3), "root.file3"),
+        ],
+    )
+    analysis = UsageAnalysis(project)
+
+    # only the certain usages should be tracked
+    # other usages are attributed to the fly() method.
+    analysis.assert_usages(
+        "root.file3/Foo.use1",
+        ("root.file3/Foo.x", True),
+    )
+
+    analysis.assert_usages(
+        "root.file3/Foo.use2",
+        ("root.file3/Foo.x", False),
+    )
+
+    analysis.assert_usages(
+        "root.file3/Foo.use3",
+    )
+
 
 def test_constructors():
     code1 = """
