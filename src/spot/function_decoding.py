@@ -50,9 +50,10 @@ class RolloutCtx:
         self,
         projects: Sequence[PythonProject],
         pre_args: PreprocessArgs,
-        decode_order: Callable[[UsageAnalysis], Sequence[ProjectPath]],
+        decode_order: "DecodingOrder",
         common_type_names: set[str],
         concurrency: int = DefaultWorkers,
+        no_types_in_ctx: bool = False,
         tqdm_args: dict = {},
     ):
         """Evaluate the model's prediction accuracy on a given set of projects, masking
@@ -66,7 +67,7 @@ class RolloutCtx:
         all_pred_sigs = list[ElemSignature]()
         rollouts: list[Any] = [None for _ in projects]
         with tqdm(
-            total=n_total_elems,
+            total=decode_order.traverse_length(n_total_elems),
             desc="evaluate_on_projects",
             smoothing=0.01,
             **tqdm_args,
@@ -83,6 +84,7 @@ class RolloutCtx:
                     decode_order,
                     cpu_executor=cpu_executor,
                     model_executor=model_executor,
+                    no_types_in_ctx=no_types_in_ctx,
                     progress_cbk=lambda e, p: pbar.update(),
                 )
                 rollouts[id] = r
@@ -106,16 +108,22 @@ class RolloutCtx:
         self,
         project: PythonProject,
         pre_args: PreprocessArgs,
-        decode_order: Callable[[UsageAnalysis], Sequence[ProjectPath]],
+        decode_order: "DecodingOrder",
         cpu_executor: ProcessPoolExecutor,
         model_executor: ThreadPoolExecutor,
+        no_types_in_ctx: bool = False,
         progress_cbk: Callable[
             [PythonElem, Sequence[PythonType]], Any
         ] = lambda x, y: None,
     ) -> RolloutPrediction:
         """Note: when evaluating on dataset with ground truth labels, we need to
         first replace all labels with `SpecialNames.TypeMask` before feeding to
-        this function."""
+        this function.
+
+        If `no_types_in_ctx` is True, then the types predicted by the model will
+        not be added to the context for later elements, effectively making each
+        element's prediction independent.
+        """
 
         if model_executor._max_workers > 1:
             logging.warning("Model executor is not single threaded.")
@@ -124,8 +132,10 @@ class RolloutCtx:
         analysis: UsageAnalysis = await eloop.run_in_executor(
             cpu_executor, UsageAnalysis, project
         )
-        elements = [analysis.path2elem[p] for p in decode_order(analysis)]
-        assert_eq(len(elements), len(list(project.all_elems())))
+        to_visit = [analysis.path2elem[p] for p in decode_order.traverse(analysis)]
+        visit_set = {e.path for e in to_visit}
+        for e in project.all_elems():
+            assert e.path in visit_set, f"{e.path} not in the decoder order."
         preamble_cache = dict[ModuleName, tuple[str, TokenSeq]]()
 
         assignments = dict[ProjectPath, ElemSignature]()
@@ -134,10 +144,7 @@ class RolloutCtx:
         mask_annot = cst.Annotation(cst.Name(SpecialNames.TypeMask))
 
         # Parallelize computation between dependency-free elements
-        for elem in elements:
-            assert (
-                elem.path not in assignments
-            ), f"Element with path {elem.path} already assigned with signature {assignments[elem.path]}"
+        for elem in to_visit:
             # construct input for the model
             # first, create or retrieve the preamble
             cur_module = elem.path.module
@@ -175,7 +182,7 @@ class RolloutCtx:
             )
 
             left_m, right_m = ctx_modules_for_elem(
-                elem, analysis, pre_args, assignments
+                elem, analysis, pre_args, {} if no_types_in_ctx else assignments
             )
 
             model_inputs = await eloop.run_in_executor(
@@ -225,32 +232,67 @@ def is_mask_annot(a: cst.Annotation) -> bool:
     return False
 
 
-class DecodingOrders:
-    @staticmethod
-    def random_order(analysis: UsageAnalysis) -> Sequence[ProjectPath]:
-        elems = [e.path for e in analysis.project.all_elems()]
-        random.shuffle(elems)
-        return elems
+class DecodingOrder(ABC):
+    @abstractmethod
+    def traverse(self, analysis: UsageAnalysis) -> list[ProjectPath]:
+        ...
 
-    @staticmethod
-    def caller2callee(analysis: UsageAnalysis) -> Sequence[ProjectPath]:
+    def traverse_length(self, n_elems: int) -> int:
+        return n_elems
+
+
+class DecodingOrders:
+    class RandomOrder(DecodingOrder):
+        "Visit all elements once in a random order."
+
+        @staticmethod
+        def traverse(analysis: UsageAnalysis) -> list[ProjectPath]:
+            elems = [e.path for e in analysis.project.all_elems()]
+            random.shuffle(elems)
+            return elems
+
+    class Caller2Callee(DecodingOrder):
         """Visit the callers first before visiting the callees. The order among
         elements in a dependency cycle is arbitrary."""
-        sorted = list[ProjectPath]()
-        visited = set[ProjectPath]()
 
-        def visit(p: ProjectPath) -> None:
-            if p in visited or p not in analysis.path2elem:
-                return
-            visited.add(p)
-            for u in analysis.used2user.get(p, []):
-                visit(u.user)
-            sorted.append(p)
+        @staticmethod
+        def traverse(analysis: UsageAnalysis) -> list[ProjectPath]:
+            sorted = list[ProjectPath]()
+            visited = set[ProjectPath]()
 
-        for m in reversed(list(analysis.project.all_elems())):
-            # start with the latest elements in the project
-            visit(m.path)
-        return sorted
+            def visit(p: ProjectPath) -> None:
+                if p in visited or p not in analysis.path2elem:
+                    return
+                visited.add(p)
+                for u in analysis.used2user.get(p, []):
+                    visit(u.user)
+                sorted.append(p)
+
+            for m in reversed(list(analysis.project.all_elems())):
+                # start with the latest elements in the project
+                visit(m.path)
+            return sorted
+
+    class Callee2Caller(DecodingOrder):
+        """Visit the callees before visiting the callers. Give the reverse ordering
+        of `Caller2Callee`"""
+
+        @staticmethod
+        def traverse(analysis: UsageAnalysis) -> list[ProjectPath]:
+            return list(reversed(DecodingOrders.Caller2Callee.traverse(analysis)))
+
+    class DoubleTraversal(DecodingOrder):
+        """Visit each element twice: `Callee2Caller` followed by `Caller2Callee`."""
+
+        @staticmethod
+        def traverse(analysis: UsageAnalysis) -> list[ProjectPath]:
+            pass1 = DecodingOrders.Callee2Caller.traverse(analysis)
+            pass2 = list(reversed(pass1))
+            return pass1 + pass2[1:]
+
+        @staticmethod
+        def traverse_length(n_elems: int) -> int:
+            return 2 * n_elems - 1
 
 
 def construct_model_inputs(
