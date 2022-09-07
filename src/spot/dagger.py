@@ -353,17 +353,6 @@ class DAggerEvalResult:
         )
 
 
-async def throttled_async_run(f, xs: Sequence, concurrency: int):
-    sem = asyncio.Semaphore(concurrency)
-
-    async def task(x):
-        async with sem:
-            return await f(x)
-
-    tasks = [task(x) for x in xs]
-    return await asyncio.gather(*tasks)
-
-
 def get_typechecked_src(src: TokenizedSrc, assignment, check_r) -> TokenizedSrc:
     errors, current_code = check_r
     errors = [] if isinstance(errors, str) else errors

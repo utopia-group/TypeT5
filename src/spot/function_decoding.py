@@ -4,28 +4,16 @@ import random
 
 import torch
 
-from .data import CtxArgs, SrcChunkInfo, src_to_chunks
-
-from .type_env import AnnotInfo, collect_user_annotations
-
+from .data import CtxArgs, src_to_chunks, type_accuracies
 from .function_dataset import (
     ElemSignature,
     ctx_modules_for_elem,
     mk_preamble,
     reformat_elems,
 )
-
-from .tokenized_src import (
-    PreprocessArgs,
-    TokenSeq,
-    TokenizedSrc,
-    tokenized_src_from_segs,
-)
-
-from .type_check import PythonType
 from .model import ModelWrapper
-from .utils import *
 from .static_analysis import (
+    FunctionSignature,
     ModuleName,
     ProjectPath,
     PythonElem,
@@ -35,6 +23,10 @@ from .static_analysis import (
     UsageAnalysis,
     VariableSingature,
 )
+from .tokenized_src import PreprocessArgs, TokenSeq, tokenized_src_from_segs
+from .type_check import PythonType, parse_type_expr
+from .type_env import AnnotCat, collect_user_annotations
+from .utils import *
 
 
 @dataclass
@@ -45,8 +37,70 @@ class RolloutPrediction:
 
 
 @dataclass
+class EvalResult:
+    predictions: Sequence[RolloutPrediction]
+    accuracies: dict[str, Any]
+
+
+@dataclass
 class RolloutCtx:
     model: ModelWrapper
+
+    async def evaluate_on_projects(
+        self,
+        projects: Sequence[PythonProject],
+        pre_args: PreprocessArgs,
+        decode_order: Callable[[UsageAnalysis], Sequence[ProjectPath]],
+        common_type_names: set[str],
+        concurrency: int = DefaultWorkers,
+        tqdm_args: dict = {},
+    ):
+        """Evaluate the model's prediction accuracy on a given set of projects, masking
+        any existing type annotations and treat them as the ground truth.
+        Note that the model does make predictions for those places with a missing type
+        annotation, but they are not counted in the accuracy computation (and only serve as
+        an intermediate for information propogation).
+        """
+        n_total_elems = sum(1 for p in projects for e in p.all_elems())
+        all_label_sigs = list[ElemSignature]()
+        all_pred_sigs = list[ElemSignature]()
+        rollouts: list[Any] = [None for _ in projects]
+        with tqdm(
+            total=n_total_elems,
+            desc="evaluate_on_projects",
+            smoothing=0.01,
+            **tqdm_args,
+        ) as pbar, ThreadPoolExecutor(1) as model_executor, ProcessPoolExecutor(
+            concurrency
+        ) as cpu_executor:
+
+            async def eval_project(id_project: tuple[int, PythonProject]):
+                id, project = id_project
+                label_sigs = {e.path: e.get_signature() for e in project.all_elems()}
+                r = await self.project_rollout(
+                    project.mask_types(),
+                    pre_args,
+                    decode_order,
+                    cpu_executor=cpu_executor,
+                    model_executor=model_executor,
+                    progress_cbk=lambda e, p: pbar.update(),
+                )
+                rollouts[id] = r
+                for p in label_sigs:
+                    all_label_sigs.append(label_sigs[p])
+                    all_pred_sigs.append(r.assignments[p])
+
+            await throttled_async_run(
+                eval_project, list(enumerate(projects)), concurrency=concurrency
+            )
+
+        accs = accuracy_from_signatures(
+            all_pred_sigs,
+            all_label_sigs,
+            common_type_names,
+            allow_implicit_none=True,
+        )
+        return EvalResult(rollouts, accs)
 
     async def project_rollout(
         self,
@@ -56,7 +110,7 @@ class RolloutCtx:
         cpu_executor: ProcessPoolExecutor,
         model_executor: ThreadPoolExecutor,
         progress_cbk: Callable[
-            [PythonElem, Sequence[PythonType]], None
+            [PythonElem, Sequence[PythonType]], Any
         ] = lambda x, y: None,
     ) -> RolloutPrediction:
         """Note: when evaluating on dataset with ground truth labels, we need to
@@ -100,15 +154,16 @@ class RolloutCtx:
             # then, make all missing types in the signature a prediction target
             if isinstance(elem, PythonVariable):
                 sig = elem.get_signature()
-                elem_map = {
-                    elem.path: VariableSingature(sig.annot if sig.annot else mask_annot)
-                }
+                elem_sig = copy.deepcopy(sig)
+                if sig.annot is None:
+                    elem_sig.annot = mask_annot
+                elem_map = {elem.path: elem_sig}
             elif isinstance(elem, PythonFunction):
                 sig = elem.get_signature()
                 elem_sig = copy.deepcopy(sig)
-                for i, a in enumerate(elem_sig.annots):
+                for i, a in enumerate(elem_sig.all_annots()):
                     if a is None:
-                        elem_sig.annots[i] = mask_annot
+                        elem_sig.set_annot_(i, mask_annot)
                 elem_map = {elem.path: elem_sig}
             else:
                 raise NotImplemented(f"Unsupported element type {type(elem)}")
@@ -152,10 +207,10 @@ class RolloutCtx:
                     assert_eq(len(pred_types), 1)
                     sig.annot = cst.Annotation(cst.parse_expression(str(pred_types[0])))
                 elif isinstance(elem, PythonFunction):
-                    for i, a in enumerate(sig.annots):
+                    for i, a in enumerate(sig.all_annots()):
                         if a is None or is_mask_annot(a):
                             new_type = cst.parse_expression(str(pred_types[i]))
-                            sig.annots[i] = cst.Annotation(new_type)
+                            sig.set_annot_(i, cst.Annotation(new_type))
             assignments[elem.path] = sig
             elem2preds[elem.path] = pred_types
             progress_cbk(elem, pred_types)
@@ -247,3 +302,57 @@ def construct_model_inputs(
             "n_labels": [chunk["n_labels"]],
         }
     return chunks
+
+
+def accuracy_from_signatures(
+    predictions: Sequence[ElemSignature],
+    labels: Sequence[ElemSignature],
+    common_type_names: set[str],
+    allow_implicit_none: bool = True,
+) -> dict[str, Any]:
+    pred_types = list[PythonType]()
+    label_types = list[PythonType]()
+    types_cat = list[AnnotCat]()
+    types_pos = list[int]()
+    dummy_mod = cst.Module([])
+
+    def record_pair(
+        pred: cst.Annotation | None,
+        label: cst.Annotation | None,
+        cat: AnnotCat,
+        pos: int,
+    ):
+        if (
+            label is None
+            or (lt := parse_type_expr(dummy_mod, label.annotation)) is None
+        ):
+            # no label available
+            return
+        assert pred is not None
+        assert (pt := parse_type_expr(dummy_mod, pred.annotation)) is not None
+        label_types.append(lt)
+        pred_types.append(pt)
+        types_cat.append(cat)
+        types_pos.append(pos)
+
+    for p, l in zip(predictions, labels):
+        match p, l:
+            case (VariableSingature(pa), VariableSingature(la, in_class=in_class)):
+                cat = AnnotCat.ClassAtribute if in_class else AnnotCat.GlobalVar
+                record_pair(pa, la, cat, 0)
+            case (
+                FunctionSignature(p_params, p_return),
+                FunctionSignature(l_params, l_return, in_class=in_class),
+            ):
+                for i, (pa, la) in enumerate(zip(p_params, l_params)):
+                    record_pair(pa, la, AnnotCat.FuncArg, i)
+                record_pair(p_return, l_return, AnnotCat.FuncReturn, len(l_params))
+
+    return type_accuracies(
+        pred_types,
+        label_types,
+        types_cat,
+        types_pos,
+        common_type_names,
+        allow_implicit_none=allow_implicit_none,
+    )

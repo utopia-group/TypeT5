@@ -103,7 +103,7 @@ class PythonFunction:
         return self.parent_class is not None
 
     def get_signature(self) -> "FunctionSignature":
-        return FunctionSignature.from_function(self.tree)
+        return FunctionSignature.from_function(self.tree, self.parent_class is not None)
 
 
 @dataclass
@@ -126,7 +126,7 @@ class PythonVariable:
         for a in self.assignments:
             if isinstance(a, cst.AnnAssign):
                 sig = a.annotation
-        return VariableSingature(sig)
+        return VariableSingature(sig, self.parent_class is not None)
 
 
 PythonElem = PythonFunction | PythonVariable
@@ -135,18 +135,32 @@ PythonElem = PythonFunction | PythonVariable
 @dataclass
 class VariableSingature:
     annot: cst.Annotation | None
+    in_class: bool
 
 
 @dataclass
 class FunctionSignature:
-    annots: list[cst.Annotation | None]
+    params: list[cst.Annotation | None]
+    returns: cst.Annotation | None
+    in_class: bool
+
+    def all_annots(self):
+        yield from self.params
+        yield self.returns
+
+    def set_annot_(self, i: int, annot: cst.Annotation) -> None:
+        if i < len(self.params):
+            self.params[i] = annot
+        elif i == len(self.params):
+            self.returns = annot
+        else:
+            raise IndexError(f"Index {i} is out of bounds. Max is {len(self.params)}")
 
     @staticmethod
-    def from_function(func: cst.FunctionDef) -> "FunctionSignature":
+    def from_function(func: cst.FunctionDef, in_class: bool) -> "FunctionSignature":
         extractor = FunctionSignature._ParamsExtractor()
         func.params.visit(extractor)
-        extractor.annots.append(func.returns)
-        return FunctionSignature(extractor.annots)
+        return FunctionSignature(extractor.annots, func.returns, in_class)
 
     def apply(self, func: cst.FunctionDef) -> cst.FunctionDef:
         applier = FunctionSignature._ParamsApplier(self)
@@ -165,7 +179,8 @@ class FunctionSignature:
 
     class _ParamsApplier(cst.CSTTransformer):
         def __init__(self, func_signature: "FunctionSignature"):
-            self.annots_left = list(reversed(func_signature.annots))
+            self.annots_left = list(func_signature.all_annots())
+            self.annots_left.reverse()
 
         def visit_Param(self, node):
             return False  # skip default expressions
@@ -246,6 +261,9 @@ class PythonModule:
             yield from c.attributes.values()
             yield from c.methods.values()
 
+    def mask_types(self) -> "PythonModule":
+        return PythonModule.from_cst(mask_types(self.tree), self.name)
+
 
 @dataclass
 class PythonProject:
@@ -315,6 +333,13 @@ class PythonProject:
     def all_elems(self) -> Generator[PythonElem, None, None]:
         for module in self.modules.values():
             yield from module.all_elements()
+
+    def mask_types(self):
+        """Replace all type annotations with `SpecialNames.TYPE_MASK`."""
+        return PythonProject(
+            modules={n: m.mask_types() for n, m in self.modules.items()},
+            symlinks=self.symlinks,
+        )
 
     @staticmethod
     def rel_path_to_module_name(rel_path: Path) -> ModuleName:

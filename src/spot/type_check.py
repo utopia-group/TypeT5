@@ -40,7 +40,7 @@ class PythonType:
         return out
 
     def __repr__(self):
-        return f"PythonType('{str(self)}')"
+        return f"ty'{str(self)}'"
 
     def all_heads(self):
         """Return an iterator of all the type heads."""
@@ -74,12 +74,16 @@ class PythonType:
         return self.head_name() == "Optional"
 
     @staticmethod
-    def Any() -> "PythonType":
-        return PythonType(("Any",))
+    def from_name(name: str) -> "PythonType":
+        return PythonType((name,))
 
     @staticmethod
     def from_str(s: str) -> "PythonType":
         return parse_type_str(s)
+
+    @staticmethod
+    def Any() -> "PythonType":
+        return PythonType.from_name("Any")
 
 
 _type_name_map = {

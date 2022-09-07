@@ -1100,9 +1100,14 @@ def type_accuracies(
     types_pos: Sequence[int],
     common_type_names: set[str],
     normalize_types=True,
-    allow_implicit_none=False,
+    allow_implicit_none=True,
+    crash_on_type_mask=True,
 ) -> dict[str, Any]:
     assert_eq(len(pred_types), len(label_types), len(types_cat), len(types_pos))
+
+    if crash_on_type_mask:
+        if PythonType.from_name(SpecialNames.TypeMask) in label_types:
+            raise RuntimeError("TypeMask found in label types.")
 
     def is_common_type(t: PythonType) -> bool:
         return t.head_name() in common_type_names and all(map(is_common_type, t.args))

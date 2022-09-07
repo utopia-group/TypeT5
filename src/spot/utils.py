@@ -738,3 +738,18 @@ class MovingAvg:
 
     def __repr__(self) -> str:
         return f"(value={self.value:.4f}, count={self.count})"
+
+
+import asyncio
+
+
+async def throttled_async_run(f, xs: Sequence, concurrency: int):
+    """Run `f` on `xs` asynchronously, but limit the max number of concurrent tasks to `concurrency`."""
+    sem = asyncio.Semaphore(concurrency)
+
+    async def task(x):
+        async with sem:
+            return await f(x)
+
+    tasks = [task(x) for x in xs]
+    return await asyncio.gather(*tasks)

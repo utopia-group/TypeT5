@@ -28,38 +28,38 @@ def f(x, y: int=3, *, v=3, **kwargs) -> int:
 """
 
     f = cast(cst.FunctionDef, cst.parse_module(ex_code).body[0])
-    sig = FunctionSignature.from_function(f)
+    sig = FunctionSignature.from_function(f, False)
 
     new_sig = copy.deepcopy(sig)
-    new_sig.annots[0] = cst.Annotation(cst.parse_expression("list[int]"))
+    new_sig.set_annot_(0, cst.Annotation(cst.parse_expression("list[int]")))
     assert (
         "def f(x: list[int], y: int=3, *, v=3, **kwargs) -> int"
         in cst.Module([new_sig.apply(f)]).code
     )
 
     new_sig = copy.deepcopy(sig)
-    new_sig.annots[1] = cst.Annotation(cst.parse_expression("list[int]"))
+    new_sig.set_annot_(1, cst.Annotation(cst.parse_expression("list[int]")))
     assert (
         "def f(x, y: list[int]=3, *, v=3, **kwargs) -> int"
         in cst.Module([new_sig.apply(f)]).code
     )
 
     new_sig = copy.deepcopy(sig)
-    new_sig.annots[2] = cst.Annotation(cst.parse_expression("list[int]"))
+    new_sig.set_annot_(2, cst.Annotation(cst.parse_expression("list[int]")))
     assert (
         "def f(x, y: int=3, *, v: list[int]=3, **kwargs) -> int"
         in cst.Module([new_sig.apply(f)]).code
     )
 
     new_sig = copy.deepcopy(sig)
-    new_sig.annots[3] = cst.Annotation(cst.parse_expression("list[int]"))
+    new_sig.set_annot_(3, cst.Annotation(cst.parse_expression("list[int]")))
     assert (
         "def f(x, y: int=3, *, v=3, **kwargs: list[int]) -> int"
         in cst.Module([new_sig.apply(f)]).code
     )
 
     new_sig = copy.deepcopy(sig)
-    new_sig.annots[4] = cst.Annotation(cst.parse_expression("list[int]"))
+    new_sig.set_annot_(4, cst.Annotation(cst.parse_expression("list[int]")))
     assert (
         "def f(x, y: int=3, *, v=3, **kwargs) -> list[int]"
         in cst.Module([new_sig.apply(f)]).code
@@ -74,8 +74,8 @@ def f(self, x, y):
 """
 
     f = cast(cst.FunctionDef, cst.parse_module(ex_code).body[0])
-    sig = FunctionSignature.from_function(f)
-    assert len(sig.annots) == 3
+    sig = FunctionSignature.from_function(f, False)
+    assert len(sig.params) == 2
 
     ex_code2 = """
 def f(a, x, y):
@@ -84,8 +84,8 @@ def f(a, x, y):
 """
 
     f = cast(cst.FunctionDef, cst.parse_module(ex_code2).body[0])
-    sig = FunctionSignature.from_function(f)
-    assert len(sig.annots) == 4
+    sig = FunctionSignature.from_function(f, False)
+    assert len(sig.params) == 3
 
     ex_code3 = """
 def f(a=lambda x: x):
@@ -93,5 +93,5 @@ def f(a=lambda x: x):
 """
 
     f = cast(cst.FunctionDef, cst.parse_module(ex_code3).body[0])
-    sig = FunctionSignature.from_function(f)
-    assert len(sig.annots) == 2
+    sig = FunctionSignature.from_function(f, False)
+    assert len(sig.params) == 1
