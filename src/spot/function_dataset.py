@@ -1,32 +1,28 @@
-from .type_check import PythonType
-from .type_env import AnnotInfo, apply_annotations, collect_user_annotations
-from .utils import *
-from .tokenized_src import (
-    PreprocessArgs,
-    TokenSeq,
-    TokenizedSrc,
-    tokenized_src_from_segs,
-    remove_imports,
-)
 from .data import SrcDataset
 from .static_analysis import (
     ElemSignature,
     FunctionSignature,
     ProjectPath,
-    ProjectUsage,
     PythonClass,
     PythonElem,
     PythonFunction,
+    PythonProject,
     PythonVariable,
     UsageAnalysis,
-    PythonProject,
-    PythonModule,
     VariableSingature,
-    build_project_namespaces,
     remove_comments,
     remove_types,
     stub_from_module,
 )
+from .tokenized_src import (
+    PreprocessArgs,
+    TokenizedSrc,
+    TokenSeq,
+    remove_imports,
+    tokenized_src_from_segs,
+)
+from .type_env import apply_annotations, collect_user_annotations
+from .utils import *
 
 
 def dataset_from_repos(
@@ -82,15 +78,20 @@ def data_project_from_dir(
     max_line_width: int = 200,
     drop_comments: bool = True,
 ) -> PythonProject:
-    def src_filter(text):
+    def src2module(text: str):
         width = max(len(l) for l in text.split("\n"))
-        return width <= max_line_width
+        if width > max_line_width:
+            return None
+        text = text.replace(SpecialNames.TypeMask, "MaskReplaced")
+        mod = cst.parse_module(text)
+        if drop_comments:
+            mod = remove_comments(mod)
+        return mod
 
     return PythonProject.from_root(
         root,
         True,
-        src_filter,
-        src_transform=remove_comments if drop_comments else lambda x: x,
+        src2module=src2module,
     )
 
 

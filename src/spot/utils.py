@@ -8,7 +8,6 @@ import pickle
 import shutil
 import time
 from abc import ABC, abstractmethod
-from asyncio import current_task
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, redirect_stdout

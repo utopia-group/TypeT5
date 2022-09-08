@@ -54,9 +54,9 @@ class RolloutCtx:
         common_type_names: set[str],
         concurrency: int = DefaultWorkers,
         tqdm_args: dict = {},
-    ):
+    ) -> EvalResult:
         """Evaluate the model's prediction accuracy on a given set of projects, masking
-        any existing type annotations and treat them as the ground truth.
+        any existing type annotations and treating them as the ground truth.
         Note that the model does make predictions for those places with a missing type
         annotation, but they are not counted in the accuracy computation (and only serve as
         an intermediate for information propogation).
@@ -194,6 +194,11 @@ class RolloutCtx:
             pred_types = list[PythonType]()
             if model_inputs:
                 for chunk in model_inputs:
+                    chunk = {
+                        "input_ids": torch.tensor([chunk["input_ids"]]),
+                        "labels": torch.tensor([chunk["labels"]]),
+                        "n_labels": torch.tensor([chunk["n_labels"]]),
+                    }
                     preds, _ = await eloop.run_in_executor(
                         model_executor, self.model.predict_on_batch, chunk
                     )
@@ -347,12 +352,6 @@ def construct_model_inputs(
         right_extra_tks=right_tks,
     )
     chunks, _ = src_to_chunks(src, (0, n_labels), ctx_args)
-    for i, chunk in enumerate(chunks):
-        chunks[i] = {
-            "input_ids": torch.tensor([chunk["input_ids"]]),
-            "labels": torch.tensor([chunk["labels"]]),
-            "n_labels": [chunk["n_labels"]],
-        }
     return chunks
 
 

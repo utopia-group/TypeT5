@@ -283,12 +283,17 @@ class PythonProject:
     def from_root(
         root: Path,
         discard_bad_files: bool = False,
-        src_filter: Callable[[str], bool] = lambda s: True,
         file_filter: Callable[[Path], bool] = lambda p: True,
         ignore_dirs: set[str] = {".venv"},
-        src_transform: Callable[[cst.Module], cst.Module] = remove_comments,
+        src2module: Callable[[str], cst.Module | None] = lambda s: remove_comments(
+            cst.parse_module(s)
+        ),
     ) -> "PythonProject":
-        """Root is typically the `src/` directory or just the root of the project."""
+        """
+        - `root` is typically the `src/` directory or just the root of the project.
+        - `src2module` is used to parse a file into a CST Module, otpionally performing
+        any preprocessing transformations. The src will be discarded if this function returns None.
+        """
         modules = dict()
         symlinks = dict()
 
@@ -306,17 +311,16 @@ class PythonProject:
                 continue
             with src.open() as f:
                 src_text = f.read()
-            if not src_filter(src_text):
-                continue
             try:
-                mod = cst.parse_module(src_text)
+                mod = src2module(src_text)
+                if mod is None:
+                    continue
             except cst.ParserSyntaxError as e:
                 if discard_bad_files:
                     continue
                 raise
 
             mod_name = PythonProject.rel_path_to_module_name(src.relative_to(root))
-            mod = src_transform(mod)
             modules[mod_name] = PythonModule.from_cst(mod, mod_name)
 
         for src in all_srcs:
