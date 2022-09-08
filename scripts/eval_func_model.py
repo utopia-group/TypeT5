@@ -9,6 +9,7 @@ from typing import *
 
 import torch
 from termcolor import colored
+import wandb
 
 from spot.data import GitRepo
 from spot.function_dataset import data_project_from_dir
@@ -25,11 +26,17 @@ from spot.utils import (
     run_long_task,
     write_file,
 )
+from spot.visualization import string_to_html
 
 os.chdir(proj_root())
 
 datadir = get_data_dir()
 modeldir = get_model_dir()
+
+
+def wandb_string(s: str):
+    return wandb.Html(string_to_html(s))
+
 
 # %%
 
@@ -42,6 +49,12 @@ print(colored(f"Use GPU: {gpu_id}", "green"))
 
 repos_split: dict[str, list[GitRepo]] = pickle_load(
     proj_root() / "data/repos_split.pkl"
+)
+
+wandb.init(
+    project="SPOT-eval",
+    name=model_name,
+    dir=str(datadir),
 )
 
 # %%
@@ -104,10 +117,11 @@ with run_long_task("Evaluating different decoding strategy"):
             )
         )
         results[oname] = evalr
-        accs_dict = pretty_show_dict(evalr.accuracies)
-        write_file(results_dir / f"{oname}.txt", accs_dict)
+        accs_str = pretty_show_dict(evalr.accuracies)
+        write_file(results_dir / f"{oname}.txt", accs_str)
+        wandb.log({f"test/{oname}": wandb_string(accs_str)})
         print(f"========== {oname} ===========")
-        print(accs_dict)
+        print(accs_str)
 
     pickle_dump(results_dir / "results.pkl", results)
 
