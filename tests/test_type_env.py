@@ -3,8 +3,9 @@ import shutil
 from pathlib import Path
 
 import pytest
+from spot.static_analysis import mask_types
 from spot.tokenized_src import PreprocessArgs
-from spot.type_check import MypyResult
+from spot.type_check import MypyResult, PythonType
 
 from spot.type_env import (
     AnnotCat,
@@ -15,12 +16,13 @@ from spot.type_env import (
     annot_path,
     apply_annotations,
     collect_annots_info,
+    collect_user_annotations,
     mypy_checker,
     normalize_type,
     parse_type_str,
     type_inf_env,
 )
-from spot.utils import proj_root, SpecialNames, cst, read_file, write_file
+from spot.utils import assert_eq, proj_root, SpecialNames, cst, read_file, write_file
 
 os.chdir(proj_root())
 
@@ -50,6 +52,19 @@ def test_annotation_collection():
         assert pair in annot_paths
     for pair in annot_paths:
         assert pair in correct_annot_paths
+
+
+def test_self_parameter_annotation():
+    code = """
+def foo(self: float, x: int) -> str:
+    return "1"    
+"""
+    parsed = cst.parse_module(code)
+    _, types = collect_user_annotations(parsed)
+
+    assert_eq(types, [PythonType.from_name("int"), PythonType.from_name("str")])
+    n_segs = len(mask_types(parsed).code.split(SpecialNames.TypeMask))
+    assert_eq(n_segs, len(types) + 1)
 
 
 parsed = cst.parse_module(read_file("data/code/bad_code_1.py"))

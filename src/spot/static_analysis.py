@@ -51,6 +51,10 @@ def mask_types(m: CNode, type_mask=SpecialNames.TypeMask) -> CNode:
         def leave_Annotation(self, node, updated: cst.Annotation):
             return updated.with_changes(annotation=cst.Name(value=type_mask))
 
+        def visit_Param(self, node: "cst.Param") -> Optional[bool]:
+            # skip the types on the `self` parameter.
+            return node.name.value != "self"
+
     return cast(CNode, m.visit(AnnotMasker()))
 
 
