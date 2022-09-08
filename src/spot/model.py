@@ -88,6 +88,7 @@ class ModelWrapper:
     model: ModelSPOT
     tokenizer: TokenizerSPOT
     args: DecodingArgs
+    common_type_names: set[str]
     monitor: TaskMonitor = EmptyLoggingMonitor()
 
     def scale_ctx_size(self, factor) -> "ModelWrapper":
@@ -193,8 +194,8 @@ class ModelWrapper:
         """Save the model to the given path along with its tokenizer and args."""
         self.model.save_pretrained(str(path))
         self.tokenizer.save_pretrained(str(path))
-        with open(path / "args.pkl", "wb") as f:
-            pickle.dump(self.args, f)
+        pickle_dump(path / "args.pkl", self.args)
+        pickle_dump(path / "common_names.pkl", self.common_type_names)
 
     def to(self, device) -> "ModelWrapper":
         self.model = self.model.to(device)
@@ -205,12 +206,16 @@ class ModelWrapper:
         """Load a pretrained model from the given path."""
         model = cast(ModelSPOT, ModelSPOT.from_pretrained(str(path)))
         tokenizer = TokenizerSPOT.from_pretrained(str(path))
-        with open(path / "args.pkl", "rb") as f:
-            args = pickle.load(f)
+        args = pickle_load(path / "args.pkl")
+        if (path / "common_names.pkl").exists():
+            common_type_names = pickle_load(path / "common_names.pkl")
+        else:
+            common_type_names = set()
         return ModelWrapper(
             model=model,
             tokenizer=tokenizer,
             args=args,
+            common_type_names=common_type_names,
             monitor=TaskLoggingMonitor(path.name),
         )
 

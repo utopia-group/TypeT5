@@ -752,7 +752,7 @@ def create_src_datasets(
     func_only: bool,
     pre_args: PreprocessArgs,
     data_reduction: int = 1,
-):
+) -> None:
     with repos_split_path.open("rb") as f:
         repos_split = pickle.load(f)
     repos_dir = get_data_dir() / "SPOT-data/repos/"

@@ -53,7 +53,6 @@ class RolloutCtx:
         decode_order: "DecodingOrder",
         common_type_names: set[str],
         concurrency: int = DefaultWorkers,
-        no_types_in_ctx: bool = False,
         tqdm_args: dict = {},
     ):
         """Evaluate the model's prediction accuracy on a given set of projects, masking
@@ -84,7 +83,6 @@ class RolloutCtx:
                     decode_order,
                     cpu_executor=cpu_executor,
                     model_executor=model_executor,
-                    no_types_in_ctx=no_types_in_ctx,
                     progress_cbk=lambda e, p: pbar.update(),
                 )
                 rollouts[id] = r
@@ -111,7 +109,6 @@ class RolloutCtx:
         decode_order: "DecodingOrder",
         cpu_executor: ProcessPoolExecutor,
         model_executor: ThreadPoolExecutor,
-        no_types_in_ctx: bool = False,
         progress_cbk: Callable[
             [PythonElem, Sequence[PythonType]], Any
         ] = lambda x, y: None,
@@ -119,10 +116,6 @@ class RolloutCtx:
         """Note: when evaluating on dataset with ground truth labels, we need to
         first replace all labels with `SpecialNames.TypeMask` before feeding to
         this function.
-
-        If `no_types_in_ctx` is True, then the types predicted by the model will
-        not be added to the context for later elements, effectively making each
-        element's prediction independent.
         """
 
         if model_executor._max_workers > 1:
@@ -182,7 +175,10 @@ class RolloutCtx:
             )
 
             left_m, right_m = ctx_modules_for_elem(
-                elem, analysis, pre_args, {} if no_types_in_ctx else assignments
+                elem,
+                analysis,
+                pre_args,
+                assignments if decode_order.types_in_ctx() else {},
             )
 
             model_inputs = await eloop.run_in_executor(
@@ -240,8 +236,23 @@ class DecodingOrder(ABC):
     def traverse_length(self, n_elems: int) -> int:
         return n_elems
 
+    def types_in_ctx(self) -> bool:
+        return True
+
 
 class DecodingOrders:
+    class IndependentOrder(DecodingOrder):
+        """Decode each element independently: the types predicted by the model will
+        not be added to the context for later elements"""
+
+        @staticmethod
+        def traverse(analysis: UsageAnalysis) -> list[ProjectPath]:
+            return [e.path for e in analysis.project.all_elems()]
+
+        @staticmethod
+        def types_in_ctx() -> bool:
+            return False
+
     class RandomOrder(DecodingOrder):
         "Visit all elements once in a random order."
 

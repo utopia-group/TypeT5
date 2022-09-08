@@ -77,22 +77,31 @@ def mk_preamble(
     return preamble, tokenized_preamble
 
 
+def data_project_from_dir(
+    root: Path,
+    max_line_width: int = 200,
+    drop_comments: bool = True,
+) -> PythonProject:
+    def src_filter(text):
+        width = max(len(l) for l in text.split("\n"))
+        return width <= max_line_width
+
+    return PythonProject.from_root(
+        root,
+        True,
+        src_filter,
+        src_transform=remove_comments if drop_comments else lambda x: x,
+    )
+
+
 def repo_to_tk_srcs(
     repo: Path,
     pre_args: PreprocessArgs,
     max_line_width: int = 200,
 ) -> list[TokenizedSrc]:
-    def src_filter(text):
-        width = max(len(l) for l in text.split("\n"))
-        return width <= max_line_width
-
-    proj = PythonProject.from_root(
-        repo,
-        True,
-        src_filter,
-        src_transform=remove_comments if pre_args.drop_comments else lambda x: x,
+    proj = data_project_from_dir(
+        repo, max_line_width=max_line_width, drop_comments=pre_args.drop_comments
     )
-
     analysis = UsageAnalysis(proj)
     sorted_moduels = analysis.sorted_modules
 

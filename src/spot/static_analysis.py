@@ -287,6 +287,9 @@ class PythonProject:
         modules = dict()
         symlinks = dict()
 
+        if not root.exists():
+            raise FileNotFoundError(f"Project root not exist: {root}")
+
         all_srcs = [
             p
             for p in root.rglob("*.py")

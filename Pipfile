@@ -23,6 +23,7 @@ pytorch-lightning = "*"
 colored = "*"
 ipykernel = "*"
 termcolor = "*"
+prettytable = "*"
 
 [dev-packages]
 pytest = "*"
