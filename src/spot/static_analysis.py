@@ -127,9 +127,10 @@ class PythonVariable:
 
     def get_signature(self) -> "VariableSingature":
         sig = None
-        for a in self.assignments:
+        for a in reversed(self.assignments):
             if isinstance(a, cst.AnnAssign):
                 sig = a.annotation
+                break  # the last annotation wins
         return VariableSingature(sig, self.parent_class is not None)
 
 

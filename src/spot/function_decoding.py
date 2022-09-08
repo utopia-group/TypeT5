@@ -117,9 +117,8 @@ class RolloutCtx:
         first replace all labels with `SpecialNames.TypeMask` before feeding to
         this function.
         """
-
-        if model_executor._max_workers > 1:
-            logging.warning("Model executor is not single threaded.")
+        # Model executor needs to be single threaded.
+        assert_eq(model_executor._max_workers, 1)
 
         eloop = asyncio.get_event_loop()
         analysis: UsageAnalysis = await eloop.run_in_executor(
@@ -307,7 +306,7 @@ class DecodingOrders:
 
 
 def construct_model_inputs(
-    main_code: cst.Module,
+    main_mod: cst.Module,
     left_m: cst.Module | None,
     right_m: cst.Module | None,
     preamble: str,
@@ -315,7 +314,7 @@ def construct_model_inputs(
     ctx_args: CtxArgs,
 ) -> list[dict]:
     "Return a list of model inputs."
-    main_code_string = "# BEGIN\n" + main_code.code + "# END\n"
+    main_code_string = "# BEGIN\n" + main_mod.code + "# END\n"
     code_segs = main_code_string.split(SpecialNames.TypeMask)
     n_labels = len(code_segs) - 1
 
@@ -329,7 +328,7 @@ def construct_model_inputs(
     if right_m is not None:
         right_tks = DefaultTokenizer.encode(right_m.code, add_special_tokens=False)
 
-    annots, types = collect_user_annotations(main_code)
+    annots, types = collect_user_annotations(main_mod)
     assert_eq(
         len(annots), n_labels, extra_message=lambda: f"main code:\n{main_code_string}"
     )

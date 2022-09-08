@@ -3,7 +3,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-from spot.static_analysis import mask_types
+from spot.static_analysis import FunctionSignature, mask_types
 from spot.tokenized_src import PreprocessArgs
 from spot.type_check import MypyResult, PythonType
 
@@ -22,7 +22,15 @@ from spot.type_env import (
     parse_type_str,
     type_inf_env,
 )
-from spot.utils import assert_eq, proj_root, SpecialNames, cst, read_file, write_file
+from spot.utils import (
+    as_any,
+    assert_eq,
+    proj_root,
+    SpecialNames,
+    cst,
+    read_file,
+    write_file,
+)
 
 os.chdir(proj_root())
 
@@ -65,6 +73,9 @@ def foo(self: float, x: int) -> str:
     assert_eq(types, [PythonType.from_name("int"), PythonType.from_name("str")])
     n_segs = len(mask_types(parsed).code.split(SpecialNames.TypeMask))
     assert_eq(n_segs, len(types) + 1)
+
+    sig = FunctionSignature.from_function(as_any(parsed.body[0]), False)
+    assert len(sig.params) == len(types) - 1
 
 
 parsed = cst.parse_module(read_file("data/code/bad_code_1.py"))
