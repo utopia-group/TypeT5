@@ -22,7 +22,7 @@ from .static_analysis import (
     PythonProject,
     PythonVariable,
     UsageAnalysis,
-    VariableSingature,
+    VariableSignature,
 )
 from .tokenized_src import PreprocessArgs, TokenSeq, tokenized_src_from_segs
 from .type_check import PythonType, parse_type_expr
@@ -224,7 +224,7 @@ class RolloutCtx:
 
                 # update the signature with the predicted types
                 sig = copy.deepcopy(sig)
-                if isinstance(sig, VariableSingature):
+                if isinstance(sig, VariableSignature):
                     assert sig.annot is None or is_mask_annot(
                         sig.annot
                     ), f"For {elem}, sig={sig}"
@@ -405,7 +405,7 @@ def accuracy_from_signatures(
 
     for p, l in zip(predictions, labels):
         match p, l:
-            case (VariableSingature(pa), VariableSingature(la, in_class=in_class)):
+            case (VariableSignature(pa), VariableSignature(la, in_class=in_class)):
                 cat = AnnotCat.ClassAtribute if in_class else AnnotCat.GlobalVar
                 record_pair(pa, la, cat, 0)
             case (

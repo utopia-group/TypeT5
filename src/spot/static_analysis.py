@@ -125,20 +125,20 @@ class PythonVariable:
     def in_class(self) -> bool:
         return self.parent_class is not None
 
-    def get_signature(self) -> "VariableSingature":
+    def get_signature(self) -> "VariableSignature":
         sig = None
         for a in reversed(self.assignments):
             if isinstance(a, cst.AnnAssign):
                 sig = a.annotation
                 break  # the last annotation wins
-        return VariableSingature(sig, self.parent_class is not None)
+        return VariableSignature(sig, self.parent_class is not None)
 
 
 PythonElem = PythonFunction | PythonVariable
 
 
 @dataclass
-class VariableSingature:
+class VariableSignature:
     annot: cst.Annotation | None
     in_class: bool
 
@@ -197,7 +197,7 @@ class FunctionSignature:
             return updated.with_changes(annotation=self.annots_left.pop())
 
 
-ElemSignature = VariableSingature | FunctionSignature
+ElemSignature = VariableSignature | FunctionSignature
 
 from functools import cached_property
 

@@ -9,7 +9,7 @@ from .static_analysis import (
     PythonProject,
     PythonVariable,
     UsageAnalysis,
-    VariableSingature,
+    VariableSignature,
     remove_comments,
     remove_types,
     stub_from_module,
@@ -312,7 +312,7 @@ def reformat_elems(
                 if isinstance(a, cst.Assign):
                     assigns.append(a)
             match signature_map.get(var.path, None):
-                case VariableSingature(annot=annot) if annot is not None:
+                case VariableSignature(annot=annot) if annot is not None:
                     sig_type = annot
                 case _:
                     sig_type = cst.Annotation(cst.Ellipsis())
