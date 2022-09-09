@@ -68,9 +68,14 @@ def mk_preamble(
         preamble_segs.append(imports_part.code)
     if pre_args.stub_in_preamble:
         preamble_segs.append(stub_from_module(mod, lightweight=True).code)
+    preamble_segs.append("\n# Used:\n")
     preamble = "".join(preamble_segs)
     tokenized_preamble = DefaultTokenizer.encode(preamble, add_special_tokens=False)
     return preamble, tokenized_preamble
+
+
+def wrap_main_code(code: str) -> str:
+    return f"# Target:\n{code}# Users:\n"
 
 
 def data_project_from_dir(
@@ -133,9 +138,7 @@ def repo_to_tk_srcs(
             replaces = dict()
             for info in annots_info:
                 replaces[info.path] = mask_annot
-            new_code = (
-                "# BEGIN\n" + apply_annotations(main_m, replaces).code + "# END\n"
-            )
+            new_code = wrap_main_code(apply_annotations(main_m, replaces).code)
             code_segs = new_code.split(SpecialNames.TypeMask)
             assert (
                 len(code_segs) == len(types) + 1

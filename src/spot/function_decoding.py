@@ -11,6 +11,7 @@ from .function_dataset import (
     ctx_modules_for_elem,
     mk_preamble,
     reformat_elems,
+    wrap_main_code,
 )
 from .model import ModelWrapper
 from .static_analysis import (
@@ -336,7 +337,7 @@ def construct_model_inputs(
     ctx_args: CtxArgs,
 ) -> list[dict]:
     "Return a list of model inputs."
-    main_code_string = "# BEGIN\n" + main_mod.code + "# END\n"
+    main_code_string = wrap_main_code(main_mod.code)
     code_segs = main_code_string.split(SpecialNames.TypeMask)
     n_labels = len(code_segs) - 1
 
