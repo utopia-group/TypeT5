@@ -1,6 +1,7 @@
 from pathlib import Path
 from spot.static_analysis import (
     ModuleHierarchy,
+    ModuleName,
     ProjectPath,
     PythonModule,
     PythonProject,
@@ -13,6 +14,14 @@ from spot.static_analysis import (
 import pytest
 
 from spot.utils import assert_eq, groupby, not_none, show_string_diff
+
+
+def project_from_code(name2code: dict[ModuleName, str]):
+    modules = [
+        PythonModule.from_cst(cst.parse_module(code), name)
+        for name, code in name2code.items()
+    ]
+    return PythonProject.from_modules(Path("[test project]"), modules)
 
 
 def test_path_to_module():
@@ -240,13 +249,13 @@ def usage4():
 
 """
 
-    project = PythonProject.from_modules(
-        [
-            PythonModule.from_cst(cst.parse_module(code1), "root.file1"),
-            PythonModule.from_cst(cst.parse_module(code2), "root.file2"),
-            PythonModule.from_cst(cst.parse_module(code3), "root.file3"),
-            PythonModule.from_cst(cst.parse_module(code4), "root.file4"),
-        ]
+    project = project_from_code(
+        {
+            "root.file1": code1,
+            "root.file2": code2,
+            "root.file3": code3,
+            "root.file4": code4,
+        }
     )
     analysis = UsageAnalysis(project)
 
@@ -339,11 +348,12 @@ def usage5():
     file1.gf(5)
     
 """
-    project = PythonProject.from_modules(
-        [
-            PythonModule.from_cst(cst.parse_module(code1), "root.file1"),
-            PythonModule.from_cst(cst.parse_module(code5), "root.file5"),
-        ]
+
+    project = project_from_code(
+        {
+            "root.file1": code1,
+            "root.file5": code5,
+        }
     )
     analysis = UsageAnalysis(project)
     analysis.assert_usages("root.file5/usage5", ("root.file1/gf", True))
@@ -357,8 +367,11 @@ Count = 1
 def inc(x=Count):
     return x + 1
 """
-    project = PythonProject.from_modules(
-        [PythonModule.from_cst(cst.parse_module(code6), "root.file6")]
+
+    project = project_from_code(
+        {
+            "root.file6": code6,
+        }
     )
     analysis = UsageAnalysis(project)
     analysis.assert_usages("root.file6/inc", ("root.file6/Count", True))
@@ -401,8 +414,10 @@ def bar():
     return A().y.x
 """
 
-    project = PythonProject.from_modules(
-        [PythonModule.from_cst(cst.parse_module(code1), "root.file1")],
+    project = project_from_code(
+        {
+            "root.file1": code1,
+        }
     )
     analysis = UsageAnalysis(project)
 
@@ -479,11 +494,11 @@ def test_annot():
 
 """
 
-    project = PythonProject.from_modules(
-        [
-            PythonModule.from_cst(cst.parse_module(code1), "root.file1"),
-            PythonModule.from_cst(cst.parse_module(code2), "root.file2"),
-        ],
+    project = project_from_code(
+        {
+            "root.file1": code1,
+            "root.file2": code2,
+        }
     )
     analysis = UsageAnalysis(project)
 
@@ -529,10 +544,11 @@ class Foo:
         lib.x.fly()
 
 """
-    project = PythonProject.from_modules(
-        [
-            PythonModule.from_cst(cst.parse_module(code3), "root.file3"),
-        ],
+
+    project = project_from_code(
+        {
+            "root.file3": code3,
+        }
     )
     analysis = UsageAnalysis(project)
 
@@ -579,8 +595,10 @@ def use():
     C(1, 2)
 """
 
-    project = PythonProject.from_modules(
-        [PythonModule.from_cst(cst.parse_module(code1), "root.file1")],
+    project = project_from_code(
+        {
+            "root.file1": code1,
+        }
     )
     analysis = UsageAnalysis(project)
 
@@ -609,8 +627,10 @@ def use():
 
     """
 
-    project = PythonProject.from_modules(
-        [PythonModule.from_cst(cst.parse_module(code2), "root.file2")],
+    project = project_from_code(
+        {
+            "root.file2": code2,
+        }
     )
     analysis = UsageAnalysis(project)
 
