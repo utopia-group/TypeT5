@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import random
+from xml.etree import ElementPath
 
 import torch
 
@@ -38,8 +39,33 @@ class RolloutPrediction:
 
 @dataclass
 class EvalResult:
-    predictions: Sequence[RolloutPrediction]
-    accuracies: dict[str, Any]
+    project_roots: list[Path]
+    predictions: list[RolloutPrediction]
+    label_maps: list[dict[ProjectPath, ElemSignature]]
+
+    def accuracies(
+        self, project: int | None, common_type_names: set[str]
+    ) -> dict[str, Any]:
+        if project is not None:
+            projects = [project]
+        else:
+            projects = range(len(self.predictions))
+
+        all_label_sigs = list[ElemSignature]()
+        all_pred_sigs = list[ElemSignature]()
+        for i in projects:
+            label_map = self.label_maps[i]
+            pred_map = self.predictions[i].assignments
+            for p in label_map:
+                all_label_sigs.append(label_map[p])
+                all_pred_sigs.append(pred_map[p])
+
+        return accuracy_from_signatures(
+            all_pred_sigs,
+            all_label_sigs,
+            common_type_names,
+            allow_implicit_none=True,
+        )
 
 
 @dataclass
@@ -51,7 +77,6 @@ class RolloutCtx:
         projects: Sequence[PythonProject],
         pre_args: PreprocessArgs,
         decode_order: "DecodingOrder",
-        common_type_names: set[str],
         concurrency: int = DefaultWorkers,
         tqdm_args: dict = {},
     ) -> EvalResult:
@@ -62,9 +87,9 @@ class RolloutCtx:
         an intermediate for information propogation).
         """
         n_total_elems = sum(1 for p in projects for e in p.all_elems())
-        all_label_sigs = list[ElemSignature]()
-        all_pred_sigs = list[ElemSignature]()
+        project_roots = [p.root_dir for p in projects]
         rollouts: list[Any] = [None for _ in projects]
+        label_maps: list[Any] = [dict() for _ in projects]
         with tqdm(
             total=decode_order.traverse_length(n_total_elems),
             desc="evaluate_on_projects",
@@ -77,6 +102,7 @@ class RolloutCtx:
             async def eval_project(id_project: tuple[int, PythonProject]):
                 id, project = id_project
                 label_sigs = {e.path: e.get_signature() for e in project.all_elems()}
+                label_maps[id] = label_sigs
                 r = await self.project_rollout(
                     project.mask_types(),
                     pre_args,
@@ -86,21 +112,12 @@ class RolloutCtx:
                     progress_cbk=lambda e, p: pbar.update(),
                 )
                 rollouts[id] = r
-                for p in label_sigs:
-                    all_label_sigs.append(label_sigs[p])
-                    all_pred_sigs.append(r.assignments[p])
 
             await throttled_async_run(
                 eval_project, list(enumerate(projects)), concurrency=concurrency
             )
 
-        accs = accuracy_from_signatures(
-            all_pred_sigs,
-            all_label_sigs,
-            common_type_names,
-            allow_implicit_none=True,
-        )
-        return EvalResult(rollouts, accs)
+        return EvalResult(project_roots, rollouts, label_maps)
 
     async def project_rollout(
         self,

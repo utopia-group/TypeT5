@@ -272,12 +272,26 @@ class PythonModule:
 
 @dataclass
 class PythonProject:
+    root_dir: Path
     modules: dict[ModuleName, PythonModule]
     symlinks: dict[ModuleName, ModuleName]
 
+    def __post_init__(self):
+        self.verify_paths_unique()
+
+    def verify_paths_unique(self):
+        path_set = set[ProjectPath]()
+        for m in self.modules.values():
+            for e in m.all_elements():
+                if e.path in path_set:
+                    raise ValueError(f"Multiple elements with the path: {e.path}")
+                path_set.add(e.path)
+
     @staticmethod
-    def from_modules(modules: Iterable[PythonModule]) -> "PythonProject":
-        return PythonProject({m.name: m for m in modules}, dict())
+    def from_modules(
+        root_dir: Path, modules: Iterable[PythonModule]
+    ) -> "PythonProject":
+        return PythonProject(root_dir, {m.name: m for m in modules}, dict())
 
     @staticmethod
     def from_root(
@@ -332,7 +346,7 @@ class PythonProject:
             )
             symlinks[mod_name] = origin_name
 
-        return PythonProject(modules, symlinks)
+        return PythonProject(root, modules, symlinks)
 
     def all_funcs(self) -> Generator[PythonFunction, None, None]:
         for module in self.modules.values():
@@ -349,6 +363,7 @@ class PythonProject:
     def mask_types(self):
         """Replace all type annotations with `SpecialNames.TYPE_MASK`."""
         return PythonProject(
+            root_dir=self.root_dir,
             modules={n: m.mask_types() for n, m in self.modules.items()},
             symlinks=self.symlinks,
         )

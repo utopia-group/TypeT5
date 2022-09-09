@@ -50,6 +50,56 @@ T1 = TypeVar("T1")
 T2 = TypeVar("T2")
 
 
+def proj_root() -> Path:
+    return Path(__file__).parent.parent.parent
+
+
+def get_config_dict() -> dict:
+    if (path := proj_root() / "config" / "SPOT.json").exists():
+        return json.loads(read_file(path))
+    else:
+        return {}
+
+
+def get_config(key: str) -> Optional[str]:
+    return get_config_dict().get(key)
+
+
+def get_dataroot() -> Path:
+    if (v := get_config("data_root")) is None:
+        return proj_root()
+    else:
+        return Path(v)
+
+
+def get_dataset_dir(dataname: str) -> Path:
+    if (v := get_config("datasets_root")) is None:
+        return get_dataroot() / "datasets" / dataname
+    else:
+        return Path(v) / dataname
+
+
+def get_model_dir(trained=True) -> Path:
+    post = "trained" if trained else "training"
+    return get_dataroot() / "models" / post
+
+
+def get_eval_dir(dataname: str, modelname: str) -> Path:
+    return get_dataroot() / "evaluations" / dataname / modelname
+
+
+def mk_dataset_from_this_project(name="SPOT-src"):
+    dest = get_dataset_dir(name) / "repos" / "test" / "SPOT"
+    if dest.exists():
+        print("Deleting old dataset at: ", dest)
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    root = proj_root()
+    shutil.copytree(root / "src", dest / "src")
+    shutil.copytree(root / "tests", dest / "tests")
+    return dest
+
+
 def raise_error(msg: str) -> T1:  # type: ignore
     raise RuntimeError(msg)
 
@@ -143,24 +193,6 @@ def write_file(path, content: str) -> None:
     """write content to file."""
     with open(path, "w") as f:
         f.write(content)
-
-
-def proj_root() -> Path:
-    return Path(__file__).parent.parent.parent
-
-
-def get_data_dir() -> Path:
-    if (v := os.getenv("datadir")) is not None:
-        return Path(v)
-    else:
-        return proj_root() / "data"
-
-
-def get_model_dir() -> Path:
-    if (v := os.getenv("modeldir")) is not None:
-        return Path(v)
-    else:
-        return proj_root() / "models"
 
 
 def not_none(x: Optional[T1]) -> T1:
@@ -752,3 +784,10 @@ async def throttled_async_run(f, xs: Sequence, concurrency: int):
 
     tasks = [task(x) for x in xs]
     return await asyncio.gather(*tasks)
+
+
+def move_all_files(src_dir: Path, dest_dir: Path, glob_pattern: str = "**/*"):
+    for f in src_dir.glob(glob_pattern):
+        target = dest_dir / f.relative_to(src_dir)
+        target.parent.mkdir(exist_ok=True, parents=True)
+        shutil.copy(f, target)

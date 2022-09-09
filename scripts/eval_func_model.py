@@ -24,7 +24,7 @@ from spot.utils import (
     write_file,
 )
 from spot.visualization import string_to_html
-from spot.experiments import get_model_dir, get_dataset_dir, get_eval_dir
+from spot.utils import get_model_dir, get_dataset_dir, get_eval_dir
 
 os.chdir(proj_root())
 
@@ -37,17 +37,13 @@ def wandb_string(s: str):
 
 # experiment configurations
 
-gpu_id = 1
+gpu_id = 0
 model_name = "model-v4--TrainingConfig(func_only=True, drop_env_types=False, left_margin=1536, preamble_size=768, right_margin=2048)"
-# dataset_name = "ManyTypes4Py"
-dataset_name = "SPOT-src"
+dataset_name = "ManyTypes4Py"
+# dataset_name = "SPOT-src"
 experiment_name = dataset_name + ": " + model_name
 
 print(colored(f"Use GPU: {gpu_id}", "green"))
-
-repos_split: dict[str, list[GitRepo]] = pickle_load(
-    proj_root() / "data/repos_split.pkl"
-)
 
 # %%
 
@@ -59,7 +55,6 @@ print(f"Model loaded to {device}")
 
 # load test projects
 repos_dir = get_dataset_dir(dataset_name) / "repos" / "test"
-# test_repo_paths = [r.repo_dir(repos_dir) for r in repos_split["test"]]
 test_repo_paths = [f for f in repos_dir.iterdir() if f.is_dir()]
 test_projects = pmap(
     data_project_from_dir,
@@ -112,11 +107,10 @@ with run_long_task("Evaluating different decoding strategy"):
                 test_projects,
                 pre_args,
                 order,
-                common_type_names=model.common_type_names,
             )
         )
-        results[oname] = evalr.accuracies
-        accs_str = pretty_show_dict(evalr.accuracies)
+        results[oname] = evalr.accuracies(None, model.common_type_names)
+        accs_str = pretty_show_dict(results[oname])
         write_file(results_dir / f"{oname}-accuracy.txt", accs_str)
         pickle_dump(results_dir / f"{oname}-EvalResult.pkl", evalr)
         wandb.log({f"test/{oname}": wandb_string(accs_str)})
