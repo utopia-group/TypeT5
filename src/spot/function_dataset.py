@@ -1,4 +1,4 @@
-from .data import SrcDataset
+from .data import TokenizedSrcSet
 from .static_analysis import (
     ElemSignature,
     FunctionSignature,
@@ -32,7 +32,7 @@ def dataset_from_repos(
     max_line_width: int = 200,
     max_workers: int | None = None,
     tqdm_args: dict = {},
-) -> "SrcDataset":
+) -> "TokenizedSrcSet":
     repos = list(repos_paths)
     srcs_list = pmap(
         repo_to_tk_srcs,
@@ -54,7 +54,7 @@ def dataset_from_repos(
             logging.warning(
                 f"Multiple srcs for file '{g[0].file}' in repo '{repos_root / g[0].repo}'"
             )
-    return SrcDataset(repos_root, all_srcs)
+    return TokenizedSrcSet(repos_root, all_srcs)
 
 
 def mk_preamble(

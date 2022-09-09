@@ -14,7 +14,7 @@ from torch.optim import AdamW
 from transformers import DataCollatorForSeq2Seq
 from transformers.modeling_outputs import Seq2SeqLMOutput
 
-from .data import ChunkedDataset, SrcDataset
+from .data import ChunkedDataset, TokenizedSrcSet
 from .model import (
     CtxArgs,
     DecodingArgs,
@@ -41,17 +41,18 @@ class ModelTrainingArgs:
 
 class TrainingConfig(NamedTuple):
     quicktest: bool = False
-    func_only: bool = False
+    func_only: bool = True
     pre_args: PreprocessArgs = PreprocessArgs()
+    trained_on: str = "ManyTypes4Py"
     data_reduction: int = 1
     check_in_isolation: bool = False
     all_labels: bool = True
     inline_prev_gold: bool = False
     ctx_size: int = 4096
-    left_margin: int = 2048
+    left_margin: int = 1024 + 512
     # up to how much of the left_margin to be allocated as preamble
     preamble_size: int = 512
-    right_margin: int = 1023
+    right_margin: int = 2048
     train_max_labels: int = 32
     dec_max_labels: int = 16
     use_small_model: bool = False
@@ -68,7 +69,7 @@ class TrainingConfig(NamedTuple):
         return repr_modified_args(self, flatten=True)
 
     def get_model_name(self) -> str:
-        return "model-v4--" + repr_modified_args(self, flatten=True)
+        return "model-v5--" + repr_modified_args(self, flatten=True)
 
     def train_ctx_args(self) -> CtxArgs:
         return CtxArgs(
@@ -90,7 +91,7 @@ class TrainingConfig(NamedTuple):
 
 
 def train_spot_model(
-    src_datasets: dict[str, SrcDataset],
+    tk_dataset: dict[str, TokenizedSrcSet],
     model_name: str,
     train_args: ModelTrainingArgs,
     gpus: list[int],
@@ -116,7 +117,7 @@ def train_spot_model(
     lit_model = TrainModelWrapper(model_path, model_saving_path=running_dir / "ckpts")
     tokenizer: TokenizerSPOT = lit_model.tokenizer
 
-    common_type_names = src_datasets["train"].common_type_names()
+    common_type_names = tk_dataset["train"].common_type_names()
     wrapper = ModelWrapper(
         lit_model.model, tokenizer, dec_args, common_type_names=common_type_names
     )
@@ -124,7 +125,7 @@ def train_spot_model(
     chunks: dict[str, ChunkedDataset] = {}
     with run_long_task("Preparing chunked datasets", notify=False):
         for n in ["valid", "train"]:
-            src = src_datasets[n]
+            src = tk_dataset[n]
             chunks[n] = src.to_chunks(train_ctx_args)
 
     wandb_logger = WandbLogger()  # assuming a run has already been initialized

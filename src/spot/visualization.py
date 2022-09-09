@@ -11,7 +11,7 @@ from .data import (
     CountedAcc,
     CtxArgs,
     PythonType,
-    SrcDataset,
+    TokenizedSrcSet,
 )
 from .model import DatasetPredResult, DecodingArgs
 from .type_check import normalize_type
@@ -132,7 +132,7 @@ def code_inline_mask_ids(code: str, id2replace: Callable[[int], str]):
 
 
 def export_preds_on_code(
-    dataset: SrcDataset | ChunkedDataset,
+    dataset: TokenizedSrcSet | ChunkedDataset,
     preds: list[dict] | list[list],
     export_to: Path,
 ):
@@ -465,7 +465,7 @@ def plot_feedback_distribution(
     return top_feedbacks
 
 
-def show_feedback_stats(dataset: SrcDataset):
+def show_feedback_stats(dataset: TokenizedSrcSet):
     fb_list: list[list[MypyFeedback]] = dataset.extra_stats["mypy_feedbacks"]
     stats = {}
     for k in ["feedbacks_per_file", "type_check_success_ratio"]:
@@ -484,7 +484,7 @@ def show_feedback_stats(dataset: SrcDataset):
 
 
 def visualize_feedbacks_in_srcs(
-    dataset: SrcDataset,
+    dataset: TokenizedSrcSet,
 ):
     error_groups = show_feedback_stats(dataset)
     fdbks = list(seq_flatten(list(error_groups.values())))

@@ -2,7 +2,7 @@ import asyncio
 from typing import *
 from .data import (
     CtxArgs,
-    SrcDataset,
+    TokenizedSrcSet,
     TypeCheckingEnv,
     chunk_from_src,
     src_preds_to_accuracies,
@@ -139,7 +139,7 @@ class DAggerModel:
 
     async def train_on_data(
         self,
-        train_set: SrcDataset,
+        train_set: TokenizedSrcSet,
         dagger_args: DAggerArgs,
         log_fn: Callable[[int, dict], None],
     ):
@@ -223,7 +223,7 @@ class DAggerModel:
 
     async def eval_on_data(
         self,
-        dataset: SrcDataset,
+        dataset: TokenizedSrcSet,
         concurrency: int = DefaultWorkers,
     ):
         result = DAggerEvalResult([], [])

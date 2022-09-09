@@ -382,7 +382,7 @@ class TypeCheckingEnv:
 
 
 @dataclass
-class SrcDataset:
+class TokenizedSrcSet:
     repos_root: Path
     all_srcs: list[TokenizedSrc]
     extra_stats: dict = field(default_factory=dict)
@@ -390,7 +390,7 @@ class SrcDataset:
     def __len__(self):
         return len(self.all_srcs)
 
-    def inline_predictions(self, as_comment: bool, tqdm_args={}) -> "SrcDataset":
+    def inline_predictions(self, as_comment: bool, tqdm_args={}) -> "TokenizedSrcSet":
         new_srcs = pmap(
             TokenizedSrc.inline_predictions,
             self.all_srcs,
@@ -398,7 +398,7 @@ class SrcDataset:
             desc="inline_predictions",
             tqdm_args=tqdm_args,
         )
-        return SrcDataset(
+        return TokenizedSrcSet(
             self.repos_root,
             new_srcs,
             extra_stats=copy.deepcopy(self.extra_stats),
@@ -431,7 +431,7 @@ class SrcDataset:
         self.extra_stats.update(stats)
 
     def __getitem__(self, ids: slice | Iterable):
-        return SrcDataset(
+        return TokenizedSrcSet(
             self.repos_root,
             get_subset(self.all_srcs, ids),
             {"subset_ids": ids},
@@ -587,7 +587,7 @@ class SrcDataset:
         max_workers: int,
         tqdm_args: dict,
         tc_args: TypeCheckArgs,
-    ) -> "SrcDataset":
+    ) -> "TokenizedSrcSet":
         """Add the predictions to the corresponding files, call the type checker to
         collect the feedbacks, and then patch the feedbacks as well as the original
         predictions to form the new inputs.
@@ -633,7 +633,7 @@ class SrcDataset:
                 n_checked += 1
             code_list.append(new_code)
             feedback_list.append(errors)
-        result = SrcDataset(self.repos_root, [], copy.deepcopy(self.extra_stats))
+        result = TokenizedSrcSet(self.repos_root, [], copy.deepcopy(self.extra_stats))
         silent = tqdm_args.get("disable", False)
         result.add_stats(
             {
@@ -665,7 +665,7 @@ class SrcDataset:
         return result
 
     def __repr__(self):
-        return f"SrcDataset(root='{self.repos_root}', n_repos={len(self.repos2srcs())}, n_labeled_files={len(self.all_srcs)})"
+        return f"TokenizedSrcSet(root='{self.repos_root}', n_repos={len(self.repos2srcs())}, n_labeled_files={len(self.all_srcs)})"
 
     @staticmethod
     def from_repos(
@@ -675,7 +675,7 @@ class SrcDataset:
         max_workers: int | None = None,
         tqdm_args: dict = {},
         max_line_width: int = 200,
-    ) -> "SrcDataset":
+    ) -> "TokenizedSrcSet":
         for r in repos_paths:
             assert r.is_dir(), f"Provided path {r} is not a directory."
 
@@ -696,7 +696,7 @@ class SrcDataset:
             for f, (code, r) in srcs.items()
             if file_width(code) <= max_line_width
         }
-        result = SrcDataset(repos_root, [])
+        result = TokenizedSrcSet(repos_root, [])
         result.add_stats(
             {
                 "n_files_too_wide": num_all_srcs - len(srcs),
@@ -746,75 +746,62 @@ def _try_parse_src(
 import spot.function_dataset as fd
 
 
-def create_src_datasets(
-    repos_split_path: Path,
-    datasets_path: Path,
+def create_tokenized_srcsets(
+    dataset: str,
+    out_dir: Path,
     func_only: bool,
     pre_args: PreprocessArgs,
     data_reduction: int = 1,
 ) -> None:
-    with repos_split_path.open("rb") as f:
-        repos_split = pickle.load(f)
-    repos_dir = get_data_dir() / "SPOT-data/repos/"
-    datasets_path.mkdir(parents=True, exist_ok=True)
+    repos_dir = get_dataset_dir(dataset) / "repos"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    src_datasets: dict[str, SrcDataset] = {}
-    with run_long_task(f"Generating SrcDatasets: {datasets_path.name}"):
-        for name, repos in repos_split.items():
+    tk_dataset: dict[str, TokenizedSrcSet] = {}
+    with run_long_task(f"Generating TokenizedSrcSets: {out_dir.name}"):
+        for name in ["test", "train", "valid"]:
+            base = repos_dir / name
+            if not base.exists():
+                print(f"[Warning] Split {name} not found. Skip.")
+                continue
+
             print(f"Creating: {name}")
+            repo_roots = [d for d in base.iterdir() if d.is_dir()]
             if name == "train":
-                n_train = len(repos) // data_reduction
-                repos = repos[:n_train]
-            repo_paths = [r.repo_dir(repos_dir) for r in repos]
+                n_train = len(repo_roots) // data_reduction
+                repo_roots = repo_roots[:n_train]
             if func_only:
-                src_data = fd.dataset_from_repos(
-                    repos_dir / "downloaded", repo_paths, pre_args
-                )
+                src_data = fd.dataset_from_repos(base, repo_roots, pre_args)
             else:
-                src_data = SrcDataset.from_repos(
-                    repos_dir / "downloaded",
-                    repo_paths,
-                    pre_args,
-                )
+                src_data = TokenizedSrcSet.from_repos(base, repo_roots, pre_args)
             for s in src_data.all_srcs:
                 assert len(s.types) > 0, f"{s.file} has no labels."
-            src_datasets[name] = src_data
-            with open(datasets_path / f"{name}.pkl", "wb") as f:
+            tk_dataset[name] = src_data
+            with open(out_dir / f"{name}.pkl", "wb") as f:
                 pickle.dump(src_data, f)
-        print("Saved source datasets to:", datasets_path)
+                print("Saved to:", out_dir)
+        assert tk_dataset, "Empty dataset."
 
 
-def load_src_datasets(
-    datadir: Path,
-    datasets_name: str,
+def load_tokenized_srcsets(
+    path: Path,
     quicktest: bool = False,
-    sets_to_load=["train", "valid", "test"],
-) -> dict[str, SrcDataset]:
-    print("Loading datasets: ", datasets_name)
-    subprocess.run(["du", "-sh", datadir / "SPOT-data" / datasets_name])
-    src_datasets = dict[str, SrcDataset]()
+    sets_to_load=["test", "train", "valid"],
+) -> dict[str, TokenizedSrcSet]:
+    print("Loading TokenizedSrcSets: ", path)
+    subprocess.run(["du", "-sh", path])
+    tk_dataset = dict[str, TokenizedSrcSet]()
     for n in sets_to_load:
-        with open(datadir / "SPOT-data" / datasets_name / f"{n}.pkl", "rb") as f:
-            src: SrcDataset = pickle.load(f)
-            _fix_src_paths_(src)
-            src.repos_root = datadir / "SPOT-data/repos/downloaded"
-            if quicktest:
-                ids = range(0, len(src.all_srcs), max(1, len(src.all_srcs) // 10))
-                src = src[ids]
-            src_datasets[n] = src
-    return src_datasets
-
-
-def _fix_src_paths_(dataset: SrcDataset) -> None:
-    if str(dataset.repos_root).endswith("/downloaded"):
-        # already fixed
-        return
-    for src in dataset.all_srcs:
-        assert str(src.file).startswith("downloaded/")
-        assert str(src.repo).startswith("downloaded/")
-        src.file = Path(str(src.file).replace("downloaded/", ""))
-        src.repo = Path(str(src.repo).replace("downloaded/", ""))
-    dataset.repos_root = dataset.repos_root / "downloaded"
+        file = path / f"{n}.pkl"
+        if not file.exists():
+            print(f"{file} not found. Skip.")
+            continue
+        sdata = pickle_load(file)
+        if quicktest:
+            ids = range(0, len(sdata.all_srcs), max(1, len(sdata.all_srcs) // 10))
+            sdata = sdata[ids]
+        tk_dataset[n] = sdata
+    assert tk_dataset, "Empty dataset."
+    return tk_dataset
 
 
 def code_to_check_from_preds(
@@ -979,7 +966,7 @@ class ChunkedDataset:
     def __repr__(self):
         return f"ChunkedDataset(num_chunks={len(self.chunks_info)}, num_srcs={len(self.files)})"
 
-    def verify_labels(self, srcs: SrcDataset, tqdm_args={}):
+    def verify_labels(self, srcs: TokenizedSrcSet, tqdm_args={}):
         """
         Verify that the labels in the dataset match the source code.
         """
@@ -1055,14 +1042,14 @@ def output_ids_as_types(output_ids: Iterable[int], n_types: int) -> list[PythonT
 
 
 def R1_srcs_from_preds(
-    r0_src: SrcDataset,
+    r0_src: TokenizedSrcSet,
     chunks_info: list[SrcChunkInfo],
     src_files: list[Path],
     r0_preds: list[list[PythonType]],
     tc_args: TypeCheckArgs,
     max_workers: int,
     tqdm_args: dict = {},
-) -> SrcDataset:
+) -> TokenizedSrcSet:
     file2preds = dict[Path, dict[AnnotPath, str]]()
     for preds, chunk_info in zip(r0_preds, chunks_info):
         assert_eq(len(preds), len(chunk_info.types))
@@ -1216,16 +1203,15 @@ def src_preds_to_accuracies(
     )
 
 
-def get_datasets_name(
+def get_tk_dataset_name(
+    dataset: str,
     pre_args: PreprocessArgs,
     func_only: bool,
-    spot_round: int = 0,
     data_reduction: int = 1,
 ):
-    round_tag = f"-R{spot_round}" if spot_round > 0 else ""
     reduction_tag = f"-reduction={data_reduction}" if data_reduction != 1 else ""
     pre_parts = repr_modified_args(pre_args)
     if func_only:
-        return f"func_datasets-v5{reduction_tag}-{pre_parts}"
+        return f"func-{dataset}-v6{reduction_tag}-{pre_parts}"
     else:
-        return f"src_datasets-v4{round_tag}{reduction_tag}-{pre_parts}"
+        return f"{dataset}-v5{reduction_tag}-{pre_parts}"

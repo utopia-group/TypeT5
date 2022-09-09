@@ -13,7 +13,7 @@ from transformers.data.data_collator import DataCollatorForSeq2Seq
 from .data import (
     ChunkedDataset,
     CtxArgs,
-    SrcDataset,
+    TokenizedSrcSet,
     output_ids_as_types,
     preds_to_accuracies,
 )
@@ -221,7 +221,7 @@ class ModelWrapper:
 
     def eval_on_dataset(
         self,
-        src_data: SrcDataset,
+        src_data: TokenizedSrcSet,
         max_labels: Optional[int] = None,
         tqdm_args: dict = {},
     ) -> DatasetPredResult:

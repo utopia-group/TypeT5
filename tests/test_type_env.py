@@ -125,6 +125,12 @@ def test_mypy_checker_2():
         assert c_r.num_errors == oe, f"mypy_output: {c_r.output_str}\ncode: {new_code}"
 
 
+def test_type_parsing():
+    # test quoted types
+    assert parse_type_str("'Foo[int]'") == parse_type_str("Foo[int]")
+    assert parse_type_str('"Bar"') == parse_type_str("Bar")
+
+
 def test_type_normalization():
     equiv_pairs: list[tuple[str, str]] = [
         ("list[int]", "List[int]"),
@@ -160,13 +166,13 @@ def test_type_normalization():
 
 import shutil
 
-from spot.data import SrcDataset, type_check_src, type_check_src_in_project
+from spot.data import TokenizedSrcSet, type_check_src, type_check_src_in_project
 from spot.utils import load_tokenizer_spot, proj_root
 
 
 @pytest.mark.skip("Not using type checker for the moment")
 def test_mypy_checking():
-    simple_dataset = SrcDataset.from_repos(
+    simple_dataset = TokenizedSrcSet.from_repos(
         proj_root() / "data",
         [proj_root() / "data/code"],
         PreprocessArgs(drop_comments=True),

@@ -14,8 +14,8 @@ datadir = get_data_dir()
 # experiment configurations
 
 from spot.data import (
-    get_datasets_name,
-    load_src_datasets,
+    get_tk_dataset_name,
+    load_tokenized_srcsets,
     TypeCheckSettings,
 )
 from spot.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper
@@ -42,14 +42,14 @@ project_name = "test-SPOT" if config.quicktest else "SPOT"
 train_ctx_args = config.train_ctx_args()
 tc_args = TypeCheckArgs(check_in_isolation=config.check_in_isolation)
 
-datasets_name = get_datasets_name(
+datasets_name = get_tk_dataset_name(
     drop_comments=config.drop_comments,
     all_labels=config.all_labels,
 )
 
 model_name = "DAgger-model--" + config.as_name()
 
-src_datasets = load_src_datasets(
+tk_dataset = load_tokenized_srcsets(
     datadir,
     datasets_name,
     data_reduction=config.data_reduction,
@@ -82,7 +82,7 @@ dmodel = DAggerModel(wrapper, use_type_checker=use_type_checker)
 # pre-train evaluation
 # from spot.utils import pretty_print_dict
 
-# eval_r = asyncio.run(dmodel.eval_on_data(src_datasets["test"][0:50]))
+# eval_r = asyncio.run(dmodel.eval_on_data(tk_dataset["test"][0:50]))
 # pretty_print_dict(eval_r.accuracies)
 
 
@@ -113,7 +113,7 @@ with run_long_task("DAgger training"):
     try:
         asyncio.run(
             dmodel.train_on_data(
-                src_datasets["train"],
+                tk_dataset["train"],
                 dargs,
                 log_fn=lambda t, x: wandb.log({"train/step": t, **x}),
             )
@@ -146,7 +146,7 @@ dmodel.wrapper.args = test_dec_args
 eval_cache = PickleCache(save_path / "eval_cache")  # type: ignore
 
 eval_r = eval_cache.cached(
-    "eval_test", lambda: asyncio.run(dmodel.eval_on_data(src_datasets["test"]))
+    "eval_test", lambda: asyncio.run(dmodel.eval_on_data(tk_dataset["test"]))
 )
 pretty_print_dict(eval_r.accuracies)
 
@@ -162,7 +162,7 @@ wandb.log({"test/accuracies": wandb_string(pretty_show_dict(eval_r.accuracies))}
 import re
 from spot.utils import not_none
 
-validset = src_datasets["valid"][0:-1:3]
+validset = tk_dataset["valid"][0:-1:3]
 # dmodel.wrapper.args = train_dec_args
 
 with run_long_task("DAgger evaluating (valid set)"):

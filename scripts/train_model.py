@@ -2,20 +2,22 @@
 import os
 from typing import *
 
-from spot.utils import get_model_dir, proj_root, get_data_dir
+from spot.utils import (
+    get_dataroot,
+    get_eval_dir,
+    get_model_dir,
+    proj_root,
+)
 
 os.chdir(proj_root())
-
-datadir = get_data_dir()
-modeldir = get_model_dir()
 
 # %%
 # experiment configurations
 
 from spot.data import (
-    create_src_datasets,
-    get_datasets_name,
-    load_src_datasets,
+    create_tokenized_srcsets,
+    get_tk_dataset_name,
+    load_tokenized_srcsets,
     TypeCheckSettings,
 )
 from spot.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper
@@ -34,11 +36,7 @@ config = TrainingConfig(
         drop_env_types=False,
         stub_in_preamble=True,
     ),
-    preamble_size=512 + 256,
-    left_margin=1024 + 512,
-    right_margin=2048,
     func_only=True,
-    # data_reduction=4,
 )
 
 TypeCheckSettings.temp_path = f"GPU-{gpu_id}"
@@ -65,24 +63,28 @@ dec_args = DecodingArgs(
     ctx_args=config.dec_ctx_args(),
 )
 
-datasets_name = get_datasets_name(
-    config.pre_args, config.func_only, data_reduction=config.data_reduction
+dataset = config.trained_on
+print("Model will be trained on dataset:", colored(dataset, "blue"))
+
+sdata_name = get_tk_dataset_name(
+    dataset, config.pre_args, config.func_only, data_reduction=config.data_reduction
 )
-datasets_path = get_data_dir() / "SPOT-data" / datasets_name
-if recreate_dataset or not datasets_path.exists():
-    create_src_datasets(
-        proj_root() / "data/repos_split.pkl",
-        datasets_path,
+sdata_path = get_dataroot() / "TokenizedSrcSets" / sdata_name
+if recreate_dataset or not sdata_path.exists():
+    create_tokenized_srcsets(
+        dataset,
+        sdata_path,
         func_only=config.func_only,
         pre_args=config.pre_args,
         data_reduction=config.data_reduction,
     )
 
-src_datasets = load_src_datasets(
-    datadir,
-    datasets_name,
+tk_dataset = load_tokenized_srcsets(
+    sdata_path,
     quicktest=config.quicktest,
 )
+print("Training set stats:")
+tk_dataset["train"].print_stats()
 
 model_name = config.get_model_name()
 print(colored(f"Training model: {model_name}", "green"))
@@ -108,12 +110,12 @@ if not eval_only:
         project=project_name,
         name=model_name,
         config=config.as_dict(),
-        dir=str(datadir),
+        dir=str(get_dataroot()),
     )
 
     with run_long_task("Training spot model"):
         wrapper = train_spot_model(
-            src_datasets,
+            tk_dataset,
             model_name,
             train_args=train_args,
             gpus=[gpu_id],
@@ -122,9 +124,7 @@ if not eval_only:
             use_early_stop=False,
         )
 else:
-    wrapper = ModelWrapper.from_pretrained(
-        modeldir / f"checkpoints/lit-saved/{model_name}"
-    )
+    wrapper = ModelWrapper.from_pretrained(get_model_dir() / model_name)
 
 device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
 wrapper.to(device)
@@ -144,13 +144,13 @@ bs_args = DecodingArgs(
 )
 wrapper.args = bs_args
 
-eval_cache = PickleCache(modeldir / f"checkpoints/lit-saved/{model_name}/eval_cache")
+eval_cache = PickleCache(get_eval_dir(dataset, model_name) / "eval_cache")
 # eval_cache.clear()
 r0_eval = eval_cache.cached(
     "dataset_pred.pkl",
-    lambda: wrapper.eval_on_dataset(src_datasets["test"]),
+    lambda: wrapper.eval_on_dataset(tk_dataset["test"]),
 )
-common_names = src_datasets["train"].common_type_names()
+common_names = tk_dataset["train"].common_type_names()
 r0_accs = r0_eval.accuracies(common_names)
 pretty_print_dict(r0_accs)
 
@@ -178,12 +178,13 @@ from spot.visualization import export_preds_on_code, proj_root
 export_preds = True
 
 if export_preds:
-    max_samples = 1000
+    max_samples = 500
     sample_every = max(1, len(r0_eval.chunks) // max_samples)
     sub_ids = range(0, len(r0_eval.chunks), sample_every)
+    export_to = proj_root() / "caches" / "model_predictions" / model_name
     export_preds_on_code(
         r0_eval.chunks[sub_ids],
         [r0_eval.predictions[i] for i in sub_ids],
-        export_to=proj_root() / "caches" / "model_predictions" / model_name,
+        export_to=export_to,
     )
-    print("Model predictions exported to 'caches/model_predictions'")
+    print(f"Model predictions exported to '{export_to}'")

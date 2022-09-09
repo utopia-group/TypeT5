@@ -1,6 +1,6 @@
 import warnings
 from datasets import Dataset
-from .data import ChunkedDataset, CtxArgs, SrcDataset
+from .data import ChunkedDataset, CtxArgs, TokenizedSrcSet
 from .type_check import normalize_type
 from .model import (
     dynamic_dataloader,
@@ -138,7 +138,7 @@ class CriticModel(nn.Module):
 
     def eval_on_src_dataset(
         self,
-        src_data: SrcDataset,
+        src_data: TokenizedSrcSet,
         ctx_args: CtxArgs,
         sampling_max_tokens: int,
         tqdm_args: dict = {},
@@ -215,7 +215,7 @@ class CriticTrainArgs(NamedTuple):
 
 
 def train_critic_model(
-    critic_datasets: dict[str, SrcDataset],
+    critic_datasets: dict[str, TokenizedSrcSet],
     train_args: CriticTrainArgs,
     model_name: str,
     gpus: list[int],

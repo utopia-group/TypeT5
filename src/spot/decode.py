@@ -10,7 +10,7 @@ from .data import (
     CtxArgs,
     SrcCheckResult,
     SrcChunkInfo,
-    SrcDataset,
+    TokenizedSrcSet,
     TokenizedSrc,
     TypeCheckingEnv,
     chunk_from_src,
@@ -54,7 +54,7 @@ class SelectByCritic(IncrSelector):
 
 def incr_inference_with_feedback(
     wrapper: ModelWrapper,
-    src_data: SrcDataset,
+    src_data: TokenizedSrcSet,
     beam_width: int,
     selector: IncrSelector,
     print_times: bool = True,
@@ -281,7 +281,7 @@ def inline_single_prediction(
 
 def sample_candidates(
     wrapper: ModelWrapper,
-    src_data: SrcDataset,
+    src_data: TokenizedSrcSet,
     n_samples: int,
 ) -> tuple[ChunkedDataset, list[list[list[PythonType]]]]:
     ctx_args = wrapper.args.ctx_args
@@ -320,7 +320,7 @@ def sample_candidates(
 
 
 def select_candidates_by_type_errors(
-    src_data: SrcDataset,
+    src_data: TokenizedSrcSet,
     chunks: ChunkedDataset,
     pred_candidates: list[list[list[PythonType]]],
     only_same_file_error: bool = False,
@@ -411,7 +411,7 @@ class CriticAssesInfo:
 def select_candidates_using_critic(
     critic: CriticModel,
     no_feedback: bool,
-    src_data: SrcDataset,
+    src_data: TokenizedSrcSet,
     chunks: ChunkedDataset,
     pred_candidates: list[list[list[PythonType]]],
     dec_args: DecodingArgs,
@@ -550,7 +550,7 @@ def to_critic_inputs(
 
 
 def collect_type_errors_from_predictions(
-    src_data: SrcDataset, result: DatasetPredResult, max_workers: int
+    src_data: TokenizedSrcSet, result: DatasetPredResult, max_workers: int
 ) -> list[tuple[Path, MypyFeedback]]:
     "Apply all the predictioins and call the type checker once per project."
 
