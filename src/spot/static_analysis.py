@@ -1,8 +1,11 @@
 # -----------------------------------------------------------
 # project-level static analysis
 
+import copy
 from functools import lru_cache
 import enum
+
+from libcst import MetadataWrapper
 
 from .utils import *
 from libcst.metadata import (
@@ -101,8 +104,12 @@ class PythonFunction:
     tree: cst.FunctionDef
 
     def __repr__(self):
-        return f"PythonFunction(path={self.path})"
+        if self.in_class:
+            return f"ClassMethod(path={self.path})"
+        else:
+            return f"GlobalFunction(path={self.path})"
 
+    @property
     def in_class(self) -> bool:
         return self.parent_class is not None
 
@@ -120,8 +127,12 @@ class PythonVariable:
     ]  # only record assignments outside of functions
 
     def __repr__(self):
-        return f"PythonAttribute(path={self.path})"
+        if self.in_class:
+            return f"ClassAttribute(path={self.path})"
+        else:
+            return f"GlobalVariable(path={self.path})"
 
+    @property
     def in_class(self) -> bool:
         return self.parent_class is not None
 
@@ -256,11 +267,13 @@ class PythonModule:
     imported_modules: set[ModuleName]
     defined_symbols: dict[str, ProjectPath]
     tree: cst.Module
+    elem2pos: dict[ModulePath, CodeRange]
 
     @staticmethod
     def from_cst(module: cst.Module, name: str) -> "PythonModule":
-        builder = PythonModuleBuilder(name)
-        module.visit(builder)
+        wrapper = MetadataWrapper(module)
+        builder = PythonModuleBuilder(wrapper, name)
+        wrapper.visit(builder)
         return builder.get_module()
 
     def __repr__(self):
@@ -292,9 +305,16 @@ class PythonProject:
     root_dir: Path
     modules: dict[ModuleName, PythonModule]
     symlinks: dict[ModuleName, ModuleName]
+    module2src_file: dict[ModuleName, Path]
 
-    def __post_init__(self):
-        self.verify_paths_unique()
+    def get_elem_location(self, path: ProjectPath) -> tuple[Path, CodeRange]:
+        """Note that the line nubmers may differ from the orginal source file
+        if there are code transformations when creating the Project. You can
+        reconstruct the transformed code by calling `module.code` on the CSTModule."""
+
+        file = self.module2src_file[path.module]
+        span = self.modules[path.module].elem2pos[path.path]
+        return file, span
 
     def verify_paths_unique(self):
         path_set = set[ProjectPath]()
@@ -306,9 +326,13 @@ class PythonProject:
 
     @staticmethod
     def from_modules(
-        root_dir: Path, modules: Iterable[PythonModule]
+        root_dir: Path,
+        modules: Iterable[PythonModule],
+        src_map: dict[ModuleName, Path] = dict(),
     ) -> "PythonProject":
-        return PythonProject(root_dir, {m.name: m for m in modules}, dict())
+        p = PythonProject(root_dir, {m.name: m for m in modules}, dict(), src_map)
+        p.verify_paths_unique()
+        return p
 
     @staticmethod
     def from_root(
@@ -326,6 +350,7 @@ class PythonProject:
         any preprocessing transformations. The src will be discarded if this function returns None.
         """
         modules = dict()
+        src_map = dict[ModuleName, Path]()
         symlinks = dict()
 
         if not root.exists():
@@ -353,6 +378,7 @@ class PythonProject:
 
             mod_name = PythonProject.rel_path_to_module_name(src.relative_to(root))
             modules[mod_name] = PythonModule.from_cst(mod, mod_name)
+            src_map[mod_name] = src.relative_to(root)
 
         for src in all_srcs:
             if not src.is_symlink():
@@ -363,7 +389,9 @@ class PythonProject:
             )
             symlinks[mod_name] = origin_name
 
-        return PythonProject(root, modules, symlinks)
+        proj = PythonProject(root.resolve(), modules, symlinks, src_map)
+        proj.verify_paths_unique()
+        return proj
 
     def all_funcs(self) -> Generator[PythonFunction, None, None]:
         for module in self.modules.values():
@@ -379,11 +407,9 @@ class PythonProject:
 
     def mask_types(self):
         """Replace all type annotations with `SpecialNames.TYPE_MASK`."""
-        return PythonProject(
-            root_dir=self.root_dir,
-            modules={n: m.mask_types() for n, m in self.modules.items()},
-            symlinks=self.symlinks,
-        )
+        newp = copy.copy(self)
+        newp.modules = {n: m.mask_types() for n, m in self.modules.items()}
+        return newp
 
     @staticmethod
     def rel_path_to_module_name(rel_path: Path) -> ModuleName:
@@ -805,23 +831,29 @@ class PythonModuleBuilder(cst.CSTVisitor):
     """Construct a `PythonModule` from a `cst.Module`.
     If multiple definitions of the same name are found, only the last one is kept."""
 
-    def __init__(self, module_name: ModuleName):
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, wrapper: cst.MetadataWrapper, module_name: ModuleName):
         super().__init__()
+
+        self.module = wrapper.module
+        self.module_name = module_name
 
         self.functions = dict[str, PythonFunction]()
         self.global_vars = dict[str, PythonVariable]()
         self.classes = dict[str, PythonClass]()
         self.current_class: PythonClass | None = None
         self.visit_stack = [_VisitType.Root]
-        self.module = None
         self.imported_modules = set[str]()
         self.defined_symbols = dict[str, ProjectPath]()
+        self.elem2pos = dict[ModulePath, CodeRange]()
 
-        self.module_name = module_name
-
-    def _record_elem(self, e: PythonElem, cls: PythonClass | None):
+    def _record_elem(
+        self, e: PythonElem, cls: PythonClass | None, location_node: cst.CSTNode
+    ):
         vars = cls.attributes if cls else self.global_vars
         funcs = cls.methods if cls else self.functions
+        is_new_def = False
         if cls is None:
             self.classes.pop(e.name, None)
             self.defined_symbols[e.name] = e.path
@@ -829,6 +861,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
             case PythonFunction(n):
                 vars.pop(n, None)
                 funcs[n] = e
+                is_new_def = True
             case PythonVariable(n, assignments=assignments):
                 funcs.pop(n, None)
                 if n in vars:
@@ -836,9 +869,14 @@ class PythonModuleBuilder(cst.CSTVisitor):
                     vars[n].assignments.extend(assignments)
                 else:
                     vars[n] = e
+                    is_new_def = True
+            case _:
+                raise NotImplementedError()
+        if is_new_def:
+            crange = self.get_metadata(PositionProvider, location_node)
+            self.elem2pos[e.path.path] = crange
 
     def get_module(self) -> PythonModule:
-        assert self.module is not None, "Must visit a module first"
         return PythonModule(
             global_vars=list(self.global_vars.values()),
             functions=list(self.functions.values()),
@@ -847,6 +885,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
             imported_modules=self.imported_modules,
             defined_symbols=self.defined_symbols,
             tree=self.module,
+            elem2pos=self.elem2pos,
         )
 
     def visit_FunctionDef(self, node: cst.FunctionDef):
@@ -869,7 +908,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
             tree=node,
             parent_class=self.current_class.path if self.current_class else None,
         )
-        self._record_elem(func, self.current_class)
+        self._record_elem(func, self.current_class, node)
 
     def leave_FunctionDef(self, node) -> None:
         assert self.visit_stack[-1] == _VisitType.Function
@@ -917,7 +956,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
                 # TODO: figure out how to move the annotation to class scope
                 var = PythonVariable(n, cls.path.append(n), cls_path, [])
         if var is not None:
-            self._record_elem(var, cls)
+            self._record_elem(var, cls, node)
         return None
 
     # record global_vars and class attributes
@@ -944,7 +983,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
                     # initialized/accessed inside methods
                     var = PythonVariable(n, cls.path.append(n), cls_path, [])
             if var is not None:
-                self._record_elem(var, cls)
+                self._record_elem(var, cls, node)
 
     def visit_Import(self, node: cst.Import):
         for alias in node.names:

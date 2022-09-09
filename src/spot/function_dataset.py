@@ -77,6 +77,7 @@ def data_project_from_dir(
     root: Path,
     max_line_width: int = 200,
     drop_comments: bool = True,
+    file_filter: Callable[[Path], bool] = lambda p: True,
 ) -> PythonProject:
     def src2module(text: str):
         width = max(len(l) for l in text.split("\n"))
@@ -92,6 +93,7 @@ def data_project_from_dir(
         root,
         True,
         src2module=src2module,
+        file_filter=file_filter,
     )
 
 
@@ -153,7 +155,7 @@ def repo_to_tk_srcs(
                     right_m.code, add_special_tokens=False
                 )
 
-            file = Path(elem.path.module) / elem.path.path
+            file = proj.root_dir / proj.module2src_file[mpath] / elem.path.path
             src = tokenized_src_from_segs(
                 file=file,
                 repo=repo,

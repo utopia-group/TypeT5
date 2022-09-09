@@ -499,3 +499,7 @@ def visualize_feedbacks_in_srcs(
         display(string_widget(text))
 
     return interactive_sized(viz, {"i": (0, n_total - 1)})
+
+
+def show_code_range(crange: CodeRange) -> str:
+    return f"[{crange.start.line}:{crange.start.column+1}--{crange.end.line}:{crange.end.column+1}]"
