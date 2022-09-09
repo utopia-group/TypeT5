@@ -142,12 +142,29 @@ class VariableSignature:
     annot: cst.Annotation | None
     in_class: bool
 
+    def __repr__(self):
+        content = "MISSING" if self.annot is None else show_expr(self.annot.annotation)
+        if self.in_class:
+            return f"AttrSig({content})"
+        else:
+            return f"VarSig({content})"
+
 
 @dataclass
 class FunctionSignature:
     params: list[cst.Annotation | None]
     returns: cst.Annotation | None
     in_class: bool
+
+    def __repr__(self):
+        param_strs = [
+            "MISSING" if p is None else show_expr(p.annotation) for p in self.params
+        ]
+        return_str = (
+            "MISSING" if self.returns is None else show_expr(self.returns.annotation)
+        )
+        head = "MethodSig" if self.in_class else "FuncSig"
+        return f"{head}(({','.join(param_strs)}) -> {return_str})"
 
     def all_annots(self):
         yield from self.params

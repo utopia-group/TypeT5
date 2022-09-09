@@ -795,3 +795,11 @@ def move_all_files(src_dir: Path, dest_dir: Path, glob_pattern: str = "**/*"):
         target = dest_dir / f.relative_to(src_dir)
         target.parent.mkdir(exist_ok=True, parents=True)
         shutil.copy(f, target)
+
+
+# used for showing cst nodes.
+_EmptyModule = cst.Module([])
+
+
+def show_expr(expr: cst.CSTNode) -> str:
+    return f"cst'{_EmptyModule.code_for_node(expr)}'"
