@@ -72,6 +72,10 @@ def get_dataroot() -> Path:
         return Path(v)
 
 
+def get_data_dir() -> Path:
+    raise NotImplementedError()
+
+
 def get_dataset_dir(dataname: str) -> Path:
     if (v := get_config("datasets_root")) is None:
         return get_dataroot() / "datasets" / dataname
