@@ -11,7 +11,6 @@ from .utils import *
 class PythonType:
     head: tuple[str, ...]
     args: tuple["PythonType", ...] = ()
-    is_quoted: bool = False
 
     def __str__(self):
         h = ".".join(self.head)
@@ -35,8 +34,6 @@ class PythonType:
             out = h
         else:
             out = f"{h}[{', '.join(map(str, self.args))}]"
-        if self.is_quoted:
-            out = f'"{out}"'
         return out
 
     def __repr__(self):
@@ -175,7 +172,6 @@ def parse_type_from_ast(tree: ast.expr) -> PythonType:
             return PythonType(parse_qualified_name(tree))
         case ast.Constant(value=str() as s):
             ty = parse_type_from_ast(ast.parse(s, mode="eval").body)
-            ty.is_quoted = True
             return ty
         case ast.Constant(value=v):
             if v == None:
