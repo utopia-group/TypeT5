@@ -1,7 +1,6 @@
 import os
 import subprocess
 import warnings
-import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import *
@@ -11,23 +10,11 @@ import torch
 import torch.nn as nn
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
-from torch.optim import AdamW, Optimizer
-from torch.utils.data import DataLoader
-from transformers import DataCollatorForSeq2Seq, get_linear_schedule_with_warmup
-from transformers.trainer_pt_utils import get_parameter_names
+from torch.optim import AdamW
+from transformers import DataCollatorForSeq2Seq
 from transformers.modeling_outputs import Seq2SeqLMOutput
 
-from spot.tokenized_src import PreprocessArgs
-
-from .type_check import TypeCheckArgs
-
-from .data import (
-    ChunkedDataset,
-    R1_srcs_from_preds,
-    SrcChunkInfo,
-    SrcDataset,
-    preds_to_accuracies,
-)
+from .data import ChunkedDataset, SrcDataset
 from .model import (
     CtxArgs,
     DecodingArgs,
@@ -35,15 +22,10 @@ from .model import (
     ModelWrapper,
     TokenizerSPOT,
     dynamic_dataloader,
-    DatasetPredResult,
 )
-from .type_env import PythonType
+from .tokenized_src import PreprocessArgs
+from .type_check import TypeCheckArgs
 from .utils import *
-from .visualization import (
-    dict_widget,
-    string_widget,
-    visualize_sequence_tabs,
-)
 
 
 @dataclass
@@ -111,19 +93,16 @@ def train_spot_model(
     src_datasets: dict[str, SrcDataset],
     model_name: str,
     train_args: ModelTrainingArgs,
-    record_batches: bool,
     gpus: list[int],
     quicktest=False,
-    use_early_stop=True,
+    use_early_stop=False,
     use_small_model=False,
-) -> tuple[ModelWrapper, dict]:
+) -> ModelWrapper:
     os.chdir(proj_root())
     train_ctx_args = train_args.train_ctx_args
     dec_args = train_args.dec_args
 
-    model_dir = get_model_dir()
-
-    running_dir = model_dir / "checkpoints/lit-running" / model_name
+    running_dir = get_model_dir(False) / model_name
     if running_dir.exists():
         shutil.rmtree(running_dir)
     running_dir.mkdir(parents=True, exist_ok=True)
@@ -134,9 +113,13 @@ def train_spot_model(
     model_path = (
         "Salesforce/codet5-small" if use_small_model else "Salesforce/codet5-base"
     )
-    lit_model = TrainModelWrapper(model_path, model_saving_path=running_dir / "models")
+    lit_model = TrainModelWrapper(model_path, model_saving_path=running_dir / "ckpts")
     tokenizer: TokenizerSPOT = lit_model.tokenizer
-    wrapper = ModelWrapper(lit_model.model, tokenizer, dec_args)
+
+    common_type_names = src_datasets["train"].common_type_names()
+    wrapper = ModelWrapper(
+        lit_model.model, tokenizer, dec_args, common_type_names=common_type_names
+    )
 
     chunks: dict[str, ChunkedDataset] = {}
     with run_long_task("Preparing chunked datasets", notify=False):
@@ -162,9 +145,6 @@ def train_spot_model(
 
     ckpt_interval = max(1, len(train_dataloader) // 10)
     val_interval = 1 if quicktest else max(500, ckpt_interval)
-
-    if record_batches:
-        lit_model.model_saving_interval = ckpt_interval
 
     checkpoint_cb = ModelCheckpoint(
         dirpath=running_dir,
@@ -205,8 +185,7 @@ def train_spot_model(
             val_dataloaders=valid_dataloader,
         )
 
-    extra = dict[str, Any]()
-    save_dir = model_dir / "checkpoints/lit-saved" / model_name
+    save_dir = get_model_dir(True) / model_name
 
     final_eval = trainer.validate(model=lit_model, dataloaders=valid_dataloader)[0]
 
@@ -227,173 +206,13 @@ def train_spot_model(
         save_dir.mkdir(parents=True, exist_ok=True)
 
         wrapper.save_pretrained(save_dir)
-        if record_batches:
-            device = torch.device(f"cuda:{gpus[0]}" if gpus else "cpu")
-            wrapper = wrapper.to(device)
-            extra["batch_ids"] = lit_model.batch_ids
-            with run_long_task("Generating R1 datasets", notify=False):
-                R1_src_datasets = R1_srcs_from_extra(
-                    wrapper,
-                    src_datasets,
-                    extra,
-                    tc_args=train_args.tc_args,
-                    ckpt_dir=running_dir / "models",
-                    ckpt_interval=ckpt_interval,
-                )
-
-            extra["R1-src_datasets"] = R1_src_datasets
-            pickle_dump(save_dir / "extra.pkl", extra)
-
-            shutil.rmtree(running_dir)
+        shutil.rmtree(running_dir)
     except Exception as e:
         logging.error(
             "Error encountered after training, returning partial results... Error:\n", e
         )
 
-    return wrapper, extra
-
-
-def R1_srcs_from_extra(
-    wrapper: ModelWrapper,
-    src_datasets: dict[str, SrcDataset],
-    extra: dict[str, Any],
-    tc_args: TypeCheckArgs,
-    ckpt_dir: Optional[Path] = None,
-    ckpt_interval: Optional[int] = None,
-) -> dict[str, SrcDataset]:
-    """
-    Generate the R1 dataset using the extra info recorded during training.
-    The training set is generated using the predictions recorded during training
-    (or loaded from the different model checkpoints).
-    """
-
-    tokenizer = wrapper.tokenizer
-    batch_ids = extra["batch_ids"]
-    print(f"Generating R1 dataset: train")
-
-    chunk_datasets = dict[str, ChunkedDataset]()
-    for n in ["test", "valid", "train"]:
-        src = src_datasets[n]
-        chunk_datasets[n] = src.to_chunks(wrapper.args.ctx_args)
-
-    R1_src_datasets = dict[str, SrcDataset]()
-    if ckpt_dir is None or ckpt_interval is None:
-        chunks_info = extra["chunks_info"]
-        model_preds = extra["model_preds"]
-        R1_src_datasets["train"] = R1_srcs_from_preds(
-            src_datasets["train"],
-            chunks_info,
-            chunk_datasets["train"].files,
-            model_preds,
-            tc_args=tc_args,
-            max_workers=wrapper.args.max_workers,
-        )
-    else:
-        R1_src_datasets["train"], chunks_info, model_preds = R1_srcs_from_ckpts(
-            tokenizer,
-            wrapper.args,
-            src_datasets["train"],
-            chunk_datasets["train"],
-            batch_ids,
-            tc_args=tc_args,
-            ckpt_dir=ckpt_dir,
-            ckpt_interval=ckpt_interval,
-            max_workers=wrapper.args.max_workers,
-            device=wrapper.model.device,
-        )
-        extra["chunks_info"] = chunks_info
-        extra["model_preds"] = model_preds
-    for n in ["valid", "test"]:
-        print(f"Generating R1 dataset: {n}")
-        preds = wrapper.predict(chunk_datasets[n].data, {})
-        R1_src_datasets[n] = R1_srcs_from_preds(
-            src_datasets[n],
-            chunk_datasets[n].chunks_info,
-            chunk_datasets[n].files,
-            preds,
-            tc_args=tc_args,
-            max_workers=wrapper.args.max_workers,
-        )
-    return R1_src_datasets
-
-
-def R1_srcs_from_model(
-    wrapper: ModelWrapper,
-    src_datasets: dict[str, SrcDataset],
-    tc_args: TypeCheckArgs,
-) -> dict[str, SrcDataset]:
-    R1_src_datasets = dict[str, SrcDataset]()
-    chunk_datasets = {
-        n: src_datasets[n].to_chunks(wrapper.args.ctx_args)
-        for n in ["train", "valid", "test"]
-    }
-    for n, cdata in chunk_datasets.items():
-        print(f"Generating R1 dataset: {n}")
-        preds = wrapper.predict(cdata.data, {})
-
-        R1_src_datasets[n] = R1_srcs_from_preds(
-            src_datasets[n],
-            chunk_datasets[n].chunks_info,
-            chunk_datasets[n].files,
-            preds,
-            tc_args=tc_args,
-            max_workers=wrapper.args.max_workers,
-        )
-        common_type_names = src_datasets["train"].common_type_names()
-        r0_accs = preds_to_accuracies(preds, cdata, common_type_names)
-        R1_src_datasets[n].add_stats({"r0_full_acc": r0_accs["full_acc"]})
-    return R1_src_datasets
-
-
-def R1_srcs_from_ckpts(
-    tokenizer: TokenizerSPOT,
-    dec_args: DecodingArgs,
-    r0_src: SrcDataset,
-    cdata: ChunkedDataset,
-    chunk_ids: list[list[int]],
-    tc_args: TypeCheckArgs,
-    ckpt_dir: Path,
-    ckpt_interval: int,
-    max_workers: int,
-    device,
-    tqdm_args={},
-):
-    # TODO: find out why some chunks are missing
-    # assert_eq(sum(len(x) for x in chunk_ids), len(cdata.chunks_info))
-    if (n_got := sum(len(x) for x in chunk_ids)) != len(cdata.chunks_info):
-        logging.warning(
-            f"Some chunks are missing. Got {n_got} chunks, but expected {len(cdata.chunks_info)}"
-        )
-    chunks_info = list[SrcChunkInfo]()
-    model_preds = list[list[PythonType]]()
-    for i in tqdm(
-        range(0, len(chunk_ids), ckpt_interval),
-        desc="R1_srcs_from_ckpts",
-        **tqdm_args,
-    ):
-        ids = list(seq_flatten(chunk_ids[i : i + ckpt_interval]))
-        model = load_model_spot(ckpt_dir / f"n_batches={i}")
-        wrapper = ModelWrapper(model, tokenizer, dec_args)
-        wrapper = wrapper.to(device)
-        try:
-            data_sub = cdata[ids]
-        except IndexError as e:
-            raise IndexError(
-                f"ids: {ids},\nchunk_ids: {cdata.data['chunk_id']}\ncdata: {cdata}"
-            ) from e
-        chunks_info.extend(data_sub.chunks_info)
-        preds = wrapper.predict(data_sub.data, tqdm_args=tqdm_args)
-        model_preds.extend(preds)
-    srcs = R1_srcs_from_preds(
-        r0_src,
-        chunks_info,
-        cdata.files,
-        model_preds,
-        tc_args=tc_args,
-        max_workers=max_workers,
-        tqdm_args=tqdm_args,
-    )
-    return srcs, chunks_info, model_preds
+    return wrapper
 
 
 class TrainModelWrapper(pl.LightningModule):
@@ -486,47 +305,3 @@ def _configure_optimizers(model: nn.Module, base_lr: float = 2e-5):
     optimizer = AdamW(grouped_params, lr=base_lr)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1, gamma=0.2)
     return [optimizer], [lr_scheduler]
-
-
-def evaluate_model(
-    r0_wrapper: ModelWrapper,
-    r1_wrapper: Optional[ModelWrapper],
-    r0_srcs: SrcDataset,
-    tc_args: TypeCheckArgs,
-    eval_cache: Optional[PickleCache] = None,
-    tqdm_args={},
-) -> list[tuple[DecodingArgs, DatasetPredResult]]:
-    def cached(name, f):
-        if eval_cache is None:
-            return f()
-        return eval_cache.cached(name, f)
-
-    results = list[tuple[DecodingArgs, DatasetPredResult]]()
-    r0_result = cached(
-        f"r0_eval-{r0_wrapper.args}.pkl",
-        lambda: r0_wrapper.eval_on_dataset(r0_srcs, tqdm_args=tqdm_args),
-    )
-    results.append((copy.deepcopy(r0_wrapper.args), r0_result))
-    if r1_wrapper is None:
-        return results
-
-    r1_srcs = cached(
-        f"r1_srcs-{r0_wrapper.args}-{tc_args}.pkl",
-        lambda: R1_srcs_from_preds(
-            r0_srcs,
-            r0_result.chunks.chunks_info,
-            r0_result.chunks.files,
-            r0_result.predictions,
-            tc_args=tc_args,
-            max_workers=r0_wrapper.args.max_workers,
-        ),
-    )
-    r1_srcs = r1_srcs.inline_predictions(True)
-
-    r1_result = cached(
-        f"r1_eval-{r1_wrapper.args}-{tc_args}.pkl",
-        lambda: r1_wrapper.eval_on_dataset(r1_srcs, tqdm_args=tqdm_args),
-    )
-    results.append((copy.deepcopy(r1_wrapper.args), r1_result))
-
-    return results

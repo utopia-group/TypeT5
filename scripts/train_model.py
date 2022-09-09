@@ -112,11 +112,10 @@ if not eval_only:
     )
 
     with run_long_task("Training spot model"):
-        wrapper, r0_extra = train_spot_model(
+        wrapper = train_spot_model(
             src_datasets,
             model_name,
             train_args=train_args,
-            record_batches=False,
             gpus=[gpu_id],
             quicktest=config.quicktest,
             use_small_model=config.use_small_model,
@@ -134,7 +133,6 @@ wrapper.to(device)
 # %%
 # model evaluation
 
-from spot.train import evaluate_model
 from spot.utils import PickleCache
 from spot.visualization import pretty_print_dict
 
