@@ -16,7 +16,6 @@ from spot.model import ModelWrapper
 from spot.utils import (
     assert_eq,
     pickle_dump,
-    pickle_load,
     pmap,
     pretty_show_dict,
     proj_root,
@@ -38,7 +37,8 @@ def wandb_string(s: str):
 # experiment configurations
 
 gpu_id = 0
-model_name = "model-v4--TrainingConfig(func_only=True, drop_env_types=False, left_margin=1536, preamble_size=768, right_margin=2048)"
+# model_name = "model-v4--TrainingConfig(func_only=True, drop_env_types=False, left_margin=1536, preamble_size=768, right_margin=2048)"
+model_name = "model-v5--TrainingConfig(drop_env_types=False)"
 dataset_name = "ManyTypes4Py"
 # dataset_name = "SPOT-src"
 experiment_name = dataset_name + ": " + model_name
@@ -79,9 +79,9 @@ model.args.num_beams = 10
 model.args.tokens_per_type = 16
 
 rctx = RolloutCtx(model=model)
-pre_args = PreprocessArgs()
 
 decode_orders = {
+    "no-neighbors": DecodingOrders.IndependentOrder(),
     "non-incr": DecodingOrders.IndependentOrder(),
     "random": DecodingOrders.RandomOrder(),
     "double-traversal": DecodingOrders.DoubleTraversal(),
@@ -102,6 +102,11 @@ with run_long_task("Evaluating different decoding strategy"):
 
     results = dict[str, dict]()
     for oname, order in decode_orders.items():
+        print(f"Evaluating decoding strategy: {oname}")
+        pre_args = PreprocessArgs()
+        if oname == "no-neighbors":
+            pre_args.max_callers = 0
+            pre_args.max_callees = 0
         evalr = asyncio.run(
             rctx.evaluate_on_projects(
                 test_projects,
@@ -109,10 +114,10 @@ with run_long_task("Evaluating different decoding strategy"):
                 order,
             )
         )
+        pickle_dump(results_dir / f"{oname}-EvalResult.pkl", evalr)
         results[oname] = evalr.accuracies(None, model.common_type_names)
         accs_str = pretty_show_dict(results[oname])
         write_file(results_dir / f"{oname}-accuracy.txt", accs_str)
-        pickle_dump(results_dir / f"{oname}-EvalResult.pkl", evalr)
         wandb.log({f"test/{oname}": wandb_string(accs_str)})
         print(f"========== {oname} ===========")
         print(accs_str)

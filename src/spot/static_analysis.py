@@ -161,6 +161,9 @@ class VariableSignature:
         else:
             return f"VarSig({content})"
 
+    def n_annotated(self) -> int:
+        return int(self.annot is not None)
+
 
 @dataclass
 class FunctionSignature:
@@ -178,6 +181,11 @@ class FunctionSignature:
         )
         head = "MethodSig" if self.in_class else "FuncSig"
         return f"{head}(({', '.join(param_strs)}) -> {return_str})"
+
+    def n_annotated(self) -> int:
+        return sum(a is not None for a in self.params.values()) + (
+            self.returns is not None
+        )
 
     @staticmethod
     def from_function(func: cst.FunctionDef, in_class: bool) -> "FunctionSignature":

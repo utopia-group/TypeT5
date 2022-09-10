@@ -7,7 +7,8 @@ import torch
 from .data import CtxArgs, src_to_chunks
 from .function_dataset import (
     ElemSignature,
-    accuracy_from_signatures,
+    SignatureMap,
+    check_predicted_signatures,
     ctx_modules_for_elem,
     mk_preamble,
     reformat_elems,
@@ -32,7 +33,7 @@ from .utils import *
 
 @dataclass
 class RolloutPrediction:
-    assignments: dict[ProjectPath, ElemSignature]
+    assignments: SignatureMap
     elem2preds: dict[ProjectPath, Sequence[PythonType]]
     elem2inputs: dict[ProjectPath, dict]
 
@@ -41,7 +42,7 @@ class RolloutPrediction:
 class EvalResult:
     project_roots: list[Path]
     predictions: list[RolloutPrediction]
-    label_maps: list[dict[ProjectPath, ElemSignature]]
+    label_maps: list[SignatureMap]
 
     def accuracies(
         self, project: int | None, common_type_names: set[str]
@@ -51,20 +52,20 @@ class EvalResult:
         else:
             projects = range(len(self.predictions))
 
-        all_label_sigs = list[ElemSignature]()
-        all_pred_sigs = list[ElemSignature]()
-        for i in projects:
-            label_map = self.label_maps[i]
-            pred_map = self.predictions[i].assignments
-            for p in label_map:
-                all_label_sigs.append(label_map[p])
-                all_pred_sigs.append(pred_map[p])
+        label_maps = dict[str, SignatureMap]()
+        pred_maps = dict[str, SignatureMap]()
 
-        return accuracy_from_signatures(
-            all_pred_sigs,
-            all_label_sigs,
+        for i in projects:
+            pname = self.project_roots[i].name
+            label_maps[pname] = self.label_maps[i]
+            pred_maps[pname] = self.predictions[i].assignments
+
+        return check_predicted_signatures(
+            pred_maps,
+            label_maps,
             common_type_names,
             allow_implicit_none=True,
+            error_on_mismatched_signature=True,  # there shouldn't be any mismatch
         )
 
 
@@ -147,7 +148,7 @@ class RolloutCtx:
             assert e.path in visit_set, f"{e.path} not in the decoder order."
         preamble_cache = dict[ModuleName, tuple[str, TokenSeq]]()
 
-        assignments = dict[ProjectPath, ElemSignature]()
+        assignments = SignatureMap()
         elem2preds = dict[ProjectPath, Sequence[PythonType]]()
         elem2inputs = dict[ProjectPath, dict]()
         mask_annot = cst.Annotation(cst.Name(SpecialNames.TypeMask))
@@ -177,7 +178,7 @@ class RolloutCtx:
             elif isinstance(elem, PythonFunction):
                 sig = elem.get_signature()
                 elem_sig = copy.deepcopy(sig)
-                for n, a in elem_sig.params:
+                for n, a in elem_sig.params.items():
                     if a is None:
                         elem_sig.params[n] = mask_annot
                 if elem_sig.returns is None:
@@ -188,7 +189,7 @@ class RolloutCtx:
             main_lines = reformat_elems(
                 [elem],
                 analysis.path2class,
-                cast(dict[ProjectPath, ElemSignature], elem_map),
+                cast(SignatureMap, elem_map),
                 keep_body_types=True,
             )
 

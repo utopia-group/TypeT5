@@ -408,7 +408,7 @@ class TokenizedSrcSet:
         count = Counter()
         for src in self.all_srcs:
             for t in src.types:
-                for n in t.all_names():
+                for n in normalize_type(t).all_names():
                     count[n] += 1
         return {n for n, _ in count.most_common(top_k)}
 
@@ -743,9 +743,6 @@ def _try_parse_src(
         return None
 
 
-import spot.function_dataset as fd
-
-
 def create_tokenized_srcsets(
     dataset: str,
     out_dir: Path,
@@ -753,6 +750,8 @@ def create_tokenized_srcsets(
     pre_args: PreprocessArgs,
     data_reduction: int = 1,
 ) -> None:
+    import spot.function_dataset as fd
+
     repos_dir = get_dataset_dir(dataset) / "repos"
     out_dir.mkdir(parents=True, exist_ok=True)
 
