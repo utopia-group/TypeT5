@@ -74,7 +74,8 @@ class ProjectPath(NamedTuple):
         return f"proj'{str(self)}'"
 
     def append(self, path: ModulePath) -> "ProjectPath":
-        return ProjectPath(self.module, self.path + "." + path)
+        new_path = path if self.path == "" else f"{self.path}.{path}"
+        return ProjectPath(self.module, new_path)
 
     def pop(self) -> "ProjectPath":
         p1 = ".".join(self.path.split(".")[:-1])
@@ -163,31 +164,20 @@ class VariableSignature:
 
 @dataclass
 class FunctionSignature:
-    params: list[cst.Annotation | None]
+    params: dict[str, cst.Annotation | None]
     returns: cst.Annotation | None
     in_class: bool
 
     def __repr__(self):
         param_strs = [
-            "MISSING" if p is None else show_expr(p.annotation) for p in self.params
+            p if a is None else f"{p}: {show_expr(a.annotation)}"
+            for p, a in self.params.items()
         ]
         return_str = (
             "MISSING" if self.returns is None else show_expr(self.returns.annotation)
         )
         head = "MethodSig" if self.in_class else "FuncSig"
-        return f"{head}(({','.join(param_strs)}) -> {return_str})"
-
-    def all_annots(self):
-        yield from self.params
-        yield self.returns
-
-    def set_annot_(self, i: int, annot: cst.Annotation) -> None:
-        if i < len(self.params):
-            self.params[i] = annot
-        elif i == len(self.params):
-            self.returns = annot
-        else:
-            raise IndexError(f"Index {i} is out of bounds. Max is {len(self.params)}")
+        return f"{head}(({', '.join(param_strs)}) -> {return_str})"
 
     @staticmethod
     def from_function(func: cst.FunctionDef, in_class: bool) -> "FunctionSignature":
@@ -199,30 +189,30 @@ class FunctionSignature:
         applier = FunctionSignature._ParamsApplier(self)
         new_params = func.params.visit(applier)
         assert isinstance(new_params, cst.Parameters)
-        return func.with_changes(params=new_params, returns=applier.annots_left.pop())
+        return func.with_changes(params=new_params, returns=self.returns)
 
     class _ParamsExtractor(cst.CSTVisitor):
         def __init__(self):
-            self.annots = list[cst.Annotation | None]()
+            self.annots = dict[str, cst.Annotation | None]()
 
         def visit_Param(self, node: "cst.Param") -> Optional[bool]:
             if node.name.value != "self":
-                self.annots.append(node.annotation)
+                self.annots[node.name.value] = node.annotation
             return False  # skip default expressions
 
     class _ParamsApplier(cst.CSTTransformer):
         def __init__(self, func_signature: "FunctionSignature"):
-            self.annots_left = list(func_signature.all_annots())
-            self.annots_left.reverse()
+            self.params = func_signature.params
 
         def visit_Param(self, node):
             return False  # skip default expressions
 
         def leave_Param(self, node, updated: "cst.Param"):
-            if node.name.value == "self":
+            if updated.name.value == "self":
                 return updated
-            assert self.annots_left
-            return updated.with_changes(annotation=self.annots_left.pop())
+            pname = updated.name.value
+            assert pname in self.params, f"param {pname} not in {self.params}"
+            return updated.with_changes(annotation=self.params[pname])
 
 
 ElemSignature = VariableSignature | FunctionSignature

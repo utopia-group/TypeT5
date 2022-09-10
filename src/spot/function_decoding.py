@@ -1,13 +1,13 @@
 import asyncio
 import copy
 import random
-from xml.etree import ElementPath
 
 import torch
 
-from .data import CtxArgs, src_to_chunks, type_accuracies
+from .data import CtxArgs, src_to_chunks
 from .function_dataset import (
     ElemSignature,
+    accuracy_from_signatures,
     ctx_modules_for_elem,
     mk_preamble,
     reformat_elems,
@@ -15,7 +15,6 @@ from .function_dataset import (
 )
 from .model import ModelWrapper
 from .static_analysis import (
-    FunctionSignature,
     ModuleName,
     ProjectPath,
     PythonElem,
@@ -26,8 +25,8 @@ from .static_analysis import (
     VariableSignature,
 )
 from .tokenized_src import PreprocessArgs, TokenSeq, tokenized_src_from_segs
-from .type_check import PythonType, parse_type_expr
-from .type_env import AnnotCat, collect_user_annotations
+from .type_check import PythonType
+from .type_env import collect_user_annotations
 from .utils import *
 
 
@@ -178,9 +177,11 @@ class RolloutCtx:
             elif isinstance(elem, PythonFunction):
                 sig = elem.get_signature()
                 elem_sig = copy.deepcopy(sig)
-                for i, a in enumerate(elem_sig.all_annots()):
+                for n, a in elem_sig.params:
                     if a is None:
-                        elem_sig.set_annot_(i, mask_annot)
+                        elem_sig.params[n] = mask_annot
+                if elem_sig.returns is None:
+                    elem_sig.returns = mask_annot
                 elem_map = {elem.path: elem_sig}
             else:
                 raise NotImplemented(f"Unsupported element type {type(elem)}")
@@ -232,10 +233,15 @@ class RolloutCtx:
                     assert_eq(len(pred_types), 1)
                     sig.annot = cst.Annotation(cst.parse_expression(str(pred_types[0])))
                 elif isinstance(elem, PythonFunction):
-                    for i, a in enumerate(sig.all_annots()):
+                    assert len(pred_types) >= len(sig.params) + 1
+                    for i, (n, a) in enumerate(sig.params.items()):
                         if a is None or is_mask_annot(a):
                             new_type = cst.parse_expression(str(pred_types[i]))
-                            sig.set_annot_(i, cst.Annotation(new_type))
+                            sig.params[n] = cst.Annotation(new_type)
+                    if sig.returns is None or is_mask_annot(sig.returns):
+                        sig.returns = cst.Annotation(
+                            cst.parse_expression(str(pred_types[len(sig.params)]))
+                        )
             assignments[elem.path] = sig
             elem2preds[elem.path] = pred_types
             progress_cbk(elem, pred_types)
@@ -371,57 +377,3 @@ def construct_model_inputs(
     )
     chunks, _ = src_to_chunks(src, (0, n_labels), ctx_args)
     return chunks
-
-
-def accuracy_from_signatures(
-    predictions: Sequence[ElemSignature],
-    labels: Sequence[ElemSignature],
-    common_type_names: set[str],
-    allow_implicit_none: bool = True,
-) -> dict[str, Any]:
-    pred_types = list[PythonType]()
-    label_types = list[PythonType]()
-    types_cat = list[AnnotCat]()
-    types_pos = list[int]()
-    dummy_mod = cst.Module([])
-
-    def record_pair(
-        pred: cst.Annotation | None,
-        label: cst.Annotation | None,
-        cat: AnnotCat,
-        pos: int,
-    ):
-        if (
-            label is None
-            or (lt := parse_type_expr(dummy_mod, label.annotation)) is None
-        ):
-            # no label available
-            return
-        assert pred is not None
-        assert (pt := parse_type_expr(dummy_mod, pred.annotation)) is not None
-        label_types.append(lt)
-        pred_types.append(pt)
-        types_cat.append(cat)
-        types_pos.append(pos)
-
-    for p, l in zip(predictions, labels):
-        match p, l:
-            case (VariableSignature(pa), VariableSignature(la, in_class=in_class)):
-                cat = AnnotCat.ClassAtribute if in_class else AnnotCat.GlobalVar
-                record_pair(pa, la, cat, 0)
-            case (
-                FunctionSignature(p_params, p_return),
-                FunctionSignature(l_params, l_return, in_class=in_class),
-            ):
-                for i, (pa, la) in enumerate(zip(p_params, l_params)):
-                    record_pair(pa, la, AnnotCat.FuncArg, i)
-                record_pair(p_return, l_return, AnnotCat.FuncReturn, len(l_params))
-
-    return type_accuracies(
-        pred_types,
-        label_types,
-        types_cat,
-        types_pos,
-        common_type_names,
-        allow_implicit_none=allow_implicit_none,
-    )

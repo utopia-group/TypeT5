@@ -1,4 +1,6 @@
-from .data import TokenizedSrcSet
+from spot import PythonType
+from .type_check import parse_type_expr
+from .data import TokenizedSrcSet, type_accuracies
 from .static_analysis import (
     ElemSignature,
     FunctionSignature,
@@ -21,7 +23,7 @@ from .tokenized_src import (
     remove_imports,
     tokenized_src_from_segs,
 )
-from .type_env import apply_annotations, collect_user_annotations
+from .type_env import AnnotCat, apply_annotations, collect_user_annotations
 from .utils import *
 
 
@@ -392,3 +394,57 @@ def reformat_elems(
     result = list(seq_flatten(stmt_groups))
     # hide empty lines in the type signature to make the checker happy
     return cast(list[cst.SimpleStatementLine | cst.BaseCompoundStatement], result)
+
+
+def accuracy_from_signatures(
+    predictions: Sequence[ElemSignature],
+    labels: Sequence[ElemSignature],
+    common_type_names: set[str],
+    allow_implicit_none: bool = True,
+) -> dict[str, Any]:
+    pred_types = list[PythonType]()
+    label_types = list[PythonType]()
+    types_cat = list[AnnotCat]()
+    types_pos = list[int]()
+    dummy_mod = cst.Module([])
+
+    def record_pair(
+        pred: cst.Annotation | None,
+        label: cst.Annotation | None,
+        cat: AnnotCat,
+        pos: int,
+    ):
+        if (
+            label is None
+            or (lt := parse_type_expr(dummy_mod, label.annotation)) is None
+        ):
+            # no label available
+            return
+        assert pred is not None
+        assert (pt := parse_type_expr(dummy_mod, pred.annotation)) is not None
+        label_types.append(lt)
+        pred_types.append(pt)
+        types_cat.append(cat)
+        types_pos.append(pos)
+
+    for p, l in zip(predictions, labels):
+        match p, l:
+            case (VariableSignature(pa), VariableSignature(la, in_class=in_class)):
+                cat = AnnotCat.ClassAtribute if in_class else AnnotCat.GlobalVar
+                record_pair(pa, la, cat, 0)
+            case (
+                FunctionSignature(p_params, p_return),
+                FunctionSignature(l_params, l_return, in_class=in_class),
+            ):
+                for i, n in enumerate(l_params.keys()):
+                    record_pair(p_params.get(n, None), l_params[n], AnnotCat.FuncArg, i)
+                record_pair(p_return, l_return, AnnotCat.FuncReturn, len(l_params))
+
+    return type_accuracies(
+        pred_types,
+        label_types,
+        types_cat,
+        types_pos,
+        common_type_names,
+        allow_implicit_none=allow_implicit_none,
+    )

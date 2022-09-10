@@ -161,7 +161,7 @@ def train_spot_model(
         # fast_dev_run=6 if quicktest else False,
         # log_every_n_steps=500,
         accelerator="gpu" if gpus else "cpu",
-        gpus=gpus,
+        devices=gpus,
         precision=16,
         max_epochs=train_args.max_epochs,
         logger=wandb_logger,
@@ -260,12 +260,12 @@ class TrainModelWrapper(pl.LightningModule):
         )
         assert isinstance(outputs, Seq2SeqLMOutput)
         loss = not_none(outputs.loss)
-        n_labels = float(batch["n_labels"].sum().item())
+        n_labels = batch["n_labels"].sum().item()
         self.labels_trained += n_labels
         self.avg_loss.update(loss.item())
         self.log("train/loss", self.avg_loss.value)
         self.log("train/lr", self.lr_schedulers().get_last_lr()[0])  # type: ignore
-        self.log("train/labels", self.labels_trained)
+        self.log("train/labels", float(self.labels_trained))
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -276,7 +276,7 @@ class TrainModelWrapper(pl.LightningModule):
         )
         loss = outputs.loss
         self.log("valid/loss", loss.item())
-        self.log("train/labels", self.labels_trained)
+        self.log("train/labels", float(self.labels_trained))
 
 
 def concat_batches(batches: list[dict], keys: list[str]) -> dict:
