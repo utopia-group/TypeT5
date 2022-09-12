@@ -476,3 +476,4 @@ def count_type_frequency(
         count_type(t)
 
     return counter
+

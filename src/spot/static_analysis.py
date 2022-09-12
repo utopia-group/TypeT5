@@ -7,6 +7,10 @@ import enum
 
 from libcst import MetadataWrapper
 
+from spot import PythonType
+from .type_check import parse_type_expr
+from .type_env import AccuracyMetric, AnnotCat, type_accuracies
+
 from .utils import *
 from libcst.metadata import (
     CodeRange,
@@ -164,6 +168,9 @@ class VariableSignature:
     def n_annotated(self) -> int:
         return int(self.annot is not None)
 
+    def n_annots(self) -> int:
+        return 1
+
 
 @dataclass
 class FunctionSignature:
@@ -173,11 +180,13 @@ class FunctionSignature:
 
     def __repr__(self):
         param_strs = [
-            p if a is None else f"{p}: {show_expr(a.annotation)}"
+            p if a is None else f"{p}: {show_expr(a.annotation, False)}"
             for p, a in self.params.items()
         ]
         return_str = (
-            "MISSING" if self.returns is None else show_expr(self.returns.annotation)
+            "MISSING"
+            if self.returns is None
+            else show_expr(self.returns.annotation, False)
         )
         head = "MethodSig" if self.in_class else "FuncSig"
         return f"{head}(({', '.join(param_strs)}) -> {return_str})"
@@ -186,6 +195,9 @@ class FunctionSignature:
         return sum(a is not None for a in self.params.values()) + (
             self.returns is not None
         )
+
+    def n_annots(self) -> int:
+        return len(self.params) + 1
 
     @staticmethod
     def from_function(func: cst.FunctionDef, in_class: bool) -> "FunctionSignature":
@@ -224,6 +236,8 @@ class FunctionSignature:
 
 
 ElemSignature = VariableSignature | FunctionSignature
+SignatureMap = dict[ProjectPath, ElemSignature]
+
 
 from functools import cached_property
 
@@ -813,6 +827,126 @@ class ModuleAnlaysis:
                     cls.superclasses.append(
                         QualifiedName(b.value.value, QualifiedNameSource.LOCAL)
                     )
+
+
+@dataclass
+class SingatureTypePrediction:
+    predicted: PythonType
+    expected: PythonType
+    path: ProjectPath
+    index: int
+    cat: AnnotCat
+
+
+class SignatureErrorAnalysis:
+    accuracies: dict[str, Any]
+    errors: dict[str, list[SingatureTypePrediction]]
+
+    def __init__(
+        self,
+        predictions: dict[str, SignatureMap],
+        labels: dict[str, SignatureMap],
+        metric: AccuracyMetric,
+        error_on_mismatched_signature: bool = False,
+    ):
+        sig_preds = list[SingatureTypePrediction]()
+        pred_project = list[str]()
+        dummy_mod = cst.Module([])
+        n_labels = 0
+        n_skipped = 0
+        n_missing = [0]
+
+        def match_signatures(
+            project: str, path: ProjectPath, p_sig: ElemSignature, l_sig: ElemSignature
+        ):
+            def record_pair(
+                pred: cst.Annotation | None,
+                label: cst.Annotation | None,
+                cat: AnnotCat,
+                pos: int,
+            ):
+                if (
+                    label is None
+                    or (lt := parse_type_expr(dummy_mod, label.annotation)) is None
+                ):
+                    # no label available
+                    return
+                if pred is None:
+                    if error_on_mismatched_signature:
+                        raise RuntimeError(
+                            f"Prediction missing at position {pos}. label: {l_sig}, pred: {p_sig}"
+                        )
+                    else:
+                        n_missing[0] += 1
+                        return
+                assert pred is not None
+                assert (pt := parse_type_expr(dummy_mod, pred.annotation)) is not None
+                sig_pred = SingatureTypePrediction(
+                    predicted=pt,
+                    expected=lt,
+                    path=path,
+                    index=pos,
+                    cat=cat,
+                )
+                pred_project.append(project)
+                sig_preds.append(sig_pred)
+
+            match p_sig, l_sig:
+                case (VariableSignature(pa), VariableSignature(la, in_class=in_class)):
+                    cat = AnnotCat.ClassAtribute if in_class else AnnotCat.GlobalVar
+                    record_pair(pa, la, cat, 0)
+                case (
+                    FunctionSignature(p_params, p_return),
+                    FunctionSignature(l_params, l_return, in_class=in_class),
+                ):
+                    for i, n in enumerate(l_params.keys()):
+                        record_pair(
+                            p_params.get(n, None), l_params[n], AnnotCat.FuncArg, i
+                        )
+                    record_pair(p_return, l_return, AnnotCat.FuncReturn, len(l_params))
+                case _:
+                    raise RuntimeError(
+                        f"Mismatched signatures: label={l_sig}, pred={p_sig}"
+                    )
+
+        for project in labels:
+            l_map = labels[project]
+            p_map = predictions[project]
+            for path in l_map:
+                l_sig = l_map[path]
+                n_labels += l_sig.n_annotated()
+                if (p_sig := p_map.get(path)) is not None:
+                    try:
+                        match_signatures(project, path, p_sig, l_sig)
+                    except:
+                        print(f"In project: {project}, element: {path}")
+                        raise
+                else:
+                    n_skipped += l_sig.n_annotated()
+
+        incorrect_set = list[int]()
+        accs = type_accuracies(
+            [p.predicted for p in sig_preds],
+            [p.expected for p in sig_preds],
+            [p.cat for p in sig_preds],
+            [p.index for p in sig_preds],
+            metric,
+            output_incorrect_set=incorrect_set,
+        )
+        accs["n_label_types"] = n_labels
+        accs["n_skipped_types"] = n_skipped
+        accs["n_missing_types"] = n_missing[0]
+
+        self.accuracies = accs
+
+        all_errors: dict[str, list[SingatureTypePrediction]] = {
+            p: [] for p in predictions
+        }
+        for i in incorrect_set:
+            sig_pred = sig_preds[i]
+            all_errors[pred_project[i]].append(sig_pred)
+
+        self.errors = all_errors
 
 
 # -----------------------------------------------------------

@@ -6,9 +6,7 @@ import torch
 
 from .data import CtxArgs, src_to_chunks
 from .function_dataset import (
-    ElemSignature,
     SignatureMap,
-    check_predicted_signatures,
     ctx_modules_for_elem,
     mk_preamble,
     reformat_elems,
@@ -22,12 +20,13 @@ from .static_analysis import (
     PythonFunction,
     PythonProject,
     PythonVariable,
+    SignatureErrorAnalysis,
     UsageAnalysis,
     VariableSignature,
 )
 from .tokenized_src import PreprocessArgs, TokenSeq, tokenized_src_from_segs
 from .type_check import PythonType
-from .type_env import collect_user_annotations
+from .type_env import AccuracyMetric, collect_user_annotations
 from .utils import *
 
 
@@ -44,13 +43,12 @@ class EvalResult:
     predictions: list[RolloutPrediction]
     label_maps: list[SignatureMap]
 
-    def accuracies(
-        self, project: int | None, common_type_names: set[str]
-    ) -> dict[str, Any]:
-        if project is not None:
-            projects = [project]
-        else:
-            projects = range(len(self.predictions))
+    def error_analysis(
+        self,
+        project: int | str | None,
+        metric: AccuracyMetric,
+    ) -> SignatureErrorAnalysis:
+        projects = self.find_projects(project)
 
         label_maps = dict[str, SignatureMap]()
         pred_maps = dict[str, SignatureMap]()
@@ -60,13 +58,32 @@ class EvalResult:
             label_maps[pname] = self.label_maps[i]
             pred_maps[pname] = self.predictions[i].assignments
 
-        return check_predicted_signatures(
+        return SignatureErrorAnalysis(
             pred_maps,
             label_maps,
-            common_type_names,
-            allow_implicit_none=True,
+            metric,
             error_on_mismatched_signature=True,  # there shouldn't be any mismatch
         )
+
+    def find_projects(self, identifier: int | str | None) -> list[int]:
+        if isinstance(identifier, int):
+            projects = [identifier]
+        elif isinstance(identifier, str):
+            projects = [
+                i for i, p in enumerate(self.project_roots) if p.name == identifier
+            ]
+            assert projects, f"Project not found: {identifier}"
+        else:
+            projects = list(range(len(self.predictions)))
+        return projects
+
+    def inspect_elem(self, identifier: int | str | None, path: ProjectPath) -> None:
+        pid = self.find_projects(identifier)[0]
+
+        print("Expected: ", self.label_maps[pid][path])
+        print("Predicted:", self.predictions[pid].assignments[path])
+        print("Code:")
+        print(decode_tokens(self.predictions[pid].elem2inputs[path]["input_ids"]))
 
 
 @dataclass

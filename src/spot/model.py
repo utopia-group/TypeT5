@@ -17,7 +17,7 @@ from .data import (
     output_ids_as_types,
     preds_to_accuracies,
 )
-from .type_env import PythonType
+from .type_env import AccuracyMetric, PythonType
 from .utils import *
 
 
@@ -61,8 +61,8 @@ class DatasetPredResult(Generic[T1]):
     predictions: list[list[PythonType]]
     extra_info: list[T1] = field(default_factory=list)
 
-    def accuracies(self, common_type_names: set[str]) -> dict:
-        return preds_to_accuracies(self.predictions, self.chunks, common_type_names)
+    def accuracies(self, metric: AccuracyMetric) -> dict:
+        return preds_to_accuracies(self.predictions, self.chunks, metric)
 
     def group_by_repo(self) -> dict[Path, "DatasetPredResult[T1]"]:
         chunk2repo = list[Path]()
@@ -207,10 +207,7 @@ class ModelWrapper:
         model = cast(ModelSPOT, ModelSPOT.from_pretrained(str(path)))
         tokenizer = TokenizerSPOT.from_pretrained(str(path))
         args = pickle_load(path / "args.pkl")
-        if (path / "common_names.pkl").exists():
-            common_type_names = pickle_load(path / "common_names.pkl")
-        else:
-            common_type_names = set()
+        common_type_names = ModelWrapper.load_common_type_names(path)
         return ModelWrapper(
             model=model,
             tokenizer=tokenizer,
@@ -218,6 +215,13 @@ class ModelWrapper:
             common_type_names=common_type_names,
             monitor=TaskLoggingMonitor(path.name),
         )
+
+    @staticmethod
+    def load_common_type_names(model_path: Path) -> set[str]:
+        if (model_path / "common_names.pkl").exists():
+            return pickle_load(model_path / "common_names.pkl")
+        else:
+            return set()
 
     def eval_on_dataset(
         self,

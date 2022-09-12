@@ -797,5 +797,8 @@ def move_all_files(src_dir: Path, dest_dir: Path, glob_pattern: str = "**/*"):
 _EmptyModule = cst.Module([])
 
 
-def show_expr(expr: cst.CSTNode) -> str:
-    return f"cst'{_EmptyModule.code_for_node(expr)}'"
+def show_expr(expr: cst.CSTNode, quoted: bool=True) -> str:
+    s = _EmptyModule.code_for_node(expr)
+    if quoted:
+        s = f"cst'{s}'"
+    return s

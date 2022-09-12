@@ -1,6 +1,4 @@
-from spot import PythonType
-from .type_check import parse_type_expr
-from .data import TokenizedSrcSet, type_accuracies
+from .data import TokenizedSrcSet
 from .static_analysis import (
     ElemSignature,
     FunctionSignature,
@@ -10,6 +8,7 @@ from .static_analysis import (
     PythonFunction,
     PythonProject,
     PythonVariable,
+    SignatureMap,
     UsageAnalysis,
     VariableSignature,
     remove_comments,
@@ -25,8 +24,6 @@ from .tokenized_src import (
 )
 from .type_env import AnnotCat, apply_annotations, collect_user_annotations
 from .utils import *
-
-SignatureMap = dict[ProjectPath, ElemSignature]
 
 
 def dataset_from_repos(
@@ -396,88 +393,3 @@ def reformat_elems(
     result = list(seq_flatten(stmt_groups))
     # hide empty lines in the type signature to make the checker happy
     return cast(list[cst.SimpleStatementLine | cst.BaseCompoundStatement], result)
-
-
-def check_predicted_signatures(
-    predictions: dict[str, SignatureMap],
-    labels: dict[str, SignatureMap],
-    common_type_names: set[str],
-    allow_implicit_none: bool = True,
-    error_on_mismatched_signature: bool = False,
-) -> dict[str, Any]:
-    pred_types = list[PythonType]()
-    label_types = list[PythonType]()
-    types_cat = list[AnnotCat]()
-    types_pos = list[int]()
-    dummy_mod = cst.Module([])
-    n_labels = 0
-    n_skipped = 0
-    n_missing = [0]
-
-    def match_signatures(p_sig: ElemSignature, l_sig: ElemSignature):
-        def record_pair(
-            pred: cst.Annotation | None,
-            label: cst.Annotation | None,
-            cat: AnnotCat,
-            pos: int,
-        ):
-            if (
-                label is None
-                or (lt := parse_type_expr(dummy_mod, label.annotation)) is None
-            ):
-                # no label available
-                return
-            if pred is None:
-                if error_on_mismatched_signature:
-                    raise RuntimeError(
-                        f"Prediction missing at position {pos}. label: {l_sig}, pred: {p_sig}"
-                    )
-                else:
-                    n_missing[0] += 1
-                    return
-            assert pred is not None
-            assert (pt := parse_type_expr(dummy_mod, pred.annotation)) is not None
-            label_types.append(lt)
-            pred_types.append(pt)
-            types_cat.append(cat)
-            types_pos.append(pos)
-
-        match p_sig, l_sig:
-            case (VariableSignature(pa), VariableSignature(la, in_class=in_class)):
-                cat = AnnotCat.ClassAtribute if in_class else AnnotCat.GlobalVar
-                record_pair(pa, la, cat, 0)
-            case (
-                FunctionSignature(p_params, p_return),
-                FunctionSignature(l_params, l_return, in_class=in_class),
-            ):
-                for i, n in enumerate(l_params.keys()):
-                    record_pair(p_params.get(n, None), l_params[n], AnnotCat.FuncArg, i)
-                record_pair(p_return, l_return, AnnotCat.FuncReturn, len(l_params))
-
-    for project in labels:
-        l_map = labels[project]
-        p_map = predictions[project]
-        for path in l_map:
-            l_sig = l_map[path]
-            n_labels += l_sig.n_annotated()
-            if (p_sig := p_map.get(path)) is not None:
-                try:
-                    match_signatures(p_sig, l_sig)
-                except:
-                    print(f"In project: {project}, element: {path}")
-                    raise
-            else:
-                n_skipped += l_sig.n_annotated()
-
-    accs = type_accuracies(
-        pred_types,
-        label_types,
-        types_cat,
-        types_pos,
-        common_type_names,
-        allow_implicit_none=allow_implicit_none,
-    )
-    accs["n_label_types"] = n_labels
-    accs["n_skipped_types"] = n_skipped
-    accs["n_missing_types"] = n_missing[0]
-    return accs

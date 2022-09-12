@@ -1,11 +1,9 @@
-import logging
-import math
+import copy
 import multiprocessing
 import pickle
 import shutil
 import subprocess
 import warnings
-import copy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import *
@@ -14,11 +12,9 @@ import dateparser
 from datasets import Dataset
 
 from .tokenized_src import *
-from .type_check import (
-    TypeCheckArgs,
-    remove_top_optional,
-)
+from .type_check import TypeCheckArgs
 from .type_env import (
+    AccuracyMetric,
     AnnotCat,
     AnnotInfo,
     AnnotPath,
@@ -29,6 +25,7 @@ from .type_env import (
     normalize_type,
     parse_type_expr,
     parse_type_from_ast,
+    type_accuracies,
 )
 from .utils import *
 
@@ -1079,85 +1076,10 @@ def R1_srcs_from_preds(
     )
 
 
-def type_accuracies(
-    pred_types: Sequence[PythonType],
-    label_types: Sequence[PythonType],
-    types_cat: Sequence[AnnotCat],
-    types_pos: Sequence[int],
-    common_type_names: set[str],
-    normalize_types=True,
-    allow_implicit_none=True,
-    crash_on_type_mask=True,
-) -> dict[str, Any]:
-    assert_eq(len(pred_types), len(label_types), len(types_cat), len(types_pos))
-
-    if crash_on_type_mask:
-        if PythonType.from_name(SpecialNames.TypeMask) in label_types:
-            raise RuntimeError("TypeMask found in label types.")
-
-    def is_common_type(t: PythonType) -> bool:
-        return t.head_name() in common_type_names and all(map(is_common_type, t.args))
-
-    if normalize_types:
-        pred_types = [normalize_type(ty) for ty in pred_types]
-        label_types = [normalize_type(ty) for ty in label_types]
-
-    if allow_implicit_none:
-        pred_types = [remove_top_optional(t) for t in pred_types]
-        label_types = [remove_top_optional(t) for t in label_types]
-
-    def i_to_range(i):
-        if i == 0:
-            return range(0, 1)
-        p = int(math.log(i, 2))
-        return range(2**p, 2 ** (p + 1))
-
-    def ast_size(ty: PythonType) -> int:
-        return 1 + sum(ast_size(a) for a in ty.args)
-
-    def ast_overlap(ty1: PythonType, ty2: PythonType) -> int:
-        if ty1.head != ty2.head:
-            return 0
-        return 1 + sum(ast_overlap(a1, a2) for a1, a2 in zip(ty1.args, ty2.args))
-
-    full_acc = GroupedAccCounter[None]()
-    partial_acc = GroupedAccCounter[None]()
-    acc_by_cat = GroupedAccCounter[AnnotCat]()
-    acc_by_pos = GroupedAccCounter[range]()
-    acc_by_common = GroupedAccCounter[bool]()
-
-    for p, l, cat, pos in zip(pred_types, label_types, types_cat, types_pos):
-        is_correct = p == l
-        full_acc.count(None, is_correct, 1)
-        partial_acc.count(None, p.head_name() == l.head_name(), 1)
-        acc_by_cat.count(cat, is_correct, 1)
-        acc_by_pos.count(i_to_range(pos), is_correct, 1)
-        if common_type_names is not None:
-            acc_by_common.count(is_common_type(l), is_correct, 1)
-
-    acc_by_common = acc_by_common.grouped_accs(key=lambda x: "common" if x else "rare")
-    return {
-        "partial_acc": partial_acc.overall_acc(),
-        "full_acc": full_acc.overall_acc(),
-        "full_acc_by_common": acc_by_common,
-        "full_acc_by_cat": acc_by_cat.grouped_accs(
-            key=lambda x: x.name, sort_by=lambda x: x.value
-        ),
-        "full_acc_by_pos": acc_by_pos.grouped_accs(sort_by=lambda x: x.start),
-        "avg_label_size": safe_div(
-            sum(ast_size(l) for l in label_types), len(label_types)
-        ),
-        "avg_pred_size": safe_div(
-            sum(ast_size(p) for p in pred_types), len(pred_types)
-        ),
-    }
-
-
 def preds_to_accuracies(
     preds: Sequence[Sequence[PythonType]],
     dataset: ChunkedDataset,
-    common_type_names: set[str],
-    normalize_types=True,
+    metric: AccuracyMetric,
 ):
     cats = [an.cat for info in dataset.chunks_info for an in info.annots_info]
     labels = [ty for info in dataset.chunks_info for ty in info.types]
@@ -1167,17 +1089,14 @@ def preds_to_accuracies(
         labels,
         cats,
         poses,
-        common_type_names,
-        normalize_types=normalize_types,
-        allow_implicit_none=True,
+        metric=metric,
     )
 
 
 def src_preds_to_accuracies(
     preds: Sequence[dict[int, PythonType]] | Sequence[Sequence[PythonType]],
     srcs: Sequence[TokenizedSrc],
-    common_type_names,
-    normalize_types=True,
+    metric: AccuracyMetric,
 ):
     pred_types = list[PythonType]()
     cats, labels, poses = [], [], []
@@ -1196,9 +1115,7 @@ def src_preds_to_accuracies(
         labels,
         cats,
         poses,
-        common_type_names,
-        normalize_types=normalize_types,
-        allow_implicit_none=True,
+        metric=metric,
     )
 
 

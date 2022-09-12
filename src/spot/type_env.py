@@ -315,6 +315,115 @@ to_annotate: {self.to_annot}
 """
 
 
+@dataclass
+class AccuracyMetric:
+    common_type_names: set[str]
+    normalize_types: bool = True
+    allow_implicit_none: bool = True
+    filter_none_any: bool = True
+    match_base_only: bool = False
+    name: str = "acc"
+
+    @staticmethod
+    def default_metrics(common_type_names: set[str]):
+        return [
+            AccuracyMetric(
+                common_type_names,
+                allow_implicit_none=False,
+                filter_none_any=False,
+                name="strict_acc",
+            ),
+            AccuracyMetric(common_type_names),
+            AccuracyMetric(common_type_names, match_base_only=True, name="base_acc"),
+        ]
+
+
+def type_accuracies(
+    pred_types: Sequence[PythonType],
+    label_types: Sequence[PythonType],
+    types_cat: Sequence[AnnotCat],
+    types_pos: Sequence[int],
+    metric: AccuracyMetric,
+    crash_on_type_mask=True,
+    output_incorrect_set: list[int] | None = None,
+) -> dict[str, Any]:
+    assert_eq(len(pred_types), len(label_types), len(types_cat), len(types_pos))
+
+    if crash_on_type_mask:
+        if PythonType.from_name(SpecialNames.TypeMask) in label_types:
+            raise RuntimeError("TypeMask found in label types.")
+
+    def is_common_type(t: PythonType) -> bool:
+        return t.head_name() in metric.common_type_names and all(
+            map(is_common_type, t.args)
+        )
+
+    if metric.normalize_types:
+        pred_types = [normalize_type(ty) for ty in pred_types]
+        label_types = [normalize_type(ty) for ty in label_types]
+
+    if metric.allow_implicit_none:
+        pred_types = [remove_top_optional(t) for t in pred_types]
+        label_types = [remove_top_optional(t) for t in label_types]
+        for l in label_types:
+            assert not l.is_optional(), f"Label type: {l}"
+
+    if metric.filter_none_any:
+        none_any = {"None", "Any"}
+        filtered_ids = [
+            i for i, t in enumerate(label_types) if t.head_name() not in none_any
+        ]
+        pred_types = [pred_types[i] for i in filtered_ids]
+        label_types = [label_types[i] for i in filtered_ids]
+    else:
+        filtered_ids = range(len(label_types))
+
+    if metric.match_base_only:
+        pred_types = [PythonType.from_name(t.head_name()) for t in pred_types]
+        label_types = [PythonType.from_name(t.head_name()) for t in label_types]
+
+    def i_to_range(i):
+        if i == 0:
+            return range(0, 1)
+        p = int(math.log(i, 2))
+        return range(2**p, 2 ** (p + 1))
+
+    def ast_size(ty: PythonType) -> int:
+        return 1 + sum(ast_size(a) for a in ty.args)
+
+    acc_by_cat = GroupedAccCounter[AnnotCat]()
+    # acc_by_pos = GroupedAccCounter[range]()
+    acc_by_common = GroupedAccCounter[bool]()
+
+    for i, p, l, cat, pos in zip(
+        range(len(pred_types)), pred_types, label_types, types_cat, types_pos
+    ):
+        is_correct = p == l
+        acc_by_cat.count(cat, is_correct, 1)
+        # acc_by_pos.count(i_to_range(pos), is_correct, 1)
+        if metric.common_type_names is not None:
+            acc_by_common.count(is_common_type(l), is_correct, 1)
+        if not is_correct and output_incorrect_set is not None:
+            output_incorrect_set.append(filtered_ids[i])
+
+    acc_by_common = acc_by_common.grouped_accs(key=lambda x: "common" if x else "rare")
+    metric_name = metric.name
+    return {
+        metric_name: acc_by_cat.overall_acc(),
+        f"{metric_name}_by_common": acc_by_common,
+        f"{metric_name}_by_cat": acc_by_cat.grouped_accs(
+            key=lambda x: x.name, sort_by=lambda x: x.value
+        ),
+        # f"{metric_name}_by_pos": acc_by_pos.grouped_accs(sort_by=lambda x: x.start),
+        f"{metric_name}_label_size": safe_div(
+            sum(ast_size(l) for l in label_types), len(label_types)
+        ),
+        f"{metric_name}_pred_size": safe_div(
+            sum(ast_size(p) for p in pred_types), len(pred_types)
+        ),
+    }
+
+
 class SelectAnnotations:
     @staticmethod
     def select_annotated(paths: list) -> list[AnnotInfo]:

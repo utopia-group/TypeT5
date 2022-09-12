@@ -7,14 +7,16 @@ import os
 from typing import *
 
 import torch
-from termcolor import colored
 import wandb
-
 from spot.data import GitRepo
 from spot.function_dataset import data_project_from_dir
 from spot.model import ModelWrapper
+from ..src.spot.type_env import AccuracyMetric
 from spot.utils import (
     assert_eq,
+    get_dataset_dir,
+    get_eval_dir,
+    get_model_dir,
     pickle_dump,
     pmap,
     pretty_show_dict,
@@ -23,7 +25,7 @@ from spot.utils import (
     write_file,
 )
 from spot.visualization import string_to_html
-from spot.utils import get_model_dir, get_dataset_dir, get_eval_dir
+from termcolor import colored
 
 os.chdir(proj_root())
 
@@ -67,7 +69,6 @@ assert len(test_projects) > 0
 
 from spot.function_decoding import (
     DecodingOrders,
-    EvalResult,
     PreprocessArgs,
     RolloutCtx,
 )
@@ -89,6 +90,7 @@ decode_orders = {
     "caller2callee": DecodingOrders.Caller2Callee(),
 }
 
+metrics = AccuracyMetric.default_metrics(model.common_type_names)
 with run_long_task("Evaluating different decoding strategy"):
     results_dir = get_eval_dir(dataset_name, model_name)
     results_dir.mkdir(exist_ok=True, parents=True)
@@ -100,7 +102,7 @@ with run_long_task("Evaluating different decoding strategy"):
         dir=str(results_dir),
     )
 
-    results = dict[str, dict]()
+    name2accs = dict[str, dict]()
     for oname, order in decode_orders.items():
         print(f"Evaluating decoding strategy: {oname}")
         pre_args = PreprocessArgs()
@@ -115,8 +117,10 @@ with run_long_task("Evaluating different decoding strategy"):
             )
         )
         pickle_dump(results_dir / f"{oname}-EvalResult.pkl", evalr)
-        results[oname] = evalr.accuracies(None, model.common_type_names)
-        accs_str = pretty_show_dict(results[oname])
+        name2accs[oname] = {
+            m.name: evalr.error_analysis(None, m).accuracies for m in metrics
+        }
+        accs_str = pretty_show_dict(name2accs[oname])
         write_file(results_dir / f"{oname}-accuracy.txt", accs_str)
         wandb.log({f"test/{oname}": wandb_string(accs_str)})
         print(f"========== {oname} ===========")
@@ -128,17 +132,17 @@ import prettytable as pt
 from prettytable import PrettyTable
 
 results_table = PrettyTable()
-results_table.field_names = ["order", "full acc", "partial acc"]
+results_table.field_names = ["order", *(m.name for m in metrics)]
 results_table.align = "r"
 results_table.set_style(pt.SINGLE_BORDER)
 results_table.float_format = ".4"
 
 for oname, order in decode_orders.items():
-    accs = results[oname]
-    results_table.add_row([oname, accs["full_acc"].acc, accs["partial_acc"].acc])
+    accs = name2accs[oname]
+    results_table.add_row([oname, *(accs[m.name].acc for m in metrics)])
 
 print(results_table)
 write_file(results_dir / "comparison.txt", results_table.get_string())
 
-acc_counts = {oname: accs["full_acc"].n_total for oname, accs in results.items()}
+acc_counts = {oname: accs["acc"].n_total for oname, accs in name2accs.items()}
 assert_eq(*acc_counts.values(), extra_message=lambda: f"Accuracy counts: {acc_counts}")
