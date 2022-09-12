@@ -319,6 +319,10 @@ class PythonProject:
     symlinks: dict[ModuleName, ModuleName]
     module2src_file: dict[ModuleName, Path]
 
+    @property
+    def name(self):
+        return self.root_dir.name
+
     def get_elem_location(self, path: ProjectPath) -> tuple[Path, CodeRange]:
         """Note that the line nubmers may differ from the orginal source file
         if there are code transformations when creating the Project. You can
@@ -933,7 +937,6 @@ class SignatureErrorAnalysis:
             metric,
             output_incorrect_set=incorrect_set,
         )
-        accs["n_label_types"] = n_labels
         accs["n_skipped_types"] = n_skipped
         accs["n_missing_types"] = n_missing[0]
 

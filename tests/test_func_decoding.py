@@ -31,35 +31,35 @@ def f(x, y: int=3, *, v=3, **kwargs) -> int:
     sig = FunctionSignature.from_function(f, False)
 
     new_sig = copy.deepcopy(sig)
-    new_sig.set_annot_(0, cst.Annotation(cst.parse_expression("list[int]")))
+    new_sig.params["x"] = cst.Annotation(cst.parse_expression("list[int]"))
     assert (
         "def f(x: list[int], y: int=3, *, v=3, **kwargs) -> int"
         in cst.Module([new_sig.apply(f)]).code
     )
 
     new_sig = copy.deepcopy(sig)
-    new_sig.set_annot_(1, cst.Annotation(cst.parse_expression("list[int]")))
+    new_sig.params["y"] = cst.Annotation(cst.parse_expression("list[int]"))
     assert (
         "def f(x, y: list[int]=3, *, v=3, **kwargs) -> int"
         in cst.Module([new_sig.apply(f)]).code
     )
 
     new_sig = copy.deepcopy(sig)
-    new_sig.set_annot_(2, cst.Annotation(cst.parse_expression("list[int]")))
+    new_sig.params["v"] = cst.Annotation(cst.parse_expression("list[int]"))
     assert (
         "def f(x, y: int=3, *, v: list[int]=3, **kwargs) -> int"
         in cst.Module([new_sig.apply(f)]).code
     )
 
     new_sig = copy.deepcopy(sig)
-    new_sig.set_annot_(3, cst.Annotation(cst.parse_expression("list[int]")))
+    new_sig.params["kwargs"] = cst.Annotation(cst.parse_expression("list[int]"))
     assert (
         "def f(x, y: int=3, *, v=3, **kwargs: list[int]) -> int"
         in cst.Module([new_sig.apply(f)]).code
     )
 
     new_sig = copy.deepcopy(sig)
-    new_sig.set_annot_(4, cst.Annotation(cst.parse_expression("list[int]")))
+    new_sig.returns = cst.Annotation(cst.parse_expression("list[int]"))
     assert (
         "def f(x, y: int=3, *, v=3, **kwargs) -> list[int]"
         in cst.Module([new_sig.apply(f)]).code

@@ -11,7 +11,7 @@ import wandb
 from spot.data import GitRepo
 from spot.function_dataset import data_project_from_dir
 from spot.model import ModelWrapper
-from ..src.spot.type_env import AccuracyMetric
+from spot.type_env import AccuracyMetric
 from spot.utils import (
     assert_eq,
     get_dataset_dir,

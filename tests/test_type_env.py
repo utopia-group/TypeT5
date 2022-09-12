@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from spot.static_analysis import FunctionSignature, mask_types
 from spot.tokenized_src import PreprocessArgs
-from spot.type_check import MypyResult, PythonType
+from spot.type_check import MypyResult, PythonType, remove_top_optional
 
 from spot.type_env import (
     AnnotCat,
@@ -162,6 +162,12 @@ def test_type_normalization():
         ta = parse_type_str(a)
         tb = parse_type_str(b)
         assert normalize_type(ta) != normalize_type(tb)
+
+    dict_ex = PythonType.from_str("Dict[Any, Any] | None")
+    assert remove_top_optional(normalize_type(dict_ex)) == PythonType.from_name("Dict")
+
+    dict2 = PythonType.from_str("Dict[str, Any]")
+    assert normalize_type(dict2) == dict2
 
 
 import shutil

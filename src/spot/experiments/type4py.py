@@ -81,7 +81,7 @@ class Type4PyResponseParser:
 def run_type4py_request(
     code: str, module: ModuleName
 ) -> dict[ProjectPath, ElemSignature] | str:
-    res = requests.post("https://type4py.com/api/predict?tc=0", code).json()
+    res = requests.post("https://type4py.com/api/predict?tc=0", code.encode()).json()
     if res["response"] is None:
         return res["error"]
     return Type4PyResponseParser(module).parse(res)
@@ -159,35 +159,41 @@ class Type4PyEvalResult:
     label_maps: dict[str, SignatureMap]
 
 
-def eval_type4py_on_project(
-    project: PythonProject,
+def eval_type4py_on_projects(
+    projects: list[PythonProject],
     max_workers: int = 4,
 ) -> Type4PyEvalResult:
+    name2project = {p.name: p for p in projects}
     module_srcs = {
-        name: remove_newer_syntax(m.tree).code for name, m in project.modules.items()
+        (project.name, name): remove_newer_syntax(m.tree).code
+        for project in projects
+        for name, m in project.modules.items()
     }
     model_outputs = pmap(
         run_type4py_request,
         list(module_srcs.values()),
-        list(module_srcs.keys()),
+        [mname for pname, mname in module_srcs.keys()],
         desc="Calling Type4Py",
         max_workers=max_workers,
     )
 
-    label_signatures = {e.path: e.get_signature() for e in project.all_elems()}
+    label_signatures: dict[str, SignatureMap] = {
+        project.name: {e.path: e.get_signature() for e in project.all_elems()}
+        for project in projects
+    }
 
-    pred_signatures = dict[ProjectPath, ElemSignature]()
-    for m, o in zip(module_srcs.keys(), model_outputs):
+    pred_signatures: dict[str, SignatureMap] = {n: dict() for n in label_signatures}
+    for (pname, mname), o in zip(module_srcs.keys(), model_outputs):
         if isinstance(o, str):
-            if list(project.modules[m].all_elements()):
+            if list(name2project[pname].modules[mname].all_elements()):
                 # only warn for non-empty modules
-                logging.warning(f"In module {m}, Type4Py errored: {o}")
+                logging.warning(
+                    f"In project {pname} module {mname}, Type4Py errored: {o}"
+                )
         else:
-            pred_signatures.update(o)
-
-    proj_name = project.root_dir.name
+            pred_signatures[pname].update(o)
 
     return Type4PyEvalResult(
-        pred_maps={proj_name: pred_signatures},
-        label_maps={proj_name: label_signatures},
+        pred_maps=pred_signatures,
+        label_maps=label_signatures,
     )

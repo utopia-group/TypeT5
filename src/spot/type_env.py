@@ -324,6 +324,15 @@ class AccuracyMetric:
     match_base_only: bool = False
     name: str = "acc"
 
+    def process_type(self, t: PythonType) -> PythonType:
+        if self.normalize_types:
+            t = normalize_type(t)
+        if self.allow_implicit_none:
+            t = remove_top_optional(t)
+        if self.match_base_only:
+            t = PythonType.from_name(t.head_name())
+        return t
+
     @staticmethod
     def default_metrics(common_type_names: set[str]):
         return [
@@ -358,35 +367,20 @@ def type_accuracies(
             map(is_common_type, t.args)
         )
 
-    if metric.normalize_types:
-        pred_types = [normalize_type(ty) for ty in pred_types]
-        label_types = [normalize_type(ty) for ty in label_types]
-
-    if metric.allow_implicit_none:
-        pred_types = [remove_top_optional(t) for t in pred_types]
-        label_types = [remove_top_optional(t) for t in label_types]
-        for l in label_types:
-            assert not l.is_optional(), f"Label type: {l}"
+    pred_types = list(map(metric.process_type, pred_types))
+    label_types = list(map(metric.process_type, label_types))
 
     if metric.filter_none_any:
         none_any = {"None", "Any"}
         filtered_ids = [
             i for i, t in enumerate(label_types) if t.head_name() not in none_any
         ]
+        n_filtered = len(label_types) - len(filtered_ids)
         pred_types = [pred_types[i] for i in filtered_ids]
         label_types = [label_types[i] for i in filtered_ids]
     else:
         filtered_ids = range(len(label_types))
-
-    if metric.match_base_only:
-        pred_types = [PythonType.from_name(t.head_name()) for t in pred_types]
-        label_types = [PythonType.from_name(t.head_name()) for t in label_types]
-
-    def i_to_range(i):
-        if i == 0:
-            return range(0, 1)
-        p = int(math.log(i, 2))
-        return range(2**p, 2 ** (p + 1))
+        n_filtered = 0
 
     def ast_size(ty: PythonType) -> int:
         return 1 + sum(ast_size(a) for a in ty.args)
@@ -421,6 +415,7 @@ def type_accuracies(
         f"{metric_name}_pred_size": safe_div(
             sum(ast_size(p) for p in pred_types), len(pred_types)
         ),
+        f"{metric_name}_ignored_labels": n_filtered,
     }
 
 
