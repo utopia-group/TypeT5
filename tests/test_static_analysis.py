@@ -94,6 +94,48 @@ from . import E
     }
 
 
+def test_inner_classes():
+    code1 = """
+# file1
+x = 1
+
+class A:
+    x: list
+    class B1:
+        x: float
+
+        def __init__(self):
+            self.x = 1
+        
+
+    class B2:
+        x: str
+
+        def __init__(self):
+            self.x = 2
+
+        class A:
+            x: int
+
+            def f(self):
+                return A.B1()
+
+"""
+    project = project_from_code({"file1": code1})
+    m = project.modules["file1"]
+
+    assert set(c.path.path for c in m.all_classes()) == {"A", "A.B1", "A.B2", "A.B2.A"}
+
+    assert sum(1 for _ in m.all_vars()) == 5
+    assert sum(1 for _ in m.all_funcs()) == 3
+
+    analysis = UsageAnalysis(project)
+
+    analysis.assert_usages("file1/A.B1.__init__", ("file1/A.B1.x", True))
+    analysis.assert_usages("file1/A.B2.__init__", ("file1/A.B2.x", True))
+    analysis.assert_usages("file1/A.B2.A.f", ("file1/A.B1.__init__", True))
+
+
 def test_light_stub_gen():
     code = """
 import typing

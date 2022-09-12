@@ -248,7 +248,9 @@ class PythonClass:
     path: ProjectPath
     attributes: dict[str, PythonVariable]
     methods: dict[str, PythonFunction]
+    subclasses: dict[str, "PythonClass"]
     tree: cst.ClassDef
+    parent_class: ProjectPath | None
     superclasses: list[QualifiedName] | None = None
 
     def __repr__(self):
@@ -267,6 +269,12 @@ class PythonClass:
                 if "NamedTuple" in sc.name.split("."):
                     return True
         return False
+
+    def all_elements(self) -> Generator[PythonElem, None, None]:
+        yield from self.attributes.values()
+        yield from self.methods.values()
+        for c in self.subclasses.values():
+            yield from c.all_elements()
 
 
 @dataclass
@@ -292,21 +300,25 @@ class PythonModule:
         return f"PythonModule(n_functions={len(self.functions)}, n_classes={len(self.classes)})"
 
     def all_funcs(self) -> Generator[PythonFunction, None, None]:
-        yield from self.functions
-        for c in self.classes:
-            yield from c.methods.values()
+        return (e for e in self.all_elements() if isinstance(e, PythonFunction))
 
     def all_vars(self) -> Generator[PythonVariable, None, None]:
-        yield from self.global_vars
-        for c in self.classes:
-            yield from c.attributes.values()
+        return (e for e in self.all_elements() if isinstance(e, PythonVariable))
 
     def all_elements(self) -> Generator[PythonElem, None, None]:
         yield from self.global_vars
         yield from self.functions
         for c in self.classes:
-            yield from c.attributes.values()
-            yield from c.methods.values()
+            yield from c.all_elements()
+
+    def all_classes(self) -> Generator[PythonClass, None, None]:
+        def rec(c: PythonClass) -> Generator[PythonClass, None, None]:
+            yield c
+            for sc in c.subclasses.values():
+                yield from rec(sc)
+
+        for c in self.classes:
+            yield from rec(c)
 
     def mask_types(self) -> "PythonModule":
         return PythonModule.from_cst(mask_types(self.tree), self.name)
@@ -608,7 +620,9 @@ class UsageAnalysis:
 
         self.path2elem = {v.path: v for v in project.all_elems()}
         self.path2class = {
-            cls.path: cls for mod in project.modules.values() for cls in mod.classes
+            cls.path: cls
+            for mod in project.modules.values()
+            for cls in mod.all_classes()
         }
 
         # add mapping for star imports
@@ -635,7 +649,7 @@ class UsageAnalysis:
         # add elements from parents to subclass
         for mname in self.sorted_modules:
             mod = project.modules[mname]
-            for cls in mod.classes:
+            for cls in mod.all_classes():
                 path_prefix = ProjectPath(mname, cls.name)
                 bases = not_none(cls.superclasses)
                 parents = [
@@ -731,8 +745,8 @@ class UsageAnalysis:
                         # method fuzzy match case 1
                         yield from gen_class_usages(m)
                         break
-                    case [cls, _, "<locals>", "self", m]:
-                        segs = [cls, m]
+                    case [*prefix, cls, _, "<locals>", "self", m]:
+                        segs = [*prefix, cls, m]
 
                 callee = ProjectPath(mname, ".".join(segs))
                 if callee in self.path2class:
@@ -824,7 +838,7 @@ class ModuleAnlaysis:
         return result
 
     def udpate_superclasses_(self):
-        for cls in self.module.classes:
+        for cls in self.module.all_classes():
             cls.superclasses = list()
             for b in cls.tree.bases:
                 if b.value in self.node2qnames and self.node2qnames[b.value]:
@@ -976,24 +990,37 @@ class PythonModuleBuilder(cst.CSTVisitor):
 
         self.module = wrapper.module
         self.module_name = module_name
+        self.module_base = ProjectPath(self.module_name, "")
 
         self.functions = dict[str, PythonFunction]()
         self.global_vars = dict[str, PythonVariable]()
         self.classes = dict[str, PythonClass]()
-        self.current_class: PythonClass | None = None
+        self.class_stack = list[PythonClass]()
         self.visit_stack = [_VisitType.Root]
         self.imported_modules = set[str]()
         self.defined_symbols = dict[str, ProjectPath]()
         self.elem2pos = dict[ModulePath, CodeRange]()
 
-    def _record_elem(
-        self, e: PythonElem, cls: PythonClass | None, location_node: cst.CSTNode
-    ):
+    @property
+    def current_class(self) -> PythonClass | None:
+        return self.class_stack[-1] if self.class_stack else None
+
+    @property
+    def current_path(self):
+        if self.current_class is not None:
+            return self.current_class.path
+        else:
+            return self.module_base
+
+    def _record_elem(self, e: PythonElem, location_node: cst.CSTNode):
+        cls = self.current_class
         vars = cls.attributes if cls else self.global_vars
         funcs = cls.methods if cls else self.functions
+        classes = cls.subclasses if cls else self.classes
         is_new_def = False
+
+        classes.pop(e.name, None)
         if cls is None:
-            self.classes.pop(e.name, None)
             self.defined_symbols[e.name] = e.path
         match e:
             case PythonFunction(n):
@@ -1037,41 +1064,46 @@ class PythonModuleBuilder(cst.CSTVisitor):
                 case cst.Name("overload") | cst.Attribute(attr=cst.Name("overload")):
                     # ignore overload signatures
                     return False
+                # todo: record fixtures here
 
         name = node.name.value
-        path = self.current_class.name + "." + name if self.current_class else name
         func = PythonFunction(
             name=node.name.value,
-            path=ProjectPath(self.module_name, path),
+            path=self.current_path.append(name),
             tree=node,
             parent_class=self.current_class.path if self.current_class else None,
         )
-        self._record_elem(func, self.current_class, node)
+        self._record_elem(func, node)
 
     def leave_FunctionDef(self, node) -> None:
         assert self.visit_stack[-1] == _VisitType.Function
         self.visit_stack.pop()
 
     def visit_ClassDef(self, node: cst.ClassDef):
-        self.visit_stack.append(_VisitType.Class)
-        if self.current_class is not None:
-            return False  # skip inner classes all together
+        parent_type = self.visit_stack[-1]
+        parent_cls = self.current_class
         cls = PythonClass(
             name=node.name.value,
-            path=ProjectPath(self.module_name, node.name.value),
+            path=self.current_path.append(node.name.value),
             attributes=dict(),
             methods=dict(),
+            subclasses=dict(),
             tree=node,
+            parent_class=parent_cls.path if parent_cls else None,
         )
-        self.current_class = cls
-        self.global_vars.pop(cls.name, None)
-        self.functions.pop(cls.name, None)
-        self.classes[cls.name] = cls
-        self.defined_symbols[cls.name] = cls.path
+        if parent_cls:
+            parent_cls.subclasses[cls.name] = cls
+        self.visit_stack.append(_VisitType.Class)
+        self.class_stack.append(cls)
+        if parent_type == _VisitType.Root:
+            self.global_vars.pop(cls.name, None)
+            self.functions.pop(cls.name, None)
+            self.classes[cls.name] = cls
+            self.defined_symbols[cls.name] = cls.path
 
     def leave_ClassDef(self, node: cst.ClassDef):
         assert self.visit_stack[-1] == _VisitType.Class
-        self.current_class = None
+        self.class_stack.pop()
         self.visit_stack.pop()
 
     # record global_vars and class attributes
@@ -1094,7 +1126,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
                 # TODO: figure out how to move the annotation to class scope
                 var = PythonVariable(n, cls.path.append(n), cls_path, [])
         if var is not None:
-            self._record_elem(var, cls, node)
+            self._record_elem(var, node)
         return None
 
     # record global_vars and class attributes
@@ -1121,7 +1153,7 @@ class PythonModuleBuilder(cst.CSTVisitor):
                     # initialized/accessed inside methods
                     var = PythonVariable(n, cls.path.append(n), cls_path, [])
             if var is not None:
-                self._record_elem(var, cls, node)
+                self._record_elem(var, node)
 
     def visit_Import(self, node: cst.Import):
         for alias in node.names:
