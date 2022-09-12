@@ -308,11 +308,6 @@ def usage4():
         ("root.file1/C.s_method", True),
     )
 
-    # We should not cound decorator as a usage to avoid blowing up
-    analysis.assert_usages(
-        "root.file2/usage_dec",
-    )
-
     analysis.assert_usages(
         "root.file2/use_nonexist",
     )
@@ -375,6 +370,35 @@ def inc(x=Count):
     )
     analysis = UsageAnalysis(project)
     analysis.assert_usages("root.file6/inc", ("root.file6/Count", True))
+
+
+def test_annotation_suages():
+    code1 = """
+# root.file1
+
+Count = 0
+
+def annot1(f, x: int):
+    return f(x)
+
+def annot2(f):
+    return f
+
+@annot2
+@annot1(Count)
+def usage_f(x):
+    return x
+
+"""
+    project = project_from_code({"root.file1": code1})
+    analysis = UsageAnalysis(project)
+
+    analysis.assert_usages(
+        "root.file1/usage_f",
+        ("root.file1/Count", True),
+        ("root.file1/annot1", True),
+        ("root.file1/annot2", True),
+    )
 
 
 def test_attribute_analysis():

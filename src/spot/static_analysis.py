@@ -803,15 +803,18 @@ class ModuleAnlaysis:
         for e in self.module.all_elements():
             match e:
                 case PythonFunction():
-                    e.tree.body.visit(recorder)
-                    e.tree.params.visit(recorder)
+                    e.tree.visit(recorder)
+                    self_names = self.node2qnames[e.tree.name]
                 case PythonVariable():
+                    self_names = []
                     for a in e.assignments:
                         if a.value:
                             a.value.visit(recorder)
             # we only keep the first occurance of each qualified name to save space
             best_callee = dict[QualifiedName, tuple[bool, CodeRange]]()
             for span, qn, is_call in recorder.usages:
+                if qn in self_names:
+                    continue  # don't record self references
                 if qn not in best_callee or int(is_call) > int(best_callee[qn][0]):
                     best_callee[qn] = (is_call, span)
             for qn, (is_call, span) in best_callee.items():
@@ -1222,11 +1225,6 @@ class UsageRecorder(cst.CSTVisitor):
 
     def on_leave(self, node: cst.CSTNode) -> Optional[bool]:
         self.parents.pop()
-
-    # avoid visiting the following nodes
-    def visit_Decorator(self, node: cst.Decorator):
-        # do not count the calls in decorators
-        return False
 
     # avoid using type annotation to track usages
     def visit_Annotation(self, node: cst.Annotation):
