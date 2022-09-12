@@ -30,7 +30,7 @@ def dataset_from_repos(
     repos_root: Path,
     repos_paths: Iterable[Path],
     pre_args: PreprocessArgs,
-    max_line_width: int = 200,
+    max_line_width: int = 400,
     max_workers: int | None = None,
     tqdm_args: dict = {},
 ) -> "TokenizedSrcSet":
@@ -81,7 +81,7 @@ def wrap_main_code(code: str) -> str:
 
 def data_project_from_dir(
     root: Path,
-    max_line_width: int = 200,
+    max_line_width: int = 400,
     drop_comments: bool = True,
     file_filter: Callable[[Path], bool] = lambda p: True,
 ) -> PythonProject:
@@ -106,7 +106,7 @@ def data_project_from_dir(
 def repo_to_tk_srcs(
     repo: Path,
     pre_args: PreprocessArgs,
-    max_line_width: int = 200,
+    max_line_width: int = 400,
 ) -> list[TokenizedSrc]:
     proj = data_project_from_dir(
         repo, max_line_width=max_line_width, drop_comments=pre_args.drop_comments

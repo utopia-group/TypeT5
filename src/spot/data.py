@@ -671,7 +671,7 @@ class TokenizedSrcSet:
         preprocess_args: PreprocessArgs,
         max_workers: int | None = None,
         tqdm_args: dict = {},
-        max_line_width: int = 200,
+        max_line_width: int = 400,
     ) -> "TokenizedSrcSet":
         for r in repos_paths:
             assert r.is_dir(), f"Provided path {r} is not a directory."
