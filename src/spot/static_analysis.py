@@ -1331,20 +1331,23 @@ def is_type_lhs(target: cst.AssignTarget):
     return isinstance(target.target, cst.Name)
 
 
+_TypeDeclareRHS = {"TypeVar", "NamedTuple", "namedtuple"}
+
+
 def is_type_rhs(expr: cst.BaseExpression):
     # A type-declaring rhs can only be one of the following:
     # - a simple type, e.g., A = a.Foo
     # - a generic type, e.g., A = Foo[str, T]
     # - a type var, e.g., A = TypeVar("A")
+    # - a namedtuple, e.g., Foo = namedtuple('Foo', ['x', 'y'])
     match expr:
         case _ if is_access_chain(expr):
             return True
         case cst.Subscript(value=value):
             return is_access_chain(value)
         case cst.Call(
-            func=cst.Name(value="TypeVar")
-            | cst.Attribute(attr=cst.Name(value="TypeVar"))
-        ):
+            func=cst.Name(value=name) | cst.Attribute(attr=cst.Name(value=name))
+        ) if name in _TypeDeclareRHS:
             return True
         case _:
             return False
