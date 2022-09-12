@@ -103,7 +103,7 @@ def normalize_type_head(head: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def normalize_type(typ: PythonType) -> PythonType:
-    n_args = map(normalize_type, typ.args)
+    n_args = tuple(map(normalize_type, typ.args))
     if typ.is_union() or typ.is_optional():
         arg_set = set[PythonType]()
         if typ.is_optional():
@@ -121,10 +121,7 @@ def normalize_type(typ: PythonType) -> PythonType:
         # if all arguments are Any, we can drop them all
         n_args = tuple()
 
-    return PythonType(
-        normalize_type_head(typ.head),
-        tuple(n_args),
-    )
+    return PythonType(normalize_type_head(typ.head), n_args)
 
 
 def remove_top_optional(t: PythonType) -> PythonType:
@@ -476,4 +473,3 @@ def count_type_frequency(
         count_type(t)
 
     return counter
-
