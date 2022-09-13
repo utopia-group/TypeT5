@@ -69,7 +69,7 @@ class TrainingConfig(NamedTuple):
         return repr_modified_args(self, flatten=True)
 
     def get_model_name(self) -> str:
-        return "model-v5--" + repr_modified_args(self, flatten=True)
+        return "model-v6--" + repr_modified_args(self, flatten=True)
 
     def train_ctx_args(self) -> CtxArgs:
         return CtxArgs(

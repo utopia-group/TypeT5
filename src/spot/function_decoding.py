@@ -351,6 +351,19 @@ class DecodingOrders:
         def traverse_length(n_elems: int) -> int:
             return 2 * n_elems - 1
 
+    class RandomTwice(DecodingOrder):
+        """Perform random traversal twice."""
+
+        @staticmethod
+        def traverse(analysis: UsageAnalysis) -> list[ProjectPath]:
+            pass1 = DecodingOrders.RandomOrder.traverse(analysis)
+            pass2 = DecodingOrders.RandomOrder.traverse(analysis)
+            return pass1 + pass2
+
+        @staticmethod
+        def traverse_length(n_elems: int) -> int:
+            return 2 * n_elems
+
 
 def construct_model_inputs(
     main_mod: cst.Module,

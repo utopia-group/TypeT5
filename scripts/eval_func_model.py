@@ -8,7 +8,6 @@ from typing import *
 
 import torch
 import wandb
-from spot.data import GitRepo
 from spot.function_dataset import data_project_from_dir
 from spot.model import ModelWrapper
 from spot.type_env import AccuracyMetric
@@ -16,6 +15,7 @@ from spot.utils import (
     assert_eq,
     get_dataset_dir,
     get_eval_dir,
+    get_gpu_id,
     get_model_dir,
     pickle_dump,
     pmap,
@@ -38,9 +38,9 @@ def wandb_string(s: str):
 
 # experiment configurations
 
-gpu_id = 0
-# model_name = "model-v4--TrainingConfig(func_only=True, drop_env_types=False, left_margin=1536, preamble_size=768, right_margin=2048)"
-model_name = "model-v5--TrainingConfig(drop_env_types=False)"
+gpu_id = get_gpu_id(0)
+# model_name = "model-v5--TrainingConfig(drop_env_types=False)"
+model_name = "model-v6--TrainingConfig(drop_env_types=False)"
 dataset_name = "ManyTypes4Py"
 # dataset_name = "SPOT-src"
 experiment_name = dataset_name + ": " + model_name
@@ -69,6 +69,7 @@ assert len(test_projects) > 0
 
 from spot.function_decoding import (
     DecodingOrders,
+    EvalResult,
     PreprocessArgs,
     RolloutCtx,
 )
@@ -82,12 +83,13 @@ model.args.tokens_per_type = 16
 rctx = RolloutCtx(model=model)
 
 decode_orders = {
-    "no-neighbors": DecodingOrders.IndependentOrder(),
+    # "no-neighbors": DecodingOrders.IndependentOrder(),
     "non-incr": DecodingOrders.IndependentOrder(),
-    "random": DecodingOrders.RandomOrder(),
+    # "callee2caller": DecodingOrders.Callee2Caller(),
+    "random-twice": DecodingOrders.RandomTwice(),
     "double-traversal": DecodingOrders.DoubleTraversal(),
-    "callee2caller": DecodingOrders.Callee2Caller(),
-    "caller2callee": DecodingOrders.Caller2Callee(),
+    # "random": DecodingOrders.RandomOrder(),
+    # "caller2callee": DecodingOrders.Caller2Callee(),
 }
 
 metrics = AccuracyMetric.default_metrics(model.common_type_names)
@@ -102,7 +104,7 @@ with run_long_task("Evaluating different decoding strategy"):
         dir=str(results_dir),
     )
 
-    name2accs = dict[str, dict]()
+    evals = dict[str, EvalResult]()
     for oname, order in decode_orders.items():
         print(f"Evaluating decoding strategy: {oname}")
         pre_args = PreprocessArgs()
@@ -117,32 +119,32 @@ with run_long_task("Evaluating different decoding strategy"):
             )
         )
         pickle_dump(results_dir / f"{oname}-EvalResult.pkl", evalr)
-        name2accs[oname] = {
-            m.name: evalr.error_analysis(None, m).accuracies for m in metrics
-        }
-        accs_str = pretty_show_dict(name2accs[oname])
+        evals[oname] = evalr
+        accs = {m.name: evalr.error_analysis(None, m).accuracies for m in metrics}
+        accs_str = pretty_show_dict(accs)
         write_file(results_dir / f"{oname}-accuracy.txt", accs_str)
         wandb.log({f"test/{oname}": wandb_string(accs_str)})
         print(f"========== {oname} ===========")
         print(accs_str)
 
-import prettytable as pt
 
 # %%
 from prettytable import PrettyTable
+import prettytable as pt
 
+common_type_names = ModelWrapper.load_common_type_names(get_model_dir() / model_name)
 results_table = PrettyTable()
 results_table.field_names = ["order", *(m.name for m in metrics)]
 results_table.align = "r"
 results_table.set_style(pt.SINGLE_BORDER)
 results_table.float_format = ".4"
 
-for oname, order in decode_orders.items():
-    accs = name2accs[oname]
-    results_table.add_row([oname, *(accs[m.name].acc for m in metrics)])
+for oname in decode_orders:
+    accs = [
+        evals[oname].error_analysis(None, metric).accuracies[metric.name].acc
+        for metric in metrics
+    ]
+    results_table.add_row([oname, *accs])
 
 print(results_table)
 write_file(results_dir / "comparison.txt", results_table.get_string())
-
-acc_counts = {oname: accs["acc"].n_total for oname, accs in name2accs.items()}
-assert_eq(*acc_counts.values(), extra_message=lambda: f"Accuracy counts: {acc_counts}")

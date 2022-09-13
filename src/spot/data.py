@@ -766,15 +766,15 @@ def create_tokenized_srcsets(
                 n_train = len(repo_roots) // data_reduction
                 repo_roots = repo_roots[:n_train]
             if func_only:
-                src_data = fd.dataset_from_repos(base, repo_roots, pre_args)
+                tk_data = fd.dataset_from_repos(base, repo_roots, pre_args)
             else:
-                src_data = TokenizedSrcSet.from_repos(base, repo_roots, pre_args)
-            for s in src_data.all_srcs:
+                tk_data = TokenizedSrcSet.from_repos(base, repo_roots, pre_args)
+            for s in tk_data.all_srcs:
                 assert len(s.types) > 0, f"{s.file} has no labels."
-            tk_dataset[name] = src_data
-            with open(out_dir / f"{name}.pkl", "wb") as f:
-                pickle.dump(src_data, f)
-                print("Saved to:", out_dir)
+            tk_dataset[name] = tk_data
+            save_path = out_dir / f"{name}.pkl"
+            pickle_dump(save_path, tk_data)
+            print(f"Saved to {save_path}")
         assert tk_dataset, "Empty dataset."
 
 
@@ -1128,6 +1128,6 @@ def get_tk_dataset_name(
     reduction_tag = f"-reduction={data_reduction}" if data_reduction != 1 else ""
     pre_parts = repr_modified_args(pre_args)
     if func_only:
-        return f"func-{dataset}-v6{reduction_tag}-{pre_parts}"
+        return f"func-{dataset}-v7{reduction_tag}-{pre_parts}"
     else:
         return f"{dataset}-v5{reduction_tag}-{pre_parts}"

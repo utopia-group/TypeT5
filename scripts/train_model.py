@@ -5,6 +5,7 @@ from typing import *
 from spot.utils import (
     get_dataroot,
     get_eval_dir,
+    get_gpu_id,
     get_model_dir,
     proj_root,
 )
@@ -25,7 +26,7 @@ from spot.train import TrainingConfig, TypeCheckArgs
 from spot.tokenized_src import PreprocessArgs
 from termcolor import colored
 
-gpu_id = 0
+gpu_id = get_gpu_id(0)
 eval_only = False
 recreate_dataset = False
 
@@ -135,6 +136,7 @@ wrapper.to(device)
 
 from spot.utils import PickleCache
 from spot.visualization import pretty_print_dict
+from spot.type_env import AccuracyMetric
 
 bs_args = DecodingArgs(
     sampling_max_tokens=max_tokens_per_file,
@@ -151,7 +153,8 @@ r0_eval = eval_cache.cached(
     lambda: wrapper.eval_on_dataset(tk_dataset["test"]),
 )
 common_names = tk_dataset["train"].common_type_names()
-r0_accs = r0_eval.accuracies(common_names)
+metrics = AccuracyMetric.default_metrics(common_names)
+r0_accs = {m.name: r0_eval.accuracies(m) for m in metrics}
 pretty_print_dict(r0_accs)
 
 

@@ -340,7 +340,7 @@ class AccuracyMetric:
                 common_type_names,
                 allow_implicit_none=False,
                 filter_none_any=False,
-                name="strict_acc",
+                name="plain_acc",
             ),
             AccuracyMetric(common_type_names),
             AccuracyMetric(common_type_names, match_base_only=True, name="base_acc"),

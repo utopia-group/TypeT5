@@ -65,6 +65,14 @@ def get_config(key: str) -> Optional[str]:
     return get_config_dict().get(key)
 
 
+def get_gpu_id(default: int) -> int:
+    if (s := os.getenv("GPU_ID")) is not None:
+        return int(s)
+    else:
+        print("GPU_ID not set, using:", default)
+        return default
+
+
 def get_dataroot() -> Path:
     if (v := get_config("data_root")) is None:
         return proj_root()
@@ -797,7 +805,7 @@ def move_all_files(src_dir: Path, dest_dir: Path, glob_pattern: str = "**/*"):
 _EmptyModule = cst.Module([])
 
 
-def show_expr(expr: cst.CSTNode, quoted: bool=True) -> str:
+def show_expr(expr: cst.CSTNode, quoted: bool = True) -> str:
     s = _EmptyModule.code_for_node(expr)
     if quoted:
         s = f"cst'{s}'"
