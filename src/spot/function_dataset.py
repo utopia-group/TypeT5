@@ -69,14 +69,13 @@ def mk_preamble(
         preamble_segs.append(imports_part.code)
     if pre_args.stub_in_preamble:
         preamble_segs.append(stub_from_module(mod, lightweight=True).code)
-    preamble_segs.append("\n# Used:\n")
     preamble = "".join(preamble_segs)
     tokenized_preamble = DefaultTokenizer.encode(preamble, add_special_tokens=False)
     return preamble, tokenized_preamble
 
 
 def wrap_main_code(code: str) -> str:
-    return f"# Target:\n{code}# Users:\n"
+    return f"# Used above\n{code}# Users below\n"
 
 
 def data_project_from_dir(

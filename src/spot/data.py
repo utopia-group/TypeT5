@@ -262,8 +262,9 @@ def src_to_chunks_(
     bos_id, eos_id = not_none(tokenizer.bos_token_id), not_none(tokenizer.eos_token_id)
 
     if len(src.tokenized_preamble) > ctx_args.preamble_size:
-        preamble = src.tokenized_preamble[: ctx_args.preamble_size]
-        preamble[-1] = eos_id
+        # cut preamble at the start
+        preamble = src.tokenized_preamble[-ctx_args.preamble_size :]
+        preamble[0] = bos_id
     else:
         preamble = src.tokenized_preamble
     new_ctx_args = copy.deepcopy(ctx_args)
