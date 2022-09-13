@@ -2,7 +2,7 @@
 # project-level static analysis
 
 import copy
-from functools import lru_cache
+from functools import lru_cache, cached_property
 import enum
 
 from libcst import MetadataWrapper
@@ -101,6 +101,18 @@ ProjNamespace = dict[str, ProjectPath]
 #         return ProjectNamespace(self.children.set(name, path))
 
 
+def get_decorator_name(dec: cst.Decorator) -> str | None:
+    match dec.decorator:
+        case cst.Name(n):
+            return n
+        case cst.Attribute(attr=cst.Name(n)):
+            return n
+        case cst.Call(func=cst.Name(n) | cst.Attribute(attr=cst.Name(n))):
+            return n
+        case _:
+            return None
+
+
 @dataclass
 class PythonFunction:
     name: str
@@ -120,6 +132,27 @@ class PythonFunction:
 
     def get_signature(self) -> "FunctionSignature":
         return FunctionSignature.from_function(self.tree, self.parent_class is not None)
+
+    @cached_property
+    def is_fixture(self) -> bool:
+        for dec in self.tree.decorators:
+            if get_decorator_name(dec) == "fixture":
+                return True
+        return False
+
+    @cached_property
+    def is_test_func(self) -> bool:
+        # follow the pytest rules (but ignore the method requirements):
+        # https://docs.pytest.org/en/7.1.x/explanation/goodpractices.html#conventions-for-python-test-discovery
+        return self.name.startswith("test") and (
+            (file := self.path.module.split(".")[-1]).startswith("test_")
+            or file.endswith("_test")
+        )
+
+    @cached_property
+    def is_fixture_user(self) -> bool:
+        # both tests and fixtures can use other fixtures
+        return self.is_test_func or self.is_fixture
 
 
 @dataclass
@@ -259,11 +292,8 @@ class PythonClass:
     @cached_property
     def is_dataclass(self) -> bool:
         for dec in self.tree.decorators:
-            match dec.decorator:
-                case cst.Name(value="dataclass") | cst.Call(
-                    func=cst.Name(value="dataclass")
-                ):
-                    return True
+            if get_decorator_name(dec) == "dataclass":
+                return True
         if self.superclasses:
             for sc in self.superclasses:
                 if "NamedTuple" in sc.name.split("."):
@@ -676,6 +706,12 @@ class UsageAnalysis:
             [self.path2elem[p] for p in all_class_members], lambda e: e.name
         )
 
+        all_fixtures = [f for f in project.all_funcs() if f.is_fixture]
+        name2fixtures = groupby(all_fixtures, lambda f: f.name)
+        self.name2fixtures = {
+            n: {f.path for f in fs} for n, fs in name2fixtures.items()
+        }
+
         best_usages = dict[tuple[ProjectPath, ProjectPath], ProjectUsage]()
         for mname, ma in self.mod2analysis.items():
             usages = ma.compute_module_usages()
@@ -720,6 +756,31 @@ class UsageAnalysis:
             for e in self.name2class_member.get(member_name, []):
                 yield ProjectUsage(caller, e.path, span, is_certain=False)
 
+        def visible_fixtures(fix_name: str) -> Generator[ProjectPath, None, None]:
+            psegs = caller.path.split(".")
+            # try finding in the local module
+            while psegs:
+                psegs.pop()
+                psegs.append(fix_name)
+                yield ProjectPath(caller.module, ".".join(psegs))
+                psegs.pop()
+            # try finding in conftest files
+            msegs = mname.split(".")
+            while msegs:
+                msegs.pop()
+                msegs.append("conftest")
+                yield ProjectPath(".".join(msegs), fix_name)
+                msegs.pop()
+
+        def gen_fixture_usages(fix_name: str):
+            candidates = self.name2fixtures.get(fix_name, None)
+            if not candidates:
+                return
+            for vf in visible_fixtures(fix_name):
+                if vf in candidates:
+                    yield ProjectUsage(caller, vf, span, is_certain=True)
+                    return
+
         def gen_constructor_usages(path: ProjectPath):
             if not is_call or (cls := self.path2class.get(path)) is None:
                 return
@@ -744,6 +805,9 @@ class UsageAnalysis:
                     case ["<attr>", m]:
                         # method fuzzy match case 1
                         yield from gen_class_usages(m)
+                        break
+                    case ["<fixture>", m]:
+                        yield from gen_fixture_usages(m)
                         break
                     case [*prefix, cls, _, "<locals>", "self", m]:
                         segs = [*prefix, cls, m]
@@ -819,6 +883,15 @@ class ModuleAnlaysis:
                 case PythonFunction():
                     e.tree.visit(recorder)
                     self_names = self.node2qnames[e.tree.name]
+
+                    # generate fixture usages
+                    if e.is_fixture_user:
+                        for arg in e.tree.params.params:
+                            fix_name = QualifiedName(
+                                f"<fixture>.{arg.name.value}", QualifiedNameSource.LOCAL
+                            )
+                            fix_usage = (self.node2pos[arg.name], fix_name, True)
+                            recorder.usages.append(fix_usage)
                 case PythonVariable():
                     self_names = []
                     for a in e.assignments:
@@ -1060,11 +1133,8 @@ class PythonModuleBuilder(cst.CSTVisitor):
             # skip inner functions
             return False
         for dec in node.decorators:
-            match dec.decorator:
-                case cst.Name("overload") | cst.Attribute(attr=cst.Name("overload")):
-                    # ignore overload signatures
-                    return False
-                # todo: record fixtures here
+            if get_decorator_name(dec) == "overload":
+                return False
 
         name = node.name.value
         func = PythonFunction(

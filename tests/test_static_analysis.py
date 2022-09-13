@@ -725,3 +725,101 @@ class A:
     assert len(m1.global_vars) == 0
     assert len(m1.functions) == 0
     assert len(m1.classes) == 1
+
+
+def test_fixture_usages():
+    code1 = """
+# root.test_1
+from pytest import fixture
+import pytest as pt
+
+@fixture
+def fix1():
+    return 1
+
+@pt.fixture
+def fix2(fix1):
+    return fix1 + 1
+
+def test1(fix1, fix2):
+    assert fix1 + 1 == fix2
+"""
+
+    project = project_from_code({"root.test_1": code1})
+    analysis = UsageAnalysis(project)
+
+    analysis.assert_usages(
+        "root.test_1/fix2",
+        ("root.test_1/fix1", True),
+    )
+
+    analysis.assert_usages(
+        "root.test_1/test1",
+        ("root.test_1/fix1", True),
+        ("root.test_1/fix2", True),
+    )
+
+    code_conf = """
+# root.conftest
+import pytest  
+
+@pytest.fixture(scope="session")
+def use_gfix():
+    return 1
+    
+"""
+
+    code2 = """
+# root.nest.test_2
+def test_global_fix(fix1, use_gfix):
+    # fix1 should not be visible
+    return fix1 + use_gfix
+"""
+
+    code_out = """
+# test_out    
+def test_global_fix(fix1, use_gfix):
+    # both fix1 and use_gfix should not be visible
+    return fix1 + use_gfix 
+"""
+
+    project = project_from_code(
+        {
+            "root.test_1": code1,
+            "root.conftest": code_conf,
+            "root.nest.test_2": code2,
+            "test_out": code_out,
+        }
+    )
+
+    analysis = UsageAnalysis(project)
+
+    analysis.assert_usages(
+        "root.nest.test_2/test_global_fix",
+        ("root.conftest/use_gfix", True),
+    )
+
+    analysis.assert_usages(
+        "test_out/test_global_fix",
+    )
+
+    code_global = """
+# conftest
+import pytest
+
+@pytest.fixture
+def fix1():
+    # should be visible everywhere
+    return 1
+"""
+
+    project = project_from_code(
+        {"root.test_1": code1, "conftest": code_global, "test_out": code_out}
+    )
+
+    analysis = UsageAnalysis(project)
+
+    analysis.assert_usages(
+        "test_out/test_global_fix",
+        ("conftest/fix1", True),
+    )
