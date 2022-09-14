@@ -673,6 +673,7 @@ class TokenizedSrcSet:
         max_workers: int | None = None,
         tqdm_args: dict = {},
         max_line_width: int = 400,
+        ignore_dirs: set[str] = {".venv", ".mypy_cache", ".git", "venv"},
     ) -> "TokenizedSrcSet":
         for r in repos_paths:
             assert r.is_dir(), f"Provided path {r} is not a directory."
@@ -681,8 +682,8 @@ class TokenizedSrcSet:
         srcs: dict[Path, tuple[str, Path]] = {
             f: (f.read_text(), r)
             for r in repos_paths
-            for f in sorted(r.glob("**/*.py"))
-            if not f.is_symlink()
+            for f in rec_iter_files(r, dir_filter=lambda d: d.name not in ignore_dirs)
+            if f.suffix == ".py" and not f.is_symlink()
         }
         num_all_srcs = len(srcs)
 

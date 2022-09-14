@@ -320,14 +320,17 @@ def reformat_elems(
                 case VariableSignature(annot=annot) if annot is not None:
                     sig_type = annot
                 case _:
-                    sig_type = cst.Annotation(cst.Ellipsis())
-            if assigns:
-                lines.append(
-                    cst.AnnAssign(cst.Name(var.name), sig_type, assigns[0].value)
-                )
-                lines.extend(assigns[1:])
+                    sig_type = None
+            if sig_type is None:
+                lines.extend(assigns)
             else:
-                lines.append(cst.AnnAssign(cst.Name(var.name), sig_type))
+                if assigns:
+                    lines.append(
+                        cst.AnnAssign(cst.Name(var.name), sig_type, assigns[0].value)
+                    )
+                    lines.extend(assigns[1:])
+                else:
+                    lines.append(cst.AnnAssign(cst.Name(var.name), sig_type))
         else:
             lines.extend(var.assignments)
         return [cst.SimpleStatementLine([a]) for a in lines]

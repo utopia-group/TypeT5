@@ -134,6 +134,27 @@ def decode_tokens(tks, skip_special_tokens=False):
     return DefaultTokenizer.decode(tks, skip_special_tokens=skip_special_tokens)
 
 
+def rec_iter_files(
+    dir: Path,
+    dir_filter: Callable[[Path], bool],
+) -> Generator[Path, None, None]:
+    """Recursively iterate over all files in a directory whose parent dirs satisfies the given
+    `dir_filter`. Note that unlike `glob`, if a directory is filtered out, all
+    its children won't be traversed, leading to potentially better performance in certain use cases."""
+    assert dir.is_dir()
+
+    def rec(path: Path) -> Generator[Path, None, None]:
+        if path.is_dir():
+            if not dir_filter(path):
+                return
+            for child in path.iterdir():
+                yield from rec(child)
+        else:
+            yield path
+
+    return rec(dir)
+
+
 DefaultWorkers: int = multiprocessing.cpu_count() // 2
 
 

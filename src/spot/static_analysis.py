@@ -397,7 +397,7 @@ class PythonProject:
         root: Path,
         discard_bad_files: bool = False,
         file_filter: Callable[[Path], bool] = lambda p: True,
-        ignore_dirs: set[str] = {".venv"},
+        ignore_dirs: set[str] = {".venv", ".mypy_cache", ".git", "venv"},
         src2module: Callable[[str], cst.Module | None] = lambda s: remove_comments(
             cst.parse_module(s)
         ),
@@ -415,9 +415,11 @@ class PythonProject:
             raise FileNotFoundError(f"Project root not exist: {root}")
 
         all_srcs = [
-            p
-            for p in root.rglob("*.py")
-            if p.relative_to(root).parts[0] not in ignore_dirs and file_filter(p)
+            f
+            for f in rec_iter_files(
+                root, dir_filter=lambda d: d.name not in ignore_dirs
+            )
+            if f.suffix == ".py" and file_filter(f)
         ]
 
         for src in all_srcs:
@@ -1456,6 +1458,13 @@ def is_type_rhs(expr: cst.BaseExpression):
             return False
 
 
+def mask_assign_type(node: cst.AnnAssign) -> cst.Assign | cst.AnnAssign:
+    if node.value is not None:
+        return cst.Assign([cst.AssignTarget(node.target)], node.value)
+    else:
+        return node
+
+
 class StubGenerator(cst.CSTTransformer):
     """Generate a stub module from a Python module."""
 
@@ -1506,12 +1515,10 @@ class StubGenerator(cst.CSTTransformer):
         return updated.with_changes(annotation=None)
 
     def leave_AnnAssign(self, node, updated: cst.AnnAssign):
-        if self.nest_level == 0:
-            return updated
         # omit rhs of annotated assignments (if any)
-        if updated.value is not None:
+        if self.nest_level > 0 and updated.value is not None:
             updated = updated.with_changes(value=cst.Ellipsis())
-        return updated
+        return mask_assign_type(updated)
 
     def leave_Assign(self, node, updated: cst.AnnAssign):
         if self.nest_level == 0:
@@ -1605,7 +1612,7 @@ class ImportsRemover(cst.CSTTransformer):
 
 
 class AnnotRemover(cst.CSTTransformer):
-    """Removes all type annotations when possible or place them with a special symbol."""
+    """Removes all type annotations when possible or replace them with a special symbol."""
 
     def __init__(self, type_mask: str = "..."):
         super().__init__()
@@ -1617,8 +1624,9 @@ class AnnotRemover(cst.CSTTransformer):
     def leave_Param(self, node, updated: cst.Param) -> cst.Param:
         return updated.with_changes(annotation=None)
 
-    def leave_AnnAssign(self, node, updated: cst.AnnAssign) -> cst.AnnAssign:
-        return updated.with_changes(annotation=cst.Annotation(self.type_mask))
+    def leave_AnnAssign(self, node, updated: cst.AnnAssign):
+        updated = updated.with_changes(annotation=cst.Annotation(self.type_mask))
+        return mask_assign_type(updated)
 
 
 def guess_src_root(proj_root: Path):
