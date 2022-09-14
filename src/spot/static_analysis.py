@@ -663,11 +663,11 @@ class UsageAnalysis:
                 if p in self.path2class:
                     cls = self.path2class[p]
                     self.path2class.setdefault(ProjectPath(mname, s), cls)
-                    if "__init__" in cls.methods:
-                        self.path2elem.setdefault(
-                            ProjectPath(mname, s),
-                            self.path2class[p].methods["__init__"],
-                        )
+                    # if "__init__" in cls.methods:
+                    #     self.path2elem.setdefault(
+                    #         ProjectPath(mname, s),
+                    #         self.path2class[p].methods["__init__"],
+                    #     )
                 elif p in self.path2elem:
                     self.path2elem.setdefault(ProjectPath(mname, s), self.path2elem[p])
 
@@ -678,30 +678,35 @@ class UsageAnalysis:
         # resolve subtyping relations
         for ma in self.mod2analysis.values():
             ma.udpate_superclasses_()
-        # add elements from parents to subclass
-        for mname in self.sorted_modules:
-            mod = project.modules[mname]
-            for cls in mod.all_classes():
-                path_prefix = ProjectPath(mname, cls.name)
-                bases = not_none(cls.superclasses)
-                parents = [
-                    x for p in bases if (x := self.find_class(mname, p)) is not None
-                ]
-                for parent in parents:
-                    for a_name, a in parent.attributes.items():
-                        self.path2elem[path_prefix.append(a_name)] = a
-                    for m_name, m in parent.methods.items():
-                        self.path2elem[path_prefix.append(m_name)] = m
-                for m in cls.methods.values():
-                    self.path2elem[m.path] = m
-                for a in cls.attributes.values():
-                    self.path2elem[a.path] = a
 
-        # add path mapping for class constructors
-        for f in list(self.path2elem.values()):
-            if f.in_class and f.name == "__init__":
-                cons_p = ProjectPath(f.path.module, f.path.path[: -len(".__init__")])
-                self.path2elem[cons_p] = f
+        self.cls2members = cls2members = dict[ProjectPath, dict[str, PythonElem]]()
+
+        def process_cls(cls: PythonClass):
+            """add elements from parents to subclass."""
+            if (cpath := cls.path) in cls2members:
+                return  # already processed
+            members = cls2members[cpath] = dict[str, PythonElem]()
+            bases = not_none(cls.superclasses)
+            parents = [
+                x for p in bases if (x := self.find_class(cpath.module, p)) is not None
+            ]
+            for parent in parents:
+                process_cls(parent)
+                # inherent parent attributes
+                members.update(cls2members[parent.path])
+            for a in cls.attributes.values():
+                members[a.name] = a
+            for m in cls.methods.values():
+                members[m.name] = m
+            for name, el in members.items():
+                self.path2elem[cpath.append(name)] = el
+                # add mapping to class constructor
+                # if name == "__init__":
+                #     self.path2elem[cpath] = el
+
+        for mname in self.sorted_modules:
+            for cls in project.modules[mname].all_classes():
+                process_cls(cls)
 
         all_class_members = {x.path for x in project.all_elems() if x.in_class}
         self.name2class_member = groupby(
@@ -783,18 +788,24 @@ class UsageAnalysis:
                     yield ProjectUsage(caller, vf, span, is_certain=True)
                     return
 
-        def gen_constructor_usages(path: ProjectPath):
-            if not is_call or (cls := self.path2class.get(path)) is None:
+        def gen_constructor_usages(cls: PythonClass):
+            if not is_call:
                 return
-            used_elems = list[ProjectPath]()
-            if cls.is_dataclass:
+            cpath = cls.path
+            used_elems = list[tuple[ProjectPath, bool]]()
+            cons_path = cpath.append("__init__")
+            if cons_path in self.path2elem:
+                used_elems.append((cons_path, True))
+            else:
                 for v in cls.attributes.values():
-                    used_elems.append(v.path)
-            elif "__init__" in cls.methods:
-                used_elems.append(cls.methods["__init__"].path)
-            for u in used_elems:
+                    used_elems.append((v.path, True))
+                # maybe also used members from parent class
+                for el in self.cls2members[cpath].values():
+                    if isinstance(el, PythonVariable):
+                        used_elems.append((el.path, False))
+            for u, certain in used_elems:
                 yield ProjectUsage(
-                    caller, self.path2elem[u].path, span, is_certain=True
+                    caller, self.path2elem[u].path, span, is_certain=certain
                 )
 
         def resolve_local_usages(name: str):
@@ -816,7 +827,7 @@ class UsageAnalysis:
 
                 callee = ProjectPath(mname, ".".join(segs))
                 if callee in self.path2class:
-                    yield from gen_constructor_usages(callee)
+                    yield from gen_constructor_usages(self.path2class[callee])
                 elif callee in self.path2elem:
                     yield ProjectUsage(
                         caller, self.path2elem[callee].path, span, is_certain=True
@@ -835,7 +846,7 @@ class UsageAnalysis:
                 if callee is None:
                     return
                 if callee in self.path2class:
-                    yield from gen_constructor_usages(callee)
+                    yield from gen_constructor_usages(self.path2class[callee])
                 elif callee in self.path2elem:
                     yield ProjectUsage(
                         caller, self.path2elem[callee].path, span, is_certain=True

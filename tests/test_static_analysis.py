@@ -644,21 +644,31 @@ class A:
     def __init__(self, x):
         self.x = x
 
-@dataclass
-class B:
+class B(MaybeNamedTuple):
     x: int
     y: int = field(init=False)
 
-from typing import NamedTuple
 
-class C(NamedTuple):
+@maybe_dataclass
+class C:
     u: int
     v: int
+
+# not a dataclass since A has __init__
+class D(A):
+    y: int
+
+class E(B):
+    z: int
 
 def use():
     A(1)
     B(1, 2)
     C(1, 2)
+
+def use2():    
+    D(1)
+    E(1,2,3)
 """
 
     project = project_from_code(
@@ -675,6 +685,14 @@ def use():
         ("root.file1/B.y", True),
         ("root.file1/C.u", True),
         ("root.file1/C.v", True),
+    )
+
+    analysis.assert_usages(
+        "root.file1/use2",
+        ("root.file1/A.__init__", True),
+        ("root.file1/B.x", False),
+        ("root.file1/B.y", False),
+        ("root.file1/E.z", True),
     )
 
     code2 = """
