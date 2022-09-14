@@ -128,14 +128,30 @@ def remove_top_optional(t: PythonType) -> PythonType:
     """
     Remove the top-level Optional. i.e., convert Optional[T] to T.
     """
-    if t.is_optional() and len(t.args) == 1:
-        return t.args[0]
+    if t.is_optional():
+        if len(t.args) == 1:
+            return t.args[0]
+        else:
+            return PythonType.Any()
     elif t.is_union():
         new_args = tuple(a for a in t.args if not a.is_none())
         if len(new_args) == 1:
             return new_args[0]
         else:
             return PythonType(("Union",), tuple(new_args))
+    else:
+        return t
+
+
+def remove_top_final(t: PythonType) -> PythonType:
+    """
+    Remove the top-level Final. i.e., convert Final[T] to T.
+    """
+    if t.head_name() == "Final":
+        if len(t.args) == 1:
+            return t.args[0]
+        else:
+            return PythonType.Any()
     else:
         return t
 

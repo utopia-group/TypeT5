@@ -319,7 +319,7 @@ to_annotate: {self.to_annot}
 class AccuracyMetric:
     common_type_names: set[str]
     normalize_types: bool = True
-    allow_implicit_none: bool = True
+    relaxed_equality: bool = True
     filter_none_any: bool = True
     match_base_only: bool = False
     name: str = "acc"
@@ -327,7 +327,8 @@ class AccuracyMetric:
     def process_type(self, t: PythonType) -> PythonType:
         if self.normalize_types:
             t = normalize_type(t)
-        if self.allow_implicit_none:
+        if self.relaxed_equality:
+            t = remove_top_final(t)
             t = remove_top_optional(t)
         if self.match_base_only:
             t = PythonType.from_name(t.head_name())
@@ -338,7 +339,7 @@ class AccuracyMetric:
         return [
             AccuracyMetric(
                 common_type_names,
-                allow_implicit_none=False,
+                relaxed_equality=False,
                 filter_none_any=False,
                 name="plain_acc",
             ),
