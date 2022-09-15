@@ -9,7 +9,7 @@ from libcst import MetadataWrapper
 
 from spot import PythonType
 from .type_check import parse_type_expr
-from .type_env import AccuracyMetric, AnnotCat, type_accuracies
+from .type_env import AccuracyMetric, AnnotCat, AnnotPath, type_accuracies
 
 from .utils import *
 from libcst.metadata import (
@@ -89,6 +89,27 @@ class ProjectPath(NamedTuple):
     def from_str(s: str) -> "ProjectPath":
         module, path = s.split("/")
         return ProjectPath(module, path)
+
+    @staticmethod
+    def annot_path_to_module_path(p: AnnotPath) -> ModulePath:
+        def simplify(seg: str):
+            if seg.endswith("]"):
+                i = seg.find("[")
+                return seg[:i]
+            else:
+                return seg
+
+        segs = [simplify(s) for s in reversed(p.value)]
+        match segs:
+            case [*parent, m, v] if v.startswith("self."):
+                segs = [*parent, v[5:]]
+        return ".".join(segs)
+
+    @staticmethod
+    def from_annot_path(rel_path: Path, p: AnnotPath) -> "ProjectPath":
+        mname = PythonProject.rel_path_to_module_name(rel_path)
+        mpath = ProjectPath.annot_path_to_module_path(p)
+        return ProjectPath(mname, mpath)
 
 
 ProjNamespace = dict[str, ProjectPath]

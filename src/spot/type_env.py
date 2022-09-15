@@ -33,7 +33,7 @@ class AnnotPath:
         return f"AnnotPath({self.__str__()})"
 
     def __str__(self):
-        return f"'{'.'.join(map(str, self.value.reverse()))}'"
+        return f"{'.'.join(map(str, self.value.reverse()))}"
 
     def append(self, seg: str, id: int) -> "AnnotPath":
         seg = seg if id == 0 else f"{seg}[{id}]"

@@ -15,7 +15,9 @@ from .function_dataset import (
 from .model import DatasetPredResult, ModelWrapper
 from .static_analysis import (
     ElemSignature,
+    FunctionSignature,
     ModuleName,
+    ModulePath,
     ProjectPath,
     PythonElem,
     PythonFunction,
@@ -26,8 +28,13 @@ from .static_analysis import (
     VariableSignature,
 )
 from .tokenized_src import PreprocessArgs, TokenSeq, tokenized_src_from_segs
-from .type_check import PythonType
-from .type_env import AccuracyMetric, collect_user_annotations, type_accuracies
+from .type_check import PythonType, parse_type_str
+from .type_env import (
+    AccuracyMetric,
+    AnnotPath,
+    collect_user_annotations,
+    type_accuracies,
+)
 from .utils import *
 
 
@@ -414,22 +421,55 @@ def construct_model_inputs(
     return chunks
 
 
-def file2sig_predictions(
-    pred: DatasetPredResult, projects: list[PythonProject]
-) -> SignatureErrorAnalysis:
-    label_maps = dict[str, SignatureMap]()
-    pred_maps = dict[str, SignatureMap]()
+def sigmap_from_file_predictions(
+    pr: DatasetPredResult,
+    projects: list[PythonProject],
+    repos_dir: Path,
+):
+    pred_sigmaps = dict[str, SignatureMap]()
+    label_sigmaps = dict[str, SignatureMap]()
 
-    def check_sig(project: str, path: ProjectPath, sig: ElemSignature):
-        match sig:
-            case VariableSignature(annot, in_class) if annot is not None:
-                annot
+    def handle_repo(
+        repo: Path,
+        pr: DatasetPredResult,
+        project: PythonProject,
+    ):
+        path2pred = dict[ProjectPath, PythonType]()
+        pred_sigmaps[repo.name] = path2sig = dict[ProjectPath, ElemSignature]()
+        label_sigmaps[repo.name] = path2label = {
+            el.path: el.get_signature() for el in project.all_elems()
+        }
 
-    for p in projects:
-        path2elem = {e.path: e for e in p.all_elems()}
-        path2labels = {e.path: e.get_signature() for e in path2elem.values()}
-        for path, el in path2elem.items():
-            sig = path2labels[path]
-            check_sig(sig)
+        for preds, info in zip(pr.predictions, pr.chunks.chunks_info):
+            mname = PythonProject.rel_path_to_module_name(
+                (repos_dir / info.src_file).relative_to(repo)
+            )
+            for p, ai in zip(preds, info.annots_info):
+                mpath = ProjectPath.annot_path_to_module_path(ai.path)
+                ppath = ProjectPath(mname, mpath)
+                path2pred[ppath] = p
 
-    return SignatureErrorAnalysis()
+        def get_pred(path: ProjectPath) -> cst.Annotation | None:
+            if path not in path2pred:
+                return None
+            ty = path2pred[path]
+            return cst.Annotation(cst.parse_expression(str(ty)))
+
+        for path, sig in path2label.items():
+            match sig:
+                case VariableSignature(annot, inclass):
+                    path2sig[path] = VariableSignature(get_pred(path), inclass)
+                case FunctionSignature(params, ret, inclass):
+                    new_sig = FunctionSignature(dict(), None, inclass)
+                    for p in params:
+                        new_sig.params[p] = get_pred(path.append(p))
+                    new_sig.returns = get_pred(path.append(SpecialNames.Return))
+                    path2sig[path] = new_sig
+
+    repo2proj = {p.root_dir: p for p in projects}
+
+    for repo, repo_pr in pr.group_by_repo(repos_dir).items():
+        project = repo2proj[repo]
+        handle_repo(repo, repo_pr, project)
+
+    return pred_sigmaps, label_sigmaps

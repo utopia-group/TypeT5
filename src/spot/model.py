@@ -64,10 +64,10 @@ class DatasetPredResult(Generic[T1]):
     def accuracies(self, metric: AccuracyMetric) -> dict:
         return preds_to_accuracies(self.predictions, self.chunks, metric)
 
-    def group_by_repo(self) -> dict[Path, "DatasetPredResult[T1]"]:
+    def group_by_repo(self, repos_dir: Path) -> dict[Path, "DatasetPredResult[T1]"]:
         chunk2repo = list[Path]()
         for i, info in enumerate(self.chunks.chunks_info):
-            file = info.src_file
+            file = repos_dir / info.src_file
             repo = self.chunks.file2repo[file]
             chunk2repo.append(repo)
 

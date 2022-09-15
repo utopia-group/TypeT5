@@ -10,6 +10,7 @@ import torch
 import wandb
 from spot.function_dataset import data_project_from_dir
 from spot.model import ModelWrapper
+from spot.train import TrainingConfig, PreprocessArgs
 from spot.type_env import AccuracyMetric
 from spot.utils import (
     assert_eq,
@@ -38,9 +39,19 @@ def wandb_string(s: str):
 
 # experiment configurations
 
+config = TrainingConfig(
+    quicktest=False,
+    pre_args=PreprocessArgs(
+        drop_env_types=False,
+        add_override_usages=True,
+    ),
+    func_only=True,
+)
+
 gpu_id = get_gpu_id(0)
 # model_name = "model-v5--TrainingConfig(drop_env_types=False)"
-model_name = "model-v6--TrainingConfig(drop_env_types=False)"
+# model_name = "model-v6--TrainingConfig(drop_env_types=False)"
+model_name = config.get_model_name()
 dataset_name = "ManyTypes4Py"
 # dataset_name = "SPOT-src"
 experiment_name = dataset_name + ": " + model_name
@@ -83,12 +94,12 @@ model.args.tokens_per_type = 16
 rctx = RolloutCtx(model=model)
 
 decode_orders = {
-    # "no-neighbors": DecodingOrders.IndependentOrder(),
-    "non-incr": DecodingOrders.IndependentOrder(),
-    # "callee2caller": DecodingOrders.Callee2Caller(),
-    "random-twice": DecodingOrders.RandomTwice(),
     "double-traversal": DecodingOrders.DoubleTraversal(),
-    # "random": DecodingOrders.RandomOrder(),
+    "non-incr": DecodingOrders.IndependentOrder(),
+    "random": DecodingOrders.RandomOrder(),
+    "no-neighbors": DecodingOrders.IndependentOrder(),
+    # "callee2caller": DecodingOrders.Callee2Caller(),
+    # "random-twice": DecodingOrders.RandomTwice(),
     # "caller2callee": DecodingOrders.Caller2Callee(),
 }
 
