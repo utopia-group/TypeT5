@@ -138,6 +138,7 @@ class PreprocessArgs:
     max_callees: int = 80  # only applicable to functional dataset
     max_callers: int = 20  # only applicable to functional dataset
     drop_env_types: bool = True  # only applicable to functional dataset
+    add_override_usages: bool = False  # only applicable to functional dataset
 
 
 def preprocess_code(code: str, args: PreprocessArgs) -> dict:

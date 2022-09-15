@@ -27,7 +27,7 @@ class DecodingArgs:
     sampling_max_tokens: int
     max_workers: int = DefaultWorkers
     # the maximal prediction length = tokens_per_type * num_types + slack_tokens
-    tokens_per_type: int = 10
+    tokens_per_type: int = 16
     slack_tokens: int = 10
     do_sample: bool = False
     top_p: float = 0.9

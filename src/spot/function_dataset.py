@@ -110,7 +110,7 @@ def repo_to_tk_srcs(
     proj = data_project_from_dir(
         repo, max_line_width=max_line_width, drop_comments=pre_args.drop_comments
     )
-    analysis = UsageAnalysis(proj)
+    analysis = UsageAnalysis(proj, pre_args.add_override_usages)
     sorted_moduels = analysis.sorted_modules
 
     srcs = list[TokenizedSrc]()

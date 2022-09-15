@@ -33,11 +33,14 @@ recreate_dataset = False
 
 config = TrainingConfig(
     quicktest=False,
-    pre_args=PreprocessArgs(
-        drop_env_types=False,
-        stub_in_preamble=True,
-    ),
-    func_only=True,
+    # pre_args=PreprocessArgs(
+    #     drop_env_types=False,
+    #     add_override_usages=True,
+    # ),
+    left_margin=2048,
+    right_margin=2048 - 512,
+    preamble_size=800,
+    func_only=False,
 )
 
 TypeCheckSettings.temp_path = f"GPU-{gpu_id}"
@@ -152,7 +155,7 @@ r0_eval = eval_cache.cached(
     "dataset_pred.pkl",
     lambda: wrapper.eval_on_dataset(tk_dataset["test"]),
 )
-common_names = tk_dataset["train"].common_type_names()
+common_names = wrapper.common_type_names
 metrics = AccuracyMetric.default_metrics(common_names)
 r0_accs = {m.name: r0_eval.accuracies(m) for m in metrics}
 pretty_print_dict(r0_accs)
@@ -189,5 +192,6 @@ if export_preds:
         r0_eval.chunks[sub_ids],
         [r0_eval.predictions[i] for i in sub_ids],
         export_to=export_to,
+        metric=AccuracyMetric(common_names),
     )
     print(f"Model predictions exported to '{export_to}'")

@@ -776,6 +776,8 @@ def create_tokenized_srcsets(
             tk_dataset[name] = tk_data
             save_path = out_dir / f"{name}.pkl"
             pickle_dump(save_path, tk_data)
+            stats_str = pretty_show_dict(tk_data.stats_to_show())
+            write_file(out_dir / f"{name}-stats.txt", stats_str)
             print(f"Saved to {save_path}")
         assert tk_dataset, "Empty dataset."
 

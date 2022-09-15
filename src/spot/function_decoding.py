@@ -12,8 +12,9 @@ from .function_dataset import (
     reformat_elems,
     wrap_main_code,
 )
-from .model import ModelWrapper
+from .model import DatasetPredResult, ModelWrapper
 from .static_analysis import (
+    ElemSignature,
     ModuleName,
     ProjectPath,
     PythonElem,
@@ -26,7 +27,7 @@ from .static_analysis import (
 )
 from .tokenized_src import PreprocessArgs, TokenSeq, tokenized_src_from_segs
 from .type_check import PythonType
-from .type_env import AccuracyMetric, collect_user_annotations
+from .type_env import AccuracyMetric, collect_user_annotations, type_accuracies
 from .utils import *
 
 
@@ -157,7 +158,10 @@ class RolloutCtx:
 
         eloop = asyncio.get_event_loop()
         analysis: UsageAnalysis = await eloop.run_in_executor(
-            cpu_executor, UsageAnalysis, project
+            cpu_executor,
+            UsageAnalysis,
+            project,
+            pre_args.add_override_usages,
         )
         to_visit = [analysis.path2elem[p] for p in decode_order.traverse(analysis)]
         visit_set = {e.path for e in to_visit}
@@ -408,3 +412,24 @@ def construct_model_inputs(
     )
     chunks, _ = src_to_chunks(src, (0, n_labels), ctx_args)
     return chunks
+
+
+def file2sig_predictions(
+    pred: DatasetPredResult, projects: list[PythonProject]
+) -> SignatureErrorAnalysis:
+    label_maps = dict[str, SignatureMap]()
+    pred_maps = dict[str, SignatureMap]()
+
+    def check_sig(project: str, path: ProjectPath, sig: ElemSignature):
+        match sig:
+            case VariableSignature(annot, in_class) if annot is not None:
+                annot
+
+    for p in projects:
+        path2elem = {e.path: e for e in p.all_elems()}
+        path2labels = {e.path: e.get_signature() for e in path2elem.values()}
+        for path, el in path2elem.items():
+            sig = path2labels[path]
+            check_sig(sig)
+
+    return SignatureErrorAnalysis()

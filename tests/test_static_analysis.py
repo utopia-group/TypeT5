@@ -24,6 +24,10 @@ def project_from_code(name2code: dict[ModuleName, str]):
     return PythonProject.from_modules(Path("[test project]"), modules)
 
 
+def full_analysis(project: PythonProject) -> UsageAnalysis:
+    return UsageAnalysis(project, add_override_usages=True)
+
+
 def test_path_to_module():
     to_module = PythonProject.rel_path_to_module_name
     assert to_module(Path("a/b.py")) == "a.b"
@@ -129,7 +133,7 @@ class A:
     assert sum(1 for _ in m.all_vars()) == 5
     assert sum(1 for _ in m.all_funcs()) == 3
 
-    analysis = UsageAnalysis(project)
+    analysis = full_analysis(project)
 
     analysis.assert_usages("file1/A.B1.__init__", ("file1/A.B1.x", True))
     analysis.assert_usages("file1/A.B2.__init__", ("file1/A.B2.x", True))
@@ -299,7 +303,7 @@ def usage4():
             "root.file4": code4,
         }
     )
-    analysis = UsageAnalysis(project)
+    analysis = full_analysis(project)
 
     analysis.assert_usages(
         "root.file2/usage1",
@@ -392,7 +396,7 @@ def usage5():
             "root.file5": code5,
         }
     )
-    analysis = UsageAnalysis(project)
+    analysis = full_analysis(project)
     analysis.assert_usages("root.file5/usage5", ("root.file1/gf", True))
 
     # test default argument usage
@@ -410,8 +414,95 @@ def inc(x=Count):
             "root.file6": code6,
         }
     )
-    analysis = UsageAnalysis(project)
+    analysis = full_analysis(project)
     analysis.assert_usages("root.file6/inc", ("root.file6/Count", True))
+
+
+def test_inheritance_usages():
+    methods_usage = """
+# root.file1
+
+class A(ABC):
+    @abstractmethod
+    def foo(self, x: int | float):
+        pass
+
+    def bar():
+        pass
+
+class B(A):
+    def foo(self, x: int):
+        # should use A.foo
+        return 1
+
+class C(B):
+    def foo(self, x: float):
+        # should use B.foo
+        return 2.0
+
+    def bar(self):
+        return 1
+
+"""
+
+    project = project_from_code({"root.file1": methods_usage})
+    analysis = full_analysis(project)
+
+    analysis.assert_usages(
+        "root.file1/B.foo",
+        ("root.file1/A.foo", True),
+    )
+
+    analysis.assert_usages(
+        "root.file1/C.foo",
+        ("root.file1/B.foo", True),
+    )
+
+    analysis.assert_usages(
+        "root.file1/C.bar",
+        ("root.file1/A.bar", True),
+    )
+
+    attr_usages = """
+# root.file2
+
+class A:
+    x = 1
+    def __init__(self):
+        self.y = 2
+
+class B(A):
+    x = 0.5
+    def __init__(self):
+        pass
+
+class C(B):
+    x = 0.25
+    y = 0.12
+"""
+
+    project = project_from_code({"root.file2": attr_usages})
+    analysis = full_analysis(project)
+
+    analysis.assert_usages(
+        "root.file2/B.__init__",
+        ("root.file2/A.__init__", True),
+    )
+
+    analysis.assert_usages(
+        "root.file2/B.x",
+        ("root.file2/A.x", True),
+    )
+
+    analysis.assert_usages(
+        "root.file2/C.x",
+        ("root.file2/B.x", True),
+    )
+
+    analysis.assert_usages(
+        "root.file2/C.y",
+        ("root.file2/A.y", True),
+    )
 
 
 def test_annotation_suages():
@@ -433,7 +524,7 @@ def usage_f(x):
 
 """
     project = project_from_code({"root.file1": code1})
-    analysis = UsageAnalysis(project)
+    analysis = full_analysis(project)
 
     analysis.assert_usages(
         "root.file1/usage_f",
@@ -485,7 +576,7 @@ def bar():
             "root.file1": code1,
         }
     )
-    analysis = UsageAnalysis(project)
+    analysis = full_analysis(project)
 
     A_cls = project.modules["root.file1"].classes[0]
     A_attrs = set(A_cls.attributes.keys())
@@ -566,7 +657,7 @@ def test_annot():
             "root.file2": code2,
         }
     )
-    analysis = UsageAnalysis(project)
+    analysis = full_analysis(project)
 
     B_cls = project.modules["root.file2"].classes[0]
     assert {n.name for n in not_none(B_cls.superclasses)} == {"root.file1.A"}
@@ -585,6 +676,7 @@ def test_annot():
         "root.file2/D.__init__",
         ("root.file2/C.y", True),
         ("root.file1/A.z", True),
+        ("root.file1/A.__init__", True),
     )
 
     analysis.assert_usages(
@@ -616,7 +708,7 @@ class Foo:
             "root.file3": code3,
         }
     )
-    analysis = UsageAnalysis(project)
+    analysis = full_analysis(project)
 
     # only the certain usages should be tracked
     # other usages are attributed to the fly() method.
@@ -676,7 +768,7 @@ def use2():
             "root.file1": code1,
         }
     )
-    analysis = UsageAnalysis(project)
+    analysis = full_analysis(project)
 
     analysis.assert_usages(
         "root.file1/use",
@@ -716,7 +808,7 @@ def use():
             "root.file2": code2,
         }
     )
-    analysis = UsageAnalysis(project)
+    analysis = full_analysis(project)
 
     analysis.assert_usages(
         "root.file2/use",
@@ -764,7 +856,7 @@ def test1(fix1, fix2):
 """
 
     project = project_from_code({"root.test_1": code1})
-    analysis = UsageAnalysis(project)
+    analysis = full_analysis(project)
 
     analysis.assert_usages(
         "root.test_1/fix2",
@@ -810,7 +902,7 @@ def test_global_fix(fix1, use_gfix):
         }
     )
 
-    analysis = UsageAnalysis(project)
+    analysis = full_analysis(project)
 
     analysis.assert_usages(
         "root.nest.test_2/test_global_fix",
@@ -835,7 +927,7 @@ def fix1():
         {"root.test_1": code1, "conftest": code_global, "test_out": code_out}
     )
 
-    analysis = UsageAnalysis(project)
+    analysis = full_analysis(project)
 
     analysis.assert_usages(
         "test_out/test_global_fix",

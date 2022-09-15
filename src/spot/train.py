@@ -45,18 +45,17 @@ class TrainingConfig(NamedTuple):
     pre_args: PreprocessArgs = PreprocessArgs()
     trained_on: str = "ManyTypes4Py"
     data_reduction: int = 1
-    check_in_isolation: bool = False
-    all_labels: bool = True
+    check_in_isolation: bool = False  # DAgger
     inline_prev_gold: bool = False
     ctx_size: int = 4096
     left_margin: int = 1024 + 512
     # up to how much of the left_margin to be allocated as preamble
-    preamble_size: int = 512
+    preamble_size: int = 768
     right_margin: int = 2048
     train_max_labels: int = 32
     dec_max_labels: int = 16
     use_small_model: bool = False
-    grad_accum_labels = 32
+    grad_accum_labels = 32  # DAgger
     modifications: str = ""
 
     def as_dict(self) -> dict[str, Any]:

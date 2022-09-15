@@ -2,14 +2,7 @@ from pathlib import Path
 from spot.utils import *
 
 from spot.static_analysis import (
-    ModuleHierarchy,
-    ProjectPath,
-    PythonModule,
-    PythonProject,
-    UsageAnalysis,
-    build_project_namespaces,
     cst,
-    stub_from_module,
     to_abs_import_path as to_abs,
 )
 from spot.function_dataset import FunctionSignature

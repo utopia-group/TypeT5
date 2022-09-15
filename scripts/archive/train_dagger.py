@@ -26,7 +26,6 @@ use_type_checker = False
 
 config = TrainingConfig(
     quicktest=False,
-    all_labels=True,
     ctx_size=2048,
     left_margin=1024,
     right_margin=1023,
@@ -44,7 +43,6 @@ tc_args = TypeCheckArgs(check_in_isolation=config.check_in_isolation)
 
 datasets_name = get_tk_dataset_name(
     drop_comments=config.drop_comments,
-    all_labels=config.all_labels,
 )
 
 model_name = "DAgger-model--" + config.as_name()

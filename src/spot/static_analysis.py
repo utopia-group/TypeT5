@@ -516,7 +516,6 @@ def split_import_path(path: str):
 class ProjectUsage:
     user: ProjectPath
     used: ProjectPath
-    call_site: CodeRange
     is_certain: bool  # some usage might not be certain, e.g. if it's a method call on an expression
 
     def __str__(self):
@@ -644,8 +643,9 @@ class UsageAnalysis:
         assert isinstance(v, PythonFunction)
         return v
 
-    def __init__(self, project: PythonProject):
+    def __init__(self, project: PythonProject, add_override_usages: bool):
         self.project = project
+        self.add_override_usages = add_override_usages
         self.ns_hier = ModuleHierarchy.from_modules(project.modules.keys())
         module2ns = build_project_namespaces(project)
         self.sorted_modules = list(module2ns.keys())
@@ -680,6 +680,7 @@ class UsageAnalysis:
             ma.udpate_superclasses_()
 
         self.cls2members = cls2members = dict[ProjectPath, dict[str, PythonElem]]()
+        all_usages = list[ProjectUsage]()
 
         def process_cls(cls: PythonClass):
             """add elements from parents to subclass."""
@@ -695,14 +696,17 @@ class UsageAnalysis:
                 # inherent parent attributes
                 members.update(cls2members[parent.path])
             for a in cls.attributes.values():
+                if self.add_override_usages and a.name in members:
+                    # override usages
+                    all_usages.append(ProjectUsage(a.path, members[a.name].path, True))
                 members[a.name] = a
             for m in cls.methods.values():
+                if self.add_override_usages and m.name in members:
+                    # override usages
+                    all_usages.append(ProjectUsage(m.path, members[m.name].path, True))
                 members[m.name] = m
             for name, el in members.items():
                 self.path2elem[cpath.append(name)] = el
-                # add mapping to class constructor
-                # if name == "__init__":
-                #     self.path2elem[cpath] = el
 
         for mname in self.sorted_modules:
             for cls in project.modules[mname].all_classes():
@@ -719,17 +723,16 @@ class UsageAnalysis:
             n: {f.path for f in fs} for n, fs in name2fixtures.items()
         }
 
-        best_usages = dict[tuple[ProjectPath, ProjectPath], ProjectUsage]()
         for mname, ma in self.mod2analysis.items():
-            usages = ma.compute_module_usages()
-            for caller, span, qname, is_call in usages:
-                for u in self.generate_usages(mname, caller, span, qname, is_call):
-                    up = u.user, u.used
-                    if (
-                        up not in best_usages
-                        or u.is_certain > best_usages[up].is_certain
-                    ):
-                        best_usages[up] = u
+            for caller, span, qname, is_call in ma.compute_module_usages():
+                all_usages.extend(self.generate_usages(mname, caller, qname, is_call))
+
+        best_usages = dict[tuple[ProjectPath, ProjectPath], ProjectUsage]()
+        for u in all_usages:
+            up = u.user, u.used
+            if up not in best_usages or u.is_certain > best_usages[up].is_certain:
+                best_usages[up] = u
+
         all_usages = list(best_usages.values())
         self.all_usages = all_usages
         self.user2used = groupby(all_usages, lambda u: u.user)
@@ -752,7 +755,6 @@ class UsageAnalysis:
         self,
         mname: ModuleName,
         caller: ProjectPath,
-        span: CodeRange,
         qname: QualifiedName,
         is_call: bool,
     ):
@@ -761,7 +763,7 @@ class UsageAnalysis:
                 # skip common methods like __init__
                 return
             for e in self.name2class_member.get(member_name, []):
-                yield ProjectUsage(caller, e.path, span, is_certain=False)
+                yield ProjectUsage(caller, e.path, is_certain=False)
 
         def visible_fixtures(fix_name: str) -> Generator[ProjectPath, None, None]:
             psegs = caller.path.split(".")
@@ -785,7 +787,7 @@ class UsageAnalysis:
                 return
             for vf in visible_fixtures(fix_name):
                 if vf in candidates:
-                    yield ProjectUsage(caller, vf, span, is_certain=True)
+                    yield ProjectUsage(caller, vf, is_certain=True)
                     return
 
         def gen_constructor_usages(cls: PythonClass):
@@ -804,9 +806,7 @@ class UsageAnalysis:
                     if isinstance(el, PythonVariable):
                         used_elems.append((el.path, False))
             for u, certain in used_elems:
-                yield ProjectUsage(
-                    caller, self.path2elem[u].path, span, is_certain=certain
-                )
+                yield ProjectUsage(caller, self.path2elem[u].path, is_certain=certain)
 
         def resolve_local_usages(name: str):
             segs = name.split(".")
@@ -830,7 +830,7 @@ class UsageAnalysis:
                     yield from gen_constructor_usages(self.path2class[callee])
                 elif callee in self.path2elem:
                     yield ProjectUsage(
-                        caller, self.path2elem[callee].path, span, is_certain=True
+                        caller, self.path2elem[callee].path, is_certain=True
                     )
                 elif len(segs) >= 2 and segs[-2] != "<locals>":
                     # method fuzzy match case 3
@@ -849,7 +849,7 @@ class UsageAnalysis:
                     yield from gen_constructor_usages(self.path2class[callee])
                 elif callee in self.path2elem:
                     yield ProjectUsage(
-                        caller, self.path2elem[callee].path, span, is_certain=True
+                        caller, self.path2elem[callee].path, is_certain=True
                     )
             case QualifiedNameSource.LOCAL:
                 yield from resolve_local_usages(qname.name)
@@ -1376,7 +1376,7 @@ def as_access_chain(node: cst.CSTNode) -> list[str] | None:
 
 
 def stub_from_module(
-    m: cst.Module, lightweight=False, rm_comments=True, rm_imports=True
+    m: cst.Module, lightweight=True, rm_comments=True, rm_imports=True
 ) -> cst.Module:
     """Generate a stub module from normal python code."""
     if rm_comments:
