@@ -719,12 +719,12 @@ class UsageAnalysis:
             for a in cls.attributes.values():
                 if self.add_override_usages and a.name in members:
                     # override usages
-                    all_usages.append(ProjectUsage(a.path, members[a.name].path, True))
+                    all_usages.append(ProjectUsage(a.path, members[a.name].path, False))
                 members[a.name] = a
             for m in cls.methods.values():
                 if self.add_override_usages and m.name in members:
                     # override usages
-                    all_usages.append(ProjectUsage(m.path, members[m.name].path, True))
+                    all_usages.append(ProjectUsage(m.path, members[m.name].path, False))
                 members[m.name] = m
             for name, el in members.items():
                 self.path2elem[cpath.append(name)] = el

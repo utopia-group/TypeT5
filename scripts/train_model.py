@@ -2,13 +2,7 @@
 import os
 from typing import *
 
-from spot.utils import (
-    get_dataroot,
-    get_eval_dir,
-    get_gpu_id,
-    get_model_dir,
-    proj_root,
-)
+from spot.utils import *
 
 os.chdir(proj_root())
 
@@ -33,13 +27,15 @@ recreate_dataset = False
 
 config = TrainingConfig(
     quicktest=False,
-    # pre_args=PreprocessArgs(
-    #     drop_env_types=False,
-    #     add_override_usages=True,
-    # ),
+    pre_args=PreprocessArgs(
+        imports_in_preamble=False,
+        stub_in_preamble=False,
+        # drop_env_types=False,
+        # add_override_usages=True,
+    ),
     left_margin=2048,
     right_margin=2048 - 512,
-    preamble_size=800,
+    # preamble_size=800,
     func_only=False,
 )
 
@@ -158,6 +154,7 @@ r0_eval = eval_cache.cached(
 common_names = wrapper.common_type_names
 metrics = AccuracyMetric.default_metrics(common_names)
 r0_accs = {m.name: r0_eval.accuracies(m) for m in metrics}
+print("Accuracies on all user annotations:")
 pretty_print_dict(r0_accs)
 
 
@@ -174,7 +171,35 @@ def wandb_string(s: str):
 
 if not eval_only:
     wandb.log({f"test/accuracies": wandb_string(pretty_show_dict(r0_accs))})
-    wandb.finish()
+
+# %%
+# compute accuracies on the public APIs
+from spot.function_decoding import (
+    PreprocessArgs,
+    sigmap_from_file_predictions,
+)
+from spot.static_analysis import SignatureErrorAnalysis
+from spot.function_dataset import data_project_from_dir
+
+repos_dir = get_dataset_dir(dataset) / "repos" / "test"
+test_repo_paths = [f for f in repos_dir.iterdir() if f.is_dir()]
+test_projects = pmap(
+    data_project_from_dir,
+    test_repo_paths,
+    desc="Loading test projects",
+)
+
+pre_r = r0_eval
+pred_map, label_map = sigmap_from_file_predictions(pre_r, test_projects, repos_dir)
+api_accs = {
+    m.name: SignatureErrorAnalysis(pred_map, label_map, m).accuracies
+    for m in AccuracyMetric.default_metrics(common_names)
+}
+
+print("Accuracies on public APIs:")
+pretty_print_dict(api_accs)
+if not eval_only:
+    wandb.log({f"test/api_accuracies": wandb_string(pretty_show_dict(api_accs))})
 
 # %%
 # export the code with inlined predictions as HTML
