@@ -18,6 +18,7 @@ from spot.utils import (
     get_eval_dir,
     get_gpu_id,
     get_model_dir,
+    get_modified_args,
     pickle_dump,
     pmap,
     pretty_show_dict,
@@ -42,9 +43,13 @@ def wandb_string(s: str):
 config = TrainingConfig(
     quicktest=False,
     pre_args=PreprocessArgs(
+        # imports_in_preamble=False,
+        # stub_in_preamble=False,
         drop_env_types=False,
-        add_override_usages=True,
     ),
+    left_margin=2048,
+    right_margin=2048 - 512,
+    # preamble_size=800,
     func_only=True,
 )
 
@@ -54,7 +59,6 @@ gpu_id = get_gpu_id(0)
 model_name = config.get_model_name()
 dataset_name = "ManyTypes4Py"
 # dataset_name = "SPOT-src"
-experiment_name = dataset_name + ": " + model_name
 
 print(colored(f"Use GPU: {gpu_id}", "green"))
 
@@ -85,11 +89,13 @@ from spot.function_decoding import (
     RolloutCtx,
 )
 
-ctx_args = model.args.ctx_args
+ctx_args = model.args.ctx_args = config.dec_ctx_args()
 model.args.sampling_max_tokens = ctx_args.ctx_size
 model.args.do_sample = False
 model.args.num_beams = 10
 model.args.tokens_per_type = 16
+
+experiment_name = dataset_name + ": " + model_name
 
 rctx = RolloutCtx(model=model)
 
@@ -113,6 +119,7 @@ with run_long_task("Evaluating different decoding strategy"):
         project="SPOT-eval",
         name=experiment_name,
         dir=str(results_dir),
+        config=get_modified_args(model.args),
     )
 
     evals = dict[str, EvalResult]()

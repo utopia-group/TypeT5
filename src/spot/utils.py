@@ -92,7 +92,11 @@ def get_model_dir(trained=True) -> Path:
     return get_dataroot() / "models" / post
 
 
-def get_eval_dir(dataname: str, modelname: str) -> Path:
+def get_eval_dir(
+    dataname: str, modelname: str, modifications: str | None = None
+) -> Path:
+    if modifications:
+        modelname = f"{modifications}-{modelname}"
     return get_dataroot() / "evaluations" / dataname / modelname
 
 

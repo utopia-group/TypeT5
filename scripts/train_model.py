@@ -28,15 +28,14 @@ recreate_dataset = False
 config = TrainingConfig(
     quicktest=False,
     pre_args=PreprocessArgs(
-        imports_in_preamble=False,
-        stub_in_preamble=False,
-        # drop_env_types=False,
-        # add_override_usages=True,
+        # imports_in_preamble=False,
+        # stub_in_preamble=False,
+        drop_env_types=False,
     ),
     left_margin=2048,
     right_margin=2048 - 512,
     # preamble_size=800,
-    func_only=False,
+    func_only=True,
 )
 
 TypeCheckSettings.temp_path = f"GPU-{gpu_id}"
