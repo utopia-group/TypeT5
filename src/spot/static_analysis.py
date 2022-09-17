@@ -2,7 +2,7 @@
 # project-level static analysis
 
 import copy
-from functools import lru_cache, cached_property
+from functools import cache, lru_cache, cached_property
 import enum
 
 from libcst import MetadataWrapper
@@ -87,6 +87,8 @@ class ProjectPath(NamedTuple):
 
     @staticmethod
     def from_str(s: str) -> "ProjectPath":
+        if "/" not in s:
+            raise ValueError(f"A project path must have one '/': {s}")
         module, path = s.split("/")
         return ProjectPath(module, path)
 
@@ -418,7 +420,7 @@ class PythonProject:
         root: Path,
         discard_bad_files: bool = False,
         file_filter: Callable[[Path], bool] = lambda p: True,
-        ignore_dirs: set[str] = {".venv", ".mypy_cache", ".git", "venv"},
+        ignore_dirs: set[str] = {".venv", ".mypy_cache", ".git", "venv", "build"},
         src2module: Callable[[str], cst.Module | None] = lambda s: remove_comments(
             cst.parse_module(s)
         ),
@@ -505,32 +507,44 @@ class PythonProject:
             return ".".join([*parts[:-1], parts[-1][:-3]])
 
 
-def to_abs_import_path(current_mod: ModuleName, path: str) -> ModuleName:
-    # find all leading dots
+def to_abs_import_path(
+    current_mod: ModuleName,
+    path: str,
+    allow_implicit: bool = True,
+) -> Generator[ModuleName, None, None]:
+    """Given the current module and an import path, return the list of modules
+    (in absolute path) that import could potentially be referring to."""
     dots = 0
     while dots < len(path) and path[dots] == ".":
         dots += 1
     if dots == 0:
-        return path
+        yield path
+        if allow_implicit:
+            yield path_join(path_up(current_mod), path)
+        return
     mod_segs = split_import_path(current_mod)
     assert len(mod_segs) >= dots, "Cannot go up more levels."
     result_segs = mod_segs[:-dots]
     rest = path[dots:]
     if rest:
         result_segs.append(rest)
-    return ".".join(result_segs)
+    yield ".".join(result_segs)
 
 
-_path_segs_cache = dict[str, list[str]]()
-
-
+@cache
 def split_import_path(path: str):
-    if path in _path_segs_cache:
-        return _path_segs_cache[path]
+    return path.split(".")
 
-    segs = path.split(".")
-    _path_segs_cache[path] = segs
-    return segs
+
+@cache
+def path_up(path: str) -> str:
+    segs = split_import_path(path)
+    return ".".join(segs[:-1])
+
+
+@cache
+def path_join(path: str, subpath: str) -> str:
+    return f"{path}.{subpath}" if path else subpath
 
 
 @dataclass
@@ -548,6 +562,8 @@ class ProjectUsage:
 class ModuleHierarchy:
     def __init__(self):
         self.children = dict[str, "ModuleHierarchy"]()
+        # maps from implcit relative imports to the modules that they actually refer to
+        self._implicit_imports: dict[tuple[ModuleName, ModuleName], ModuleName] = dict()
 
     def __repr__(self):
         return f"ModuleNamespace({self.children})"
@@ -560,6 +576,15 @@ class ModuleHierarchy:
             else:
                 namespace.children[s] = ModuleHierarchy()
                 namespace = namespace.children[s]
+
+    def has_module(self, segs: list[str]) -> bool:
+        namespace = self
+        for s in segs:
+            if s in namespace.children:
+                namespace = namespace.children[s]
+            else:
+                return False
+        return True
 
     def resolve_path(self, segs: list[str]) -> ProjectPath | None:
         if len(segs) < 2:
@@ -604,9 +629,24 @@ def sort_modules_by_imports(project: PythonProject) -> list[str]:
 
 
 def build_project_namespaces(
-    project: PythonProject,
+    project: PythonProject, ns_heir: ModuleHierarchy
 ) -> dict[ModuleName, ProjNamespace]:
     """Return the visible project-defined symbols in each module."""
+    # first, update the imported modules of each module by resolving
+    # any implicit relative imports
+    for mname, module in project.modules.items():
+        base_segs = mname.split(".")
+        base_segs.pop()
+        additional_imports = set[ModuleName]()
+        for im in module.imported_modules:
+            if not ns_heir.has_module(i_segs := im.split(".")) and ns_heir.has_module(
+                i_segs := base_segs + i_segs
+            ):
+                resolved = ".".join(i_segs)
+                additional_imports.add(resolved)
+                ns_heir._implicit_imports[(mname, im)] = resolved
+        module.imported_modules.update(additional_imports)
+
     sorted_modules = sort_modules_by_imports(project)
     result = dict[ModuleName, ProjNamespace]()
     for mod in sorted_modules:
@@ -627,11 +667,17 @@ class _NsBuilder(cst.CSTVisitor):
     # todo: handle imported modules and renamed modules
 
     def visit_ImportFrom(self, node: cst.ImportFrom) -> None:
-        src_mod = ".".join(
-            parse_module_path(node.module, self.module_path, len(node.relative))
+        src_mod: ModuleName = ".".join(
+            parse_module_path(node.module, self.module_path, dots := len(node.relative))
         )
         if src_mod not in self.module2ns:
-            return
+            if dots == 0:
+                # try parse it as a relative import
+                src_mod = ".".join(parse_module_path(node.module, self.module_path, 1))
+                if src_mod not in self.module2ns:
+                    return
+            else:
+                return
         src_ns = self.module2ns[src_mod]
         match node.names:
             case cst.ImportStar():
@@ -664,11 +710,17 @@ class UsageAnalysis:
         assert isinstance(v, PythonFunction)
         return v
 
-    def __init__(self, project: PythonProject, add_override_usages: bool):
+    def __init__(
+        self,
+        project: PythonProject,
+        add_override_usages: bool = False,
+        add_implicit_rel_imports: bool = False,
+    ):
         self.project = project
         self.add_override_usages = add_override_usages
+        self.add_implicit_rel_imports = add_implicit_rel_imports
         self.ns_hier = ModuleHierarchy.from_modules(project.modules.keys())
-        module2ns = build_project_namespaces(project)
+        module2ns = build_project_namespaces(project, self.ns_hier)
         self.sorted_modules = list(module2ns.keys())
 
         self.path2elem = {v.path: v for v in project.all_elems()}
@@ -684,11 +736,6 @@ class UsageAnalysis:
                 if p in self.path2class:
                     cls = self.path2class[p]
                     self.path2class.setdefault(ProjectPath(mname, s), cls)
-                    # if "__init__" in cls.methods:
-                    #     self.path2elem.setdefault(
-                    #         ProjectPath(mname, s),
-                    #         self.path2class[p].methods["__init__"],
-                    #     )
                 elif p in self.path2elem:
                     self.path2elem.setdefault(ProjectPath(mname, s), self.path2elem[p])
 
@@ -763,8 +810,13 @@ class UsageAnalysis:
         cls_path = None
         match qname.source:
             case QualifiedNameSource.IMPORT:
-                if len(segs := to_abs_import_path(mname, qname.name).split(".")) >= 2:
-                    cls_path = self.ns_hier.resolve_path(segs)
+                for abs_p in to_abs_import_path(
+                    mname, qname.name, self.add_implicit_rel_imports
+                ):
+                    segs = split_import_path(abs_p)
+                    if len(segs) >= 2:
+                        cls_path = self.ns_hier.resolve_path(segs)
+                        break
             case QualifiedNameSource.LOCAL:
                 cls_path = ProjectPath(mname, qname.name)
 
@@ -862,16 +914,21 @@ class UsageAnalysis:
 
         match qname.source:
             case QualifiedNameSource.IMPORT:
-                segs = to_abs_import_path(mname, qname.name).split(".")
-                callee = self.ns_hier.resolve_path(segs)
-                if callee is None:
-                    return
-                if callee in self.path2class:
-                    yield from gen_constructor_usages(self.path2class[callee])
-                elif callee in self.path2elem:
-                    yield ProjectUsage(
-                        caller, self.path2elem[callee].path, is_certain=True
-                    )
+                for abs_p in to_abs_import_path(
+                    mname, qname.name, self.add_implicit_rel_imports
+                ):
+                    segs = split_import_path(abs_p)
+                    callee = self.ns_hier.resolve_path(segs)
+                    if callee is None:
+                        continue
+                    if callee in self.path2class:
+                        yield from gen_constructor_usages(self.path2class[callee])
+                        break
+                    elif callee in self.path2elem:
+                        yield ProjectUsage(
+                            caller, self.path2elem[callee].path, is_certain=True
+                        )
+                        break
             case QualifiedNameSource.LOCAL:
                 yield from resolve_local_usages(qname.name)
 
@@ -893,6 +950,16 @@ class UsageAnalysis:
             for u in usages:
                 print("\t", u[2])
             raise
+
+    def get_stats(self) -> dict:
+        usages = self.all_usages
+        n_certain = sum(1 for u in usages if u.is_certain)
+        n_potential = len(usages) - n_certain
+        return {
+            "n_usages": len(usages),
+            "n_certain": n_certain,
+            "n_potential": n_potential,
+        }
 
 
 class ModuleAnlaysis:

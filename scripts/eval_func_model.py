@@ -3,6 +3,7 @@
 
 # %%
 import asyncio
+import copy
 import os
 from typing import *
 
@@ -40,25 +41,16 @@ def wandb_string(s: str):
 
 # experiment configurations
 
-config = TrainingConfig(
-    quicktest=False,
-    pre_args=PreprocessArgs(
-        # imports_in_preamble=False,
-        # stub_in_preamble=False,
-        drop_env_types=False,
-    ),
-    left_margin=2048,
-    right_margin=2048 - 512,
-    # preamble_size=800,
-    func_only=True,
-)
 
 gpu_id = get_gpu_id(0)
 # model_name = "model-v5--TrainingConfig(drop_env_types=False)"
-# model_name = "model-v6--TrainingConfig(drop_env_types=False)"
-model_name = config.get_model_name()
-dataset_name = "ManyTypes4Py"
-# dataset_name = "SPOT-src"
+# model_name = "model-v6--TrainingConfig(drop_env_types=False, add_override_usages=True)"
+model_name = "model-v7--TrainingConfig(drop_env_types=False)"
+# dataset_name = "ManyTypes4Py"
+dataset_name = "InferTypes4Py"
+
+test_pre_args = PreprocessArgs(add_implicit_rel_imports=True)
+experiment_name = "(implicit_imports) " + model_name
 
 print(colored(f"Use GPU: {gpu_id}", "green"))
 
@@ -89,13 +81,11 @@ from spot.function_decoding import (
     RolloutCtx,
 )
 
-ctx_args = model.args.ctx_args = config.dec_ctx_args()
+ctx_args = model.args.ctx_args
 model.args.sampling_max_tokens = ctx_args.ctx_size
 model.args.do_sample = False
 model.args.num_beams = 10
 model.args.tokens_per_type = 16
-
-experiment_name = dataset_name + ": " + model_name
 
 rctx = RolloutCtx(model=model)
 
@@ -104,20 +94,20 @@ decode_orders = {
     "non-incr": DecodingOrders.IndependentOrder(),
     "random": DecodingOrders.RandomOrder(),
     "no-neighbors": DecodingOrders.IndependentOrder(),
-    # "callee2caller": DecodingOrders.Callee2Caller(),
+    "callee2caller": DecodingOrders.Callee2Caller(),
+    "caller2callee": DecodingOrders.Caller2Callee(),
     # "random-twice": DecodingOrders.RandomTwice(),
-    # "caller2callee": DecodingOrders.Caller2Callee(),
 }
 
 metrics = AccuracyMetric.default_metrics(model.common_type_names)
 with run_long_task("Evaluating different decoding strategy"):
-    results_dir = get_eval_dir(dataset_name, model_name)
+    results_dir = get_eval_dir(dataset_name, experiment_name)
     results_dir.mkdir(exist_ok=True, parents=True)
     print(colored(f"Results will be saved to: {str(results_dir)}", "green"))
 
     wandb.init(
         project="SPOT-eval",
-        name=experiment_name,
+        name=dataset_name + ": " + experiment_name,
         dir=str(results_dir),
         config=get_modified_args(model.args),
     )
@@ -125,7 +115,7 @@ with run_long_task("Evaluating different decoding strategy"):
     evals = dict[str, EvalResult]()
     for oname, order in decode_orders.items():
         print(f"Evaluating decoding strategy: {oname}")
-        pre_args = PreprocessArgs()
+        pre_args = copy.deepcopy(test_pre_args)
         if oname == "no-neighbors":
             pre_args.max_callers = 0
             pre_args.max_callees = 0

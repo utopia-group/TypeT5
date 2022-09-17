@@ -704,7 +704,10 @@ class TokenizedSrcSet:
             }
         )
 
-        code_list = [x[0] for x in srcs.values()]
+        def avoid_type_mask(code: str):
+            return code.replace(SpecialNames.TypeMask, "MaskReplaced")
+
+        code_list = [avoid_type_mask(x[0]) for x in srcs.values()]
         file_list = list(srcs.keys())
         repo_list = [x[1] for x in srcs.values()]
         parsing_results = pmap(

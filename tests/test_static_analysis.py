@@ -1,4 +1,6 @@
 from pathlib import Path
+
+from numpy import False_
 from spot.static_analysis import (
     ModuleHierarchy,
     ModuleName,
@@ -9,7 +11,7 @@ from spot.static_analysis import (
     build_project_namespaces,
     cst,
     stub_from_module,
-    to_abs_import_path as to_abs,
+    to_abs_import_path,
 )
 import pytest
 
@@ -25,7 +27,7 @@ def project_from_code(name2code: dict[ModuleName, str]):
 
 
 def full_analysis(project: PythonProject) -> UsageAnalysis:
-    return UsageAnalysis(project, add_override_usages=True)
+    return UsageAnalysis(project, add_override_usages=False)
 
 
 def test_path_to_module():
@@ -38,12 +40,16 @@ def test_path_to_module():
     assert to_module(Path("src/a/__init__.py")) == "a"
 
 
+def to_abs(module_name: ModuleName, import_name: str):
+    return list(to_abs_import_path(module_name, import_name))
+
+
 def test_import_normalization():
-    assert to_abs("spot.static_analysis", ".") == "spot"
-    assert to_abs("spot.static_analysis", "..") == ""
-    assert to_abs("spot.static_analysis", ".utils") == "spot.utils"
-    assert to_abs("spot.static_analysis", ".utils.a") == "spot.utils.a"
-    assert to_abs("spot.static_analysis", "foo.bar") == "foo.bar"
+    assert to_abs("spot.static_analysis", ".") == ["spot"]
+    assert to_abs("spot.static_analysis", "..") == [""]
+    assert to_abs("spot.static_analysis", ".utils") == ["spot.utils"]
+    assert to_abs("spot.static_analysis", ".utils.a") == ["spot.utils.a"]
+    assert to_abs("spot.static_analysis", "foo.bar") == ["foo.bar", "spot.foo.bar"]
 
     with pytest.raises(AssertionError):
         to_abs("spot.static_analysis", "...")
@@ -96,6 +102,33 @@ from . import E
         "infer.type",
         "root.E",
     }
+
+
+def test_implicit_relative_imports():
+    # this is a super weird import style, but somehow it was used in
+    # some projects and was supported by the IDE...
+
+    code_B = """
+# file: root.B
+def f():
+    pass
+"""
+
+    code_A = """
+# file: root.A
+from B import f  # equivalent to from .B import f
+
+def g():
+    f()
+
+"""
+    project = project_from_code({"root.B": code_B, "root.A": code_A})
+    analysis = full_analysis(project)
+
+    analysis.assert_usages(
+        "root.A/g",
+        ("root.B/f", True),
+    )
 
 
 def test_inner_classes():
@@ -446,21 +479,21 @@ class C(B):
 """
 
     project = project_from_code({"root.file1": methods_usage})
-    analysis = full_analysis(project)
+    analysis = UsageAnalysis(project, add_override_usages=True)
 
     analysis.assert_usages(
         "root.file1/B.foo",
-        ("root.file1/A.foo", True),
+        ("root.file1/A.foo", False),
     )
 
     analysis.assert_usages(
         "root.file1/C.foo",
-        ("root.file1/B.foo", True),
+        ("root.file1/B.foo", False),
     )
 
     analysis.assert_usages(
         "root.file1/C.bar",
-        ("root.file1/A.bar", True),
+        ("root.file1/A.bar", False),
     )
 
     attr_usages = """
@@ -482,26 +515,26 @@ class C(B):
 """
 
     project = project_from_code({"root.file2": attr_usages})
-    analysis = full_analysis(project)
+    analysis = UsageAnalysis(project, add_override_usages=True)
 
     analysis.assert_usages(
         "root.file2/B.__init__",
-        ("root.file2/A.__init__", True),
+        ("root.file2/A.__init__", False),
     )
 
     analysis.assert_usages(
         "root.file2/B.x",
-        ("root.file2/A.x", True),
+        ("root.file2/A.x", False),
     )
 
     analysis.assert_usages(
         "root.file2/C.x",
-        ("root.file2/B.x", True),
+        ("root.file2/B.x", False),
     )
 
     analysis.assert_usages(
         "root.file2/C.y",
-        ("root.file2/A.y", True),
+        ("root.file2/A.y", False),
     )
 
 
@@ -663,7 +696,8 @@ def test_annot():
     assert {n.name for n in not_none(B_cls.superclasses)} == {"root.file1.A"}
 
     # test star import of classes
-    assert build_project_namespaces(project)["root.file2"]["A"] == A_cls.path
+    ns_hier = ModuleHierarchy.from_modules(project.modules.keys())
+    assert build_project_namespaces(project, ns_hier)["root.file2"]["A"] == A_cls.path
 
     analysis.assert_usages(
         "root.file2/B.fly",
@@ -676,7 +710,6 @@ def test_annot():
         "root.file2/D.__init__",
         ("root.file2/C.y", True),
         ("root.file1/A.z", True),
-        ("root.file1/A.__init__", True),
     )
 
     analysis.assert_usages(

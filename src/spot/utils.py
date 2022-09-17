@@ -92,24 +92,23 @@ def get_model_dir(trained=True) -> Path:
     return get_dataroot() / "models" / post
 
 
-def get_eval_dir(
-    dataname: str, modelname: str, modifications: str | None = None
-) -> Path:
-    if modifications:
-        modelname = f"{modifications}-{modelname}"
-    return get_dataroot() / "evaluations" / dataname / modelname
+def get_eval_dir(dataname: str, experiment_name: str) -> Path:
+    return get_dataroot() / "evaluations" / dataname / experiment_name
 
 
-def mk_dataset_from_this_project(name="SPOT-src"):
+def mk_testset_from_repos(name="InferTypes4Py", repos: Sequence[Path] | None = None):
+    if repos is None:
+        repos = [proj_root()]
     dest = get_dataset_dir(name) / "repos" / "test" / "SPOT"
     if dest.exists():
         print("Deleting old dataset at: ", dest)
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
-    root = proj_root()
-    shutil.copytree(root / "src", dest / "src")
-    shutil.copytree(root / "tests", dest / "tests")
-    return dest
+    for root in repos:
+        root = proj_root()
+        shutil.copytree(root / "src", dest / "src")
+        shutil.copytree(root / "tests", dest / "tests")
+        return dest
 
 
 def raise_error(msg: str) -> T1:  # type: ignore

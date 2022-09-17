@@ -1,5 +1,7 @@
 import asyncio
 from typing import *
+
+from spot.type_env import AccuracyMetric
 from .data import (
     CtxArgs,
     TokenizedSrcSet,
@@ -347,10 +349,8 @@ class DAggerEvalResult:
     final_srcs: list[TokenizedSrc]
     final_preds: list[dict[int, PythonType]]
 
-    def accuracies(self, common_type_names: set[str]):
-        return src_preds_to_accuracies(
-            self.final_preds, self.final_srcs, common_type_names
-        )
+    def accuracies(self, metric: AccuracyMetric):
+        return src_preds_to_accuracies(self.final_preds, self.final_srcs, metric)
 
 
 def get_typechecked_src(src: TokenizedSrc, assignment, check_r) -> TokenizedSrc:

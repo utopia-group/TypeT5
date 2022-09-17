@@ -169,6 +169,7 @@ class RolloutCtx:
             UsageAnalysis,
             project,
             pre_args.add_override_usages,
+            pre_args.add_implicit_rel_imports,
         )
         to_visit = [analysis.path2elem[p] for p in decode_order.traverse(analysis)]
         visit_set = {e.path for e in to_visit}
