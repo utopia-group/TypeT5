@@ -174,12 +174,9 @@ if not eval_only:
 
 # %%
 # compute accuracies on the public APIs
-from spot.function_decoding import (
-    PreprocessArgs,
-    sigmap_from_file_predictions,
-)
+from spot.function_decoding import PreprocessArgs
 from spot.static_analysis import SignatureErrorAnalysis
-from spot.function_dataset import data_project_from_dir
+from spot.function_dataset import data_project_from_dir, sigmap_from_file_predictions
 
 repos_dir = get_dataset_dir(dataset) / "repos" / "test"
 test_repo_paths = [f for f in repos_dir.iterdir() if f.is_dir()]

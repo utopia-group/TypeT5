@@ -1,3 +1,5 @@
+from spot.model import DatasetPredResult
+from spot.type_check import PythonType
 from .data import TokenizedSrcSet
 from .static_analysis import (
     ElemSignature,
@@ -399,3 +401,57 @@ def reformat_elems(
     result = list(seq_flatten(stmt_groups))
     # hide empty lines in the type signature to make the checker happy
     return cast(list[cst.SimpleStatementLine | cst.BaseCompoundStatement], result)
+
+
+def sigmap_from_file_predictions(
+    pr: DatasetPredResult,
+    projects: list[PythonProject],
+    repos_dir: Path,
+):
+    pred_sigmaps = dict[str, SignatureMap]()
+    label_sigmaps = dict[str, SignatureMap]()
+
+    def handle_repo(
+        repo: Path,
+        pr: DatasetPredResult,
+        project: PythonProject,
+    ):
+        path2pred = dict[ProjectPath, PythonType]()
+        pred_sigmaps[repo.name] = path2sig = dict[ProjectPath, ElemSignature]()
+        label_sigmaps[repo.name] = path2label = {
+            el.path: el.get_signature() for el in project.all_elems()
+        }
+
+        for preds, info in zip(pr.predictions, pr.chunks.chunks_info):
+            mname = PythonProject.rel_path_to_module_name(
+                (repos_dir / info.src_file).relative_to(repo)
+            )
+            for p, ai in zip(preds, info.annots_info):
+                mpath = ProjectPath.annot_path_to_module_path(ai.path)
+                ppath = ProjectPath(mname, mpath)
+                path2pred[ppath] = p
+
+        def get_pred(path: ProjectPath) -> cst.Annotation | None:
+            if path not in path2pred:
+                return None
+            ty = path2pred[path]
+            return cst.Annotation(cst.parse_expression(str(ty)))
+
+        for path, sig in path2label.items():
+            match sig:
+                case VariableSignature(annot, inclass):
+                    path2sig[path] = VariableSignature(get_pred(path), inclass)
+                case FunctionSignature(params, ret, inclass):
+                    new_sig = FunctionSignature(dict(), None, inclass)
+                    for p in params:
+                        new_sig.params[p] = get_pred(path.append(p))
+                    new_sig.returns = get_pred(path.append(SpecialNames.Return))
+                    path2sig[path] = new_sig
+
+    repo2proj = {p.root_dir: p for p in projects}
+
+    for repo, repo_pr in pr.group_by_repo(repos_dir).items():
+        project = repo2proj[repo]
+        handle_repo(repo, repo_pr, project)
+
+    return pred_sigmaps, label_sigmaps
