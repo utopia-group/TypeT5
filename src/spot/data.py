@@ -115,7 +115,7 @@ class GitRepo:
             file_to_annots[rpath] = {
                 (k := info.path): (
                     parse_type_expr(
-                        m, cast(cst.Annotation, info.annot).annotation, silent
+                        cast(cst.Annotation, info.annot).annotation, silent
                     ),
                     path_to_cat[k],
                 )
@@ -758,7 +758,7 @@ def create_tokenized_srcsets(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     tk_dataset: dict[str, TokenizedSrcSet] = {}
-    with run_long_task(f"Generating TokenizedSrcSets: {out_dir.name}"):
+    with run_long_task(f"Generating TokenizedSrcSets: {out_dir.name}", notify=False):
         for name in ["test", "train", "valid"]:
             base = repos_dir / name
             if not base.exists():
@@ -1090,12 +1090,11 @@ def preds_to_accuracies(
 ):
     cats = [an.cat for info in dataset.chunks_info for an in info.annots_info]
     labels = [ty for info in dataset.chunks_info for ty in info.types]
-    poses = [i for info in dataset.chunks_info for i in info.label_ids]
+    # poses = [i for info in dataset.chunks_info for i in info.label_ids]
     return type_accuracies(
         list(seq_flatten(preds)),
         labels,
         cats,
-        poses,
         metric=metric,
     )
 
@@ -1121,7 +1120,6 @@ def src_preds_to_accuracies(
         pred_types,
         labels,
         cats,
-        poses,
         metric=metric,
     )
 

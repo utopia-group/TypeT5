@@ -188,16 +188,19 @@ def export_preds_on_code(
             chunk_accs.append(CountedAcc(n_correct, len(ps)))
             pbar.update()
 
-    chunk_sorted = sorted(
-        range(len(chunk_accs)), key=lambda i: (file_list, chunk_accs[i].acc)
-    )
-    links = "\n".join(
-        f"<li><a href='chunks/chunk{i}.html#prediction-0'>chunk{i} (Acc: {chunk_accs[i]})</a></li>"
-        for i in chunk_sorted
-    )
-    index = f""" Chunks sorted by accuracy (from low to high).
-    <ol> {links} </ol>
-    """
+    chunk_groups = groupby(range(len(chunk_accs)), lambda i: file_list[i])
+    chunk_links = list[str]()
+    for file, ids in chunk_groups.items():
+        ids.sort(key=lambda i: chunk_accs[i].acc)
+        links = "\n".join(
+            f"<li><a href='chunks/chunk{i}.html#prediction-0'>chunk{i} (Acc: {chunk_accs[i]})</a></li>"
+            for i in ids
+        )
+        section = f"<h5>{file}</h5>\n<ol>{links}</ol>"
+        chunk_links.append(section)
+    links_str = "\n".join(chunk_links)
+
+    index = f"<h2> Model Predictions ({metric.name})</h2>\n{links_str}"
     write_file(export_to / "index.html", index)
     return None
 

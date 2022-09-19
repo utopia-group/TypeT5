@@ -116,9 +116,11 @@ class TokenizedSrc:
             feedbacks=self.feedbacks,
         )
 
-    def print_code(self, max_lines: int = 50):
+    def print_code(self, max_lines: int = 100, body_only: bool = False):
         "Print out the (decoded) token sequence"
         code = decode_tokens(self.tokenized_code)
+        if not body_only:
+            code = decode_tokens(self.tokenized_preamble) + code
         print_limited(code, max_lines)
 
     @staticmethod

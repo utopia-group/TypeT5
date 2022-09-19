@@ -1,4 +1,5 @@
 import requests
+from spot.experiments.utils import SupportedSyntax, remove_newer_syntax
 from spot.function_dataset import SignatureMap
 from spot.type_check import normalize_type, parse_type_expr
 from spot.utils import *
@@ -87,76 +88,15 @@ def run_type4py_request(
     return Type4PyResponseParser(module).parse(res)
 
 
-_DefaultImport = cst.parse_statement(
-    "from typing import Any, List, Tuple, Dict, Set, Union, Optional"
-)
-
-
-def remove_newer_syntax(m: cst.Module) -> cst.Module:
-    """
-    Remove or rewrite any newer python features that Type4Py doesn't support.
-    """
-
-    class PatternRewriter(cst.CSTTransformer):
-        def leave_MatchAs(self, node, updated: cst.MatchAs):
-            if updated.pattern:
-                return updated.pattern
-            elif updated.name:
-                return updated.name
-            else:
-                # wild card pattern
-                return cst.Name("_")
-
-    def pattern_to_expr(pattern: cst.MatchPattern):
-        np = cast(cst.BaseExpression, pattern.visit(PatternRewriter()))
-        return cst.parse_expression(m.code_for_node(np))
-
-    class Rewriter(cst.CSTTransformer):
-        def leave_Annotation(self, node, updated: "cst.Annotation"):
-            ty = parse_type_expr(m, updated.annotation, silent=True)
-            if ty is None:
-                return cst.RemoveFromParent()
-            ty = normalize_type(ty)  # this should get rid of the Union type syntax.
-            return updated.with_changes(annotation=cst.parse_expression(str(ty)))
-
-        def leave_Module(self, node, updated: "cst.Module"):
-            new_lines = [_DefaultImport]
-            new_lines.extend(updated.body)
-            return updated.with_changes(body=new_lines)
-
-        def leave_Match(self, node, updated: cst.Match):
-            subject = updated.subject
-            if isinstance(subject, cst.Tuple):
-                subject = subject.with_changes(
-                    lpar=[cst.LeftParen()], rpar=[cst.RightParen()]
-                )
-
-            conditions = [
-                cst.Comparison(
-                    subject,
-                    [
-                        cst.ComparisonTarget(
-                            cst.Equal(),
-                            pattern_to_expr(c.pattern),
-                        )
-                    ],
-                )
-                for c in updated.cases
-            ]
-            bodies = [c.body for c in updated.cases]
-            if_clauses = None
-            for cond, body in reversed(list(zip(conditions, bodies))):
-                if_clauses = cst.If(cond, body, orelse=if_clauses)
-            assert isinstance(if_clauses, cst.If)
-            return if_clauses
-
-    return m.visit(Rewriter())
-
-
 @dataclass
 class Type4PyEvalResult:
     pred_maps: dict[str, SignatureMap]
     label_maps: dict[str, SignatureMap]
+
+
+Type4PySupportedSyntax = SupportedSyntax(
+    pattern_match=False, union_types=False, basic_types=False
+)
 
 
 def eval_type4py_on_projects(
@@ -165,7 +105,7 @@ def eval_type4py_on_projects(
 ) -> Type4PyEvalResult:
     name2project = {p.name: p for p in projects}
     module_srcs = {
-        (project.name, name): remove_newer_syntax(m.tree).code
+        (project.name, name): remove_newer_syntax(m.tree, Type4PySupportedSyntax).code
         for project in projects
         for name, m in project.modules.items()
     }

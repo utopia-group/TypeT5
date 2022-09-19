@@ -43,9 +43,11 @@ def wandb_string(s: str):
 
 
 gpu_id = get_gpu_id(0)
-# model_name = "model-v5--TrainingConfig(drop_env_types=False)"
 # model_name = "model-v6--TrainingConfig(drop_env_types=False, add_override_usages=True)"
-model_name = "model-v7--TrainingConfig(drop_env_types=False)"
+# model_name = "model-v7--TrainingConfig(drop_env_types=False)"
+model_name = (
+    "model-v7--TrainingConfig(drop_env_types=False, add_implicit_rel_imports=True)"
+)
 # dataset_name = "ManyTypes4Py"
 dataset_name = "InferTypes4Py"
 

@@ -158,15 +158,11 @@ def remove_top_final(t: PythonType) -> PythonType:
 
 def parse_type_str(typ_str: str) -> PythonType:
     tree = ast.parse(typ_str, mode="eval").body
-    ty = parse_type_from_ast(tree)
-    assert isinstance(ty, PythonType), f"{ty} is not a PythonType"
-    return ty
+    return parse_type_from_ast(tree)
 
 
-def parse_type_expr(
-    m: cst.Module, annot: cst.BaseExpression, silent=False
-) -> PythonType | None:
-    code = m.code_for_node(annot)
+def parse_type_expr(annot: cst.BaseExpression, silent=False) -> PythonType | None:
+    code = show_expr(annot, quoted=False)
     code = re.sub(r"#.*\n", "", code).replace("\n", "")
     try:
         return parse_type_str(code)
@@ -175,11 +171,11 @@ def parse_type_expr(
             return None
         else:
             print(f"Failed to parse type expression: `{code}` in source module:")
-            print(m.code)
             raise e
 
 
 def parse_type_from_ast(tree: ast.expr) -> PythonType:
+    assert isinstance(tree, ast.expr)
     match tree:
         case ast.Name() | ast.Attribute():
             return PythonType(parse_qualified_name(tree))
@@ -215,7 +211,7 @@ def parse_type_from_ast(tree: ast.expr) -> PythonType:
         case ast.Tuple(elts=elts):
             return PythonType(("<Tuple>",), tuple(map(parse_type_from_ast, elts)))
         case _:
-            raise RuntimeError(
+            raise SyntaxError(
                 None, f"Unsupported ast type: {ast.dump(tree, include_attributes=True)}"
             )
 

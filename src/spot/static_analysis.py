@@ -137,6 +137,13 @@ def get_decorator_name(dec: cst.Decorator) -> str | None:
 
 
 @dataclass
+class LabelInfo:
+    annot: cst.Annotation
+    cat: AnnotCat
+    attached_to: cst.CSTNode
+
+
+@dataclass
 class PythonFunction:
     name: str
     path: ProjectPath
@@ -155,6 +162,23 @@ class PythonFunction:
 
     def get_signature(self) -> "FunctionSignature":
         return FunctionSignature.from_function(self.tree, self.parent_class is not None)
+
+    def get_labels(self) -> list[LabelInfo]:
+        is_method = self.in_class
+        labels = list[LabelInfo]()
+
+        class LabelsFinder(cst.CSTVisitor):
+            def visit_Param(self, node: "cst.Param") -> Optional[bool]:
+                if not (is_method and node.name.value == "self") and node.annotation:
+                    label = LabelInfo(node.annotation, AnnotCat.FuncArg, node.name)
+                    labels.append(label)
+
+        self.tree.params.visit(LabelsFinder())
+        rannot = self.tree.returns
+        if rannot is not None:
+            return_info = LabelInfo(rannot, AnnotCat.FuncReturn, self.tree)
+            labels.append(return_info)
+        return labels
 
     @cached_property
     def is_fixture(self) -> bool:
@@ -183,6 +207,7 @@ class PythonVariable:
     name: str
     path: ProjectPath
     parent_class: ProjectPath | None
+    tree: cst.Name | cst.Attribute
     assignments: list[
         cst.Assign | cst.AnnAssign
     ]  # only record assignments outside of functions
@@ -198,12 +223,18 @@ class PythonVariable:
         return self.parent_class is not None
 
     def get_signature(self) -> "VariableSignature":
-        sig = None
-        for a in reversed(self.assignments):
+        annot = None
+        for a in self.assignments:
             if isinstance(a, cst.AnnAssign):
-                sig = a.annotation
-                break  # the last annotation wins
-        return VariableSignature(sig, self.parent_class is not None)
+                annot = a.annotation
+                break  # the first annotation wins
+        return VariableSignature(annot, self.parent_class is not None)
+
+    def get_labels(self) -> Generator[LabelInfo, None, None]:
+        sig = self.get_signature()
+        if sig.annot is not None:
+            cat = AnnotCat.ClassAtribute if self.in_class else AnnotCat.GlobalVar
+            yield LabelInfo(sig.annot, cat, self.tree)
 
 
 PythonElem = PythonFunction | PythonVariable
@@ -254,6 +285,13 @@ class FunctionSignature:
 
     def n_annots(self) -> int:
         return len(self.params) + 1
+
+    def get_annotated(self) -> Generator[tuple[AnnotCat, cst.Annotation], None, None]:
+        for a in self.params.values():
+            if a is not None:
+                yield AnnotCat.FuncArg, a
+        if self.returns is not None:
+            yield AnnotCat.FuncReturn, self.returns
 
     @staticmethod
     def from_function(func: cst.FunctionDef, in_class: bool) -> "FunctionSignature":
@@ -340,14 +378,12 @@ class PythonModule:
     imported_modules: set[ModuleName]
     defined_symbols: dict[str, ProjectPath]
     tree: cst.Module
+    location_map: dict[cst.CSTNode, CodeRange]
     elem2pos: dict[ModulePath, CodeRange]
 
     @staticmethod
     def from_cst(module: cst.Module, name: str) -> "PythonModule":
-        wrapper = MetadataWrapper(module)
-        builder = PythonModuleBuilder(wrapper, name)
-        wrapper.visit(builder)
-        return builder.get_module()
+        return build_python_module(module, name)
 
     def __repr__(self):
         return f"PythonModule(n_functions={len(self.functions)}, n_classes={len(self.classes)})"
@@ -1046,7 +1082,6 @@ class SignatureErrorAnalysis:
     ):
         sig_preds = list[SingatureTypePrediction]()
         pred_project = list[str]()
-        dummy_mod = cst.Module([])
         n_labels = 0
         n_skipped = 0
         n_missing = [0]
@@ -1060,10 +1095,7 @@ class SignatureErrorAnalysis:
                 cat: AnnotCat,
                 pos: int,
             ):
-                if (
-                    label is None
-                    or (lt := parse_type_expr(dummy_mod, label.annotation)) is None
-                ):
+                if label is None or (lt := parse_type_expr(label.annotation)) is None:
                     # no label available
                     return
                 if pred is None:
@@ -1075,7 +1107,7 @@ class SignatureErrorAnalysis:
                         n_missing[0] += 1
                         return
                 assert pred is not None
-                assert (pt := parse_type_expr(dummy_mod, pred.annotation)) is not None
+                assert (pt := parse_type_expr(pred.annotation)) is not None
                 sig_pred = SingatureTypePrediction(
                     predicted=pt,
                     expected=lt,
@@ -1124,12 +1156,13 @@ class SignatureErrorAnalysis:
             [p.predicted for p in sig_preds],
             [p.expected for p in sig_preds],
             [p.cat for p in sig_preds],
-            [p.index for p in sig_preds],
             metric,
             output_incorrect_set=incorrect_set,
         )
-        accs["n_skipped_types"] = n_skipped
-        accs["n_missing_types"] = n_missing[0]
+        if n_skipped > 0:
+            accs["n_skipped_types"] = n_skipped
+        if n_missing[0] > 0:
+            accs["n_missing_types"] = n_missing[0]
 
         self.accuracies = accs
 
@@ -1153,202 +1186,209 @@ class _VisitType(enum.Enum):
     Function = enum.auto()
 
 
-class PythonModuleBuilder(cst.CSTVisitor):
+def build_python_module(module: cst.Module, module_name: ModuleName):
     """Construct a `PythonModule` from a `cst.Module`.
     If multiple definitions of the same name are found, only the last one is kept."""
 
-    METADATA_DEPENDENCIES = (PositionProvider,)
+    wrapper = cst.MetadataWrapper(module)
+    node2location = dict(wrapper.resolve(PositionProvider))
 
-    def __init__(self, wrapper: cst.MetadataWrapper, module_name: ModuleName):
-        super().__init__()
+    imported_modules = set[str]()
+    defined_symbols = dict[str, ProjectPath]()
+    elem2pos = dict[ModulePath, CodeRange]()
 
-        self.module = wrapper.module
-        self.module_name = module_name
-        self.module_base = ProjectPath(self.module_name, "")
+    class ModuleBuilder(cst.CSTVisitor):
+        def __init__(self):
+            super().__init__()
+            self.functions = dict[str, PythonFunction]()
+            self.global_vars = dict[str, PythonVariable]()
+            self.classes = dict[str, PythonClass]()
+            self.module_base = ProjectPath(module_name, "")
+            self.class_stack = list[PythonClass]()
+            self.visit_stack = [_VisitType.Root]
 
-        self.functions = dict[str, PythonFunction]()
-        self.global_vars = dict[str, PythonVariable]()
-        self.classes = dict[str, PythonClass]()
-        self.class_stack = list[PythonClass]()
-        self.visit_stack = [_VisitType.Root]
-        self.imported_modules = set[str]()
-        self.defined_symbols = dict[str, ProjectPath]()
-        self.elem2pos = dict[ModulePath, CodeRange]()
+        @property
+        def current_class(self) -> PythonClass | None:
+            return self.class_stack[-1] if self.class_stack else None
 
-    @property
-    def current_class(self) -> PythonClass | None:
-        return self.class_stack[-1] if self.class_stack else None
+        @property
+        def current_path(self):
+            if self.current_class is not None:
+                return self.current_class.path
+            else:
+                return self.module_base
 
-    @property
-    def current_path(self):
-        if self.current_class is not None:
-            return self.current_class.path
-        else:
-            return self.module_base
+        def _record_elem(self, e: PythonElem, location_node: cst.CSTNode):
+            cls = self.current_class
+            vars = cls.attributes if cls else self.global_vars
+            funcs = cls.methods if cls else self.functions
+            classes = cls.subclasses if cls else self.classes
+            is_new_def = False
 
-    def _record_elem(self, e: PythonElem, location_node: cst.CSTNode):
-        cls = self.current_class
-        vars = cls.attributes if cls else self.global_vars
-        funcs = cls.methods if cls else self.functions
-        classes = cls.subclasses if cls else self.classes
-        is_new_def = False
-
-        classes.pop(e.name, None)
-        if cls is None:
-            self.defined_symbols[e.name] = e.path
-        match e:
-            case PythonFunction(n):
-                vars.pop(n, None)
-                funcs[n] = e
-                is_new_def = True
-            case PythonVariable(n, assignments=assignments):
-                funcs.pop(n, None)
-                if n in vars:
-                    assert_eq(vars[n].path, e.path)
-                    vars[n].assignments.extend(assignments)
-                else:
-                    vars[n] = e
+            classes.pop(e.name, None)
+            if cls is None:
+                defined_symbols[e.name] = e.path
+            match e:
+                case PythonFunction(n):
+                    vars.pop(n, None)
+                    funcs[n] = e
                     is_new_def = True
-            case _:
-                raise NotImplementedError()
-        if is_new_def:
-            crange = self.get_metadata(PositionProvider, location_node)
-            self.elem2pos[e.path.path] = crange
+                case PythonVariable(n, assignments=assignments):
+                    funcs.pop(n, None)
+                    if n in vars:
+                        assert_eq(vars[n].path, e.path)
+                        vars[n].assignments.extend(assignments)
+                    else:
+                        vars[n] = e
+                        is_new_def = True
+                case _:
+                    raise NotImplementedError()
+            if is_new_def:
+                crange = node2location[location_node]
+                elem2pos[e.path.path] = crange
 
-    def get_module(self) -> PythonModule:
-        return PythonModule(
-            global_vars=list(self.global_vars.values()),
-            functions=list(self.functions.values()),
-            classes=list(self.classes.values()),
-            name=self.module_name,
-            imported_modules=self.imported_modules,
-            defined_symbols=self.defined_symbols,
-            tree=self.module,
-            elem2pos=self.elem2pos,
-        )
-
-    def visit_FunctionDef(self, node: cst.FunctionDef):
-        parent_type = self.visit_stack[-1]
-        self.visit_stack.append(_VisitType.Function)
-        if parent_type == _VisitType.Function:
-            # skip inner functions
-            return False
-        for dec in node.decorators:
-            if get_decorator_name(dec) == "overload":
+        def visit_FunctionDef(self, node: cst.FunctionDef):
+            parent_type = self.visit_stack[-1]
+            self.visit_stack.append(_VisitType.Function)
+            if parent_type == _VisitType.Function:
+                # skip inner functions
                 return False
+            for dec in node.decorators:
+                if get_decorator_name(dec) == "overload":
+                    return False
 
-        name = node.name.value
-        func = PythonFunction(
-            name=node.name.value,
-            path=self.current_path.append(name),
-            tree=node,
-            parent_class=self.current_class.path if self.current_class else None,
-        )
-        self._record_elem(func, node)
+            name = node.name.value
+            func = PythonFunction(
+                name=node.name.value,
+                path=self.current_path.append(name),
+                tree=node,
+                parent_class=self.current_class.path if self.current_class else None,
+            )
+            self._record_elem(func, node)
 
-    def leave_FunctionDef(self, node) -> None:
-        assert self.visit_stack[-1] == _VisitType.Function
-        self.visit_stack.pop()
+        def leave_FunctionDef(self, node) -> None:
+            assert self.visit_stack[-1] == _VisitType.Function
+            self.visit_stack.pop()
 
-    def visit_ClassDef(self, node: cst.ClassDef):
-        parent_type = self.visit_stack[-1]
-        parent_cls = self.current_class
-        cls = PythonClass(
-            name=node.name.value,
-            path=self.current_path.append(node.name.value),
-            attributes=dict(),
-            methods=dict(),
-            subclasses=dict(),
-            tree=node,
-            parent_class=parent_cls.path if parent_cls else None,
-        )
-        if parent_cls:
-            parent_cls.subclasses[cls.name] = cls
-        self.visit_stack.append(_VisitType.Class)
-        self.class_stack.append(cls)
-        if parent_type == _VisitType.Root:
-            self.global_vars.pop(cls.name, None)
-            self.functions.pop(cls.name, None)
-            self.classes[cls.name] = cls
-            self.defined_symbols[cls.name] = cls.path
+        def visit_ClassDef(self, node: cst.ClassDef):
+            parent_type = self.visit_stack[-1]
+            parent_cls = self.current_class
+            cls = PythonClass(
+                name=node.name.value,
+                path=self.current_path.append(node.name.value),
+                attributes=dict(),
+                methods=dict(),
+                subclasses=dict(),
+                tree=node,
+                parent_class=parent_cls.path if parent_cls else None,
+            )
+            if parent_cls:
+                parent_cls.subclasses[cls.name] = cls
+            self.visit_stack.append(_VisitType.Class)
+            self.class_stack.append(cls)
+            if parent_type == _VisitType.Root:
+                self.global_vars.pop(cls.name, None)
+                self.functions.pop(cls.name, None)
+                self.classes[cls.name] = cls
+                defined_symbols[cls.name] = cls.path
 
-    def leave_ClassDef(self, node: cst.ClassDef):
-        assert self.visit_stack[-1] == _VisitType.Class
-        self.class_stack.pop()
-        self.visit_stack.pop()
+        def leave_ClassDef(self, node: cst.ClassDef):
+            assert self.visit_stack[-1] == _VisitType.Class
+            self.class_stack.pop()
+            self.visit_stack.pop()
 
-    # record global_vars and class attributes
-    def visit_AnnAssign(self, node: cst.AnnAssign):
-        cls = self.current_class
-        cls_path = cls.path if cls else None
-        var = None
-        match self.visit_stack[-1], node.target:
-            case (_VisitType.Root, cst.Name(value=n)):
-                # global var assignment
-                var = PythonVariable(n, ProjectPath(self.module_name, n), None, [node])
-            case (_VisitType.Class, cst.Name(value=n)) if cls:
-                # initialized outside of methods
-                var = PythonVariable(n, cls.path.append(n), cls_path, [node])
-            case (
-                _VisitType.Function,
-                cst.Attribute(value=cst.Name(value="self"), attr=cst.Name(value=n)),
-            ) if cls:
-                # initialized/accessed inside methods
-                # TODO: figure out how to move the annotation to class scope
-                var = PythonVariable(n, cls.path.append(n), cls_path, [])
-        if var is not None:
-            self._record_elem(var, node)
-        return None
-
-    # record global_vars and class attributes
-    def visit_Assign(self, node: cst.Assign) -> Optional[bool]:
-        cls = self.current_class
-        cls_path = cls.path if cls else None
-
-        # class member declaration
-        for target in node.targets:
+        # record global_vars and class attributes
+        def visit_AnnAssign(self, node: cst.AnnAssign):
+            cls = self.current_class
+            cls_path = cls.path if cls else None
             var = None
-            match self.visit_stack[-1], target.target:
-                case (_VisitType.Root, cst.Name(value=n)):
+            match self.visit_stack[-1], node.target:
+                case (_VisitType.Root, cst.Name(value=n) as tree):
                     # global var assignment
                     var = PythonVariable(
-                        n, ProjectPath(self.module_name, n), None, [node]
+                        n, ProjectPath(module_name, n), None, tree, [node]
                     )
-                case (_VisitType.Class, cst.Name(value=n)) if cls:
+                case (_VisitType.Class, cst.Name(value=n) as tree) if cls:
                     # initialized outside of methods
-                    var = PythonVariable(n, cls.path.append(n), cls_path, [node])
+                    var = PythonVariable(n, cls.path.append(n), cls_path, tree, [node])
                 case (
                     _VisitType.Function,
-                    cst.Attribute(value=cst.Name(value="self"), attr=cst.Name(value=n)),
+                    cst.Attribute(
+                        value=cst.Name(value="self"), attr=cst.Name(value=n)
+                    ) as tree,
                 ) if cls:
                     # initialized/accessed inside methods
-                    var = PythonVariable(n, cls.path.append(n), cls_path, [])
+                    # TODO: figure out how to move the annotation to class scope
+                    var = PythonVariable(n, cls.path.append(n), cls_path, tree, [])
             if var is not None:
                 self._record_elem(var, node)
+            return None
 
-    def visit_Import(self, node: cst.Import):
-        for alias in node.names:
-            segs = list[str]()
-            for seg in parse_module_path(alias.name, self.module_name, 0):
-                segs.append(seg)
-                self.imported_modules.add(".".join(segs))
+        # record global_vars and class attributes
+        def visit_Assign(self, node: cst.Assign) -> Optional[bool]:
+            cls = self.current_class
+            cls_path = cls.path if cls else None
 
-    def visit_ImportFrom(self, node: cst.ImportFrom):
-        segs = list[str]()
-        for seg in parse_module_path(node.module, self.module_name, len(node.relative)):
-            segs.append(seg)
-            self.imported_modules.add(".".join(segs))
-        prefix = ".".join(segs)
-        if not isinstance(node.names, cst.ImportStar):
+            # class member declaration
+            for target in node.targets:
+                var = None
+                match self.visit_stack[-1], target.target:
+                    case (_VisitType.Root, cst.Name(value=n) as tree):
+                        # global var assignment
+                        var = PythonVariable(
+                            n, ProjectPath(module_name, n), None, tree, [node]
+                        )
+                    case (_VisitType.Class, cst.Name(value=n) as tree) if cls:
+                        # initialized outside of methods
+                        var = PythonVariable(
+                            n, cls.path.append(n), cls_path, tree, [node]
+                        )
+                    case (
+                        _VisitType.Function,
+                        cst.Attribute(
+                            value=cst.Name(value="self"), attr=cst.Name(value=n)
+                        ) as tree,
+                    ) if cls:
+                        # initialized/accessed inside methods
+                        var = PythonVariable(n, cls.path.append(n), cls_path, tree, [])
+                if var is not None:
+                    self._record_elem(var, node)
+
+        def visit_Import(self, node: cst.Import):
             for alias in node.names:
-                posfix = [prefix]
-                # modules could also be imported via import from statements
-                for seg in parse_module_path(alias.name, "", 0):
-                    posfix.append(seg)
-                self.imported_modules.add(".".join(posfix))
+                segs = list[str]()
+                for seg in parse_module_path(alias.name, module_name, 0):
+                    segs.append(seg)
+                    imported_modules.add(".".join(segs))
 
-    def visit_Module(self, node: cst.Module):
-        self.module = node
+        def visit_ImportFrom(self, node: cst.ImportFrom):
+            segs = list[str]()
+            for seg in parse_module_path(node.module, module_name, len(node.relative)):
+                segs.append(seg)
+                imported_modules.add(".".join(segs))
+            prefix = ".".join(segs)
+            if not isinstance(node.names, cst.ImportStar):
+                for alias in node.names:
+                    posfix = [prefix]
+                    # modules could also be imported via import from statements
+                    for seg in parse_module_path(alias.name, "", 0):
+                        posfix.append(seg)
+                    imported_modules.add(".".join(posfix))
+
+    builder = ModuleBuilder()
+    wrapper.visit(builder)
+
+    return PythonModule(
+        global_vars=list(builder.global_vars.values()),
+        functions=list(builder.functions.values()),
+        classes=list(builder.classes.values()),
+        name=module_name,
+        imported_modules=imported_modules,
+        defined_symbols=defined_symbols,
+        tree=wrapper.module,
+        elem2pos=elem2pos,
+        location_map=node2location,
+    )
 
 
 def parse_module_path(

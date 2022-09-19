@@ -123,7 +123,7 @@ def g():
 
 """
     project = project_from_code({"root.B": code_B, "root.A": code_A})
-    analysis = full_analysis(project)
+    analysis = UsageAnalysis(project, add_implicit_rel_imports=True)
 
     analysis.assert_usages(
         "root.A/g",

@@ -33,7 +33,6 @@ from .type_env import (
     AccuracyMetric,
     AnnotPath,
     collect_user_annotations,
-    type_accuracies,
 )
 from .utils import *
 

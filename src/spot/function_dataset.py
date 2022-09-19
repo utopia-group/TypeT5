@@ -4,6 +4,8 @@ from .data import TokenizedSrcSet
 from .static_analysis import (
     ElemSignature,
     FunctionSignature,
+    LabelInfo,
+    ModuleName,
     ProjectPath,
     PythonClass,
     PythonElem,
@@ -455,3 +457,21 @@ def sigmap_from_file_predictions(
         handle_repo(repo, repo_pr, project)
 
     return pred_sigmaps, label_sigmaps
+
+
+def collect_public_api_labels(
+    repo: Path,
+) -> dict[ModuleName, dict[CodePosition, LabelInfo]]:
+    """Collect the type annotation information on all public APIs.
+    Note that the beginning of each function is recorded as the location
+    of its return type annotation."""
+    # do not modify the original code to maintain the location mapping.
+    proj = data_project_from_dir(repo, drop_comments=False)
+    annotations = dict[ModuleName, dict[CodePosition, LabelInfo]]()
+    for mod in proj.modules.values():
+        for el in mod.all_elements():
+            group = annotations.setdefault(el.path.module, dict())
+            for label in el.get_labels():
+                loc = mod.location_map[label.attached_to].start
+                group[loc] = label
+    return annotations

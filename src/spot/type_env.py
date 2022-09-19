@@ -83,7 +83,6 @@ def collect_user_annotations(
         return pos.line, pos.column
 
     annots = collect_annots_info(code)
-    m = code if isinstance(code, cst.Module) else cast(cst.MetadataWrapper, code).module
 
     types: list[PythonType] = []
     annots_info: list[AnnotInfo] = []
@@ -92,7 +91,7 @@ def collect_user_annotations(
     for info in annots:
         if info.annot is None:
             continue
-        ty = parse_type_expr(m, info.annot.annotation, silent=True)
+        ty = parse_type_expr(info.annot.annotation, silent=True)
         if ty is None:
             continue
         types.append(ty)
@@ -352,12 +351,11 @@ def type_accuracies(
     pred_types: Sequence[PythonType],
     label_types: Sequence[PythonType],
     types_cat: Sequence[AnnotCat],
-    types_pos: Sequence[int],
     metric: AccuracyMetric,
     crash_on_type_mask=True,
     output_incorrect_set: list[int] | None = None,
 ) -> dict[str, Any]:
-    assert_eq(len(pred_types), len(label_types), len(types_cat), len(types_pos))
+    assert_eq(len(pred_types), len(label_types), len(types_cat))
 
     if crash_on_type_mask:
         if PythonType.from_name(SpecialNames.TypeMask) in label_types:
@@ -390,12 +388,11 @@ def type_accuracies(
     # acc_by_pos = GroupedAccCounter[range]()
     acc_by_common = GroupedAccCounter[bool]()
 
-    for i, p, l, cat, pos in zip(
-        range(len(pred_types)), pred_types, label_types, types_cat, types_pos
+    for i, p, l, cat in zip(
+        range(len(pred_types)), pred_types, label_types, types_cat,
     ):
         is_correct = p == l
         acc_by_cat.count(cat, is_correct, 1)
-        # acc_by_pos.count(i_to_range(pos), is_correct, 1)
         if metric.common_type_names is not None:
             acc_by_common.count(is_common_type(l), is_correct, 1)
         if not is_correct and output_incorrect_set is not None:
