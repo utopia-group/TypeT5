@@ -155,6 +155,7 @@ def remove_top_final(t: PythonType) -> PythonType:
     else:
         return t
 
+
 def remove_type_namespace(typ: PythonType) -> PythonType:
     """
     Remove the namespace from the type. i.e., convert typing.List[T] to List[T].
@@ -294,12 +295,13 @@ class MypyChecker:
     MypyErrorCodesToIgnore = {"valid-type"}
 
     @staticmethod
-    def check_project(proj: Path, mypy_path: Path | None = None) -> MypyResult | str:
-        if mypy_path is None:
-            mypy_path = proj_root() / ".venv/bin/mypy"
+    def check_project(proj: Path, binary_path: Path | None = None) -> MypyResult | str:
+        if binary_path is None:
+            binary_path = proj_root() / ".venv/bin"
+        binary_path = binary_path.resolve()
         cmd = [
-            "python",
-            str(mypy_path),
+            binary_path / "python",
+            binary_path / "mypy",
             ".",
             *MypyChecker.TypeCheckFlags,
         ]

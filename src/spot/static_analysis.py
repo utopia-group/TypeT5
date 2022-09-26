@@ -1190,7 +1190,7 @@ class SignatureErrorAnalysis:
 # utilities for static analysis
 
 
-class _VisitType(enum.Enum):
+class _VisitKind(enum.Enum):
     Root = enum.auto()
     Class = enum.auto()
     Function = enum.auto()
@@ -1215,7 +1215,7 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
             self.classes = dict[str, PythonClass]()
             self.module_base = ProjectPath(module_name, "")
             self.class_stack = list[PythonClass]()
-            self.visit_stack = [_VisitType.Root]
+            self.visit_stack = [_VisitKind.Root]
 
         @property
         def current_class(self) -> PythonClass | None:
@@ -1259,8 +1259,8 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
 
         def visit_FunctionDef(self, node: cst.FunctionDef):
             parent_type = self.visit_stack[-1]
-            self.visit_stack.append(_VisitType.Function)
-            if parent_type == _VisitType.Function:
+            self.visit_stack.append(_VisitKind.Function)
+            if parent_type == _VisitKind.Function:
                 # skip inner functions
                 return False
             for dec in node.decorators:
@@ -1277,7 +1277,7 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
             self._record_elem(func, node)
 
         def leave_FunctionDef(self, node) -> None:
-            assert self.visit_stack[-1] == _VisitType.Function
+            assert self.visit_stack[-1] == _VisitKind.Function
             self.visit_stack.pop()
 
         def visit_ClassDef(self, node: cst.ClassDef):
@@ -1294,16 +1294,16 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
             )
             if parent_cls:
                 parent_cls.subclasses[cls.name] = cls
-            self.visit_stack.append(_VisitType.Class)
+            self.visit_stack.append(_VisitKind.Class)
             self.class_stack.append(cls)
-            if parent_type == _VisitType.Root:
+            if parent_type == _VisitKind.Root:
                 self.global_vars.pop(cls.name, None)
                 self.functions.pop(cls.name, None)
                 self.classes[cls.name] = cls
                 defined_symbols[cls.name] = cls.path
 
         def leave_ClassDef(self, node: cst.ClassDef):
-            assert self.visit_stack[-1] == _VisitType.Class
+            assert self.visit_stack[-1] == _VisitKind.Class
             self.class_stack.pop()
             self.visit_stack.pop()
 
@@ -1313,16 +1313,16 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
             cls_path = cls.path if cls else None
             var = None
             match self.visit_stack[-1], node.target:
-                case (_VisitType.Root, cst.Name(value=n) as tree):
+                case (_VisitKind.Root, cst.Name(value=n) as tree):
                     # global var assignment
                     var = PythonVariable(
                         n, ProjectPath(module_name, n), None, tree, [node]
                     )
-                case (_VisitType.Class, cst.Name(value=n) as tree) if cls:
+                case (_VisitKind.Class, cst.Name(value=n) as tree) if cls:
                     # initialized outside of methods
                     var = PythonVariable(n, cls.path.append(n), cls_path, tree, [node])
                 case (
-                    _VisitType.Function,
+                    _VisitKind.Function,
                     cst.Attribute(
                         value=cst.Name(value="self"), attr=cst.Name(value=n)
                     ) as tree,
@@ -1343,18 +1343,18 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
             for target in node.targets:
                 var = None
                 match self.visit_stack[-1], target.target:
-                    case (_VisitType.Root, cst.Name(value=n) as tree):
+                    case (_VisitKind.Root, cst.Name(value=n) as tree):
                         # global var assignment
                         var = PythonVariable(
                             n, ProjectPath(module_name, n), None, tree, [node]
                         )
-                    case (_VisitType.Class, cst.Name(value=n) as tree) if cls:
+                    case (_VisitKind.Class, cst.Name(value=n) as tree) if cls:
                         # initialized outside of methods
                         var = PythonVariable(
                             n, cls.path.append(n), cls_path, tree, [node]
                         )
                     case (
-                        _VisitType.Function,
+                        _VisitKind.Function,
                         cst.Attribute(
                             value=cst.Name(value="self"), attr=cst.Name(value=n)
                         ) as tree,

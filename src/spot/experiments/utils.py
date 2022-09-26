@@ -1,3 +1,16 @@
+from spot.static_analysis import (
+    _VisitKind,
+    ElemSignature,
+    FunctionSignature,
+    ModuleName,
+    ProjectPath,
+    PythonModule,
+    PythonProject,
+    SignatureMap,
+    VariableSignature,
+    is_type_rhs,
+)
+from spot.type_check import MypyChecker, MypyResult
 from spot.utils import *
 from spot.type_env import parse_type_expr, normalize_type
 
@@ -107,3 +120,157 @@ def remove_newer_syntax_for_repo(root: Path, rules: SupportedSyntax) -> None:
         desc="Removing newer syntax",
     )
     print(f"{sum(changed)} / {len(all_files)} files have been rewritten.")
+
+
+def apply_sigmap(
+    m: cst.Module,
+    sigmap: SignatureMap,
+    module_name: ModuleName,
+    add_default_imports=True,
+) -> cst.Module:
+    """
+    Apply the signature map to the module.
+    """
+
+    class Rewriter(cst.CSTTransformer):
+        def __init__(self):
+            super().__init__()
+            self.path_stack = [ProjectPath(module_name, "")]
+            self.visit_stack = [_VisitKind.Root]
+
+        @property
+        def current_path(self) -> ProjectPath:
+            return self.path_stack[-1]
+
+        @property
+        def current_visit_kind(self) -> _VisitKind:
+            return self.visit_stack[-1]
+
+        def enter_(self, name: str, kind: _VisitKind):
+            self.path_stack.append(self.current_path.append(name))
+            self.visit_stack.append(kind)
+
+        def exit_(self):
+            self.path_stack.pop()
+            self.visit_stack.pop()
+
+        def visit_FunctionDef(self, node: cst.FunctionDef):
+            self.enter_(node.name.value, _VisitKind.Function)
+
+        def leave_FunctionDef(self, node, updated: cst.FunctionDef):
+            if isinstance(sig := sigmap.get(self.current_path), FunctionSignature):
+                updated = sig.apply(updated)
+            self.exit_()
+            return updated
+
+        def visit_ClassDef(self, node: "cst.ClassDef") -> Optional[bool]:
+            self.enter_(node.name.value, _VisitKind.Class)
+
+        def leave_ClassDef(self, node, updated: cst.ClassDef):
+            self.exit_()
+            return updated
+
+        def leave_AnnAssign(self, node, updated: cst.AnnAssign):
+            target = None
+            match updated.target:
+                case cst.Name(name):
+                    target = name
+            if (
+                target is not None
+                and isinstance(
+                    sig := sigmap.get(self.current_path.append(target)),
+                    VariableSignature,
+                )
+                and sig.annot is not None
+            ):
+                updated = updated.with_changes(annotation=sig.annot)
+            return updated
+
+        def leave_Assign(self, node, updated: cst.Assign):
+            target = None
+            if self.current_visit_kind != _VisitKind.Function:
+                match updated.targets:
+                    case [cst.AssignTarget(target=cst.Name(name))]:
+                        target = name
+            if (
+                target is not None
+                and isinstance(
+                    sig := sigmap.get(self.current_path.append(target)),
+                    VariableSignature,
+                )
+                and sig.annot is not None
+                and not (
+                    self.current_visit_kind == _VisitKind.Root
+                    and is_type_rhs(updated.value)
+                )  # skip annotating type aliases
+            ):
+                return cst.AnnAssign(cst.Name(target), sig.annot, updated.value)
+            return updated
+
+        def leave_Module(self, node, updated: cst.Module):
+            if add_default_imports:
+                return updated.with_changes(
+                    body=[_DefaultImport] + list(updated.body),
+                )
+            return updated
+
+    return m.visit(Rewriter())
+
+
+def quote_annotations(m: cst.Module) -> cst.Module:
+    """
+    Quote all type annotations as strings in the module..
+    """
+
+    class Rewriter(cst.CSTTransformer):
+        def leave_Annotation(self, node, updated: "cst.Annotation"):
+            if updated.annotation is None:
+                return updated
+            text = repr(show_expr(updated.annotation, quoted=False))
+            return updated.with_changes(annotation=cst.SimpleString(text))
+
+    return m.visit(Rewriter())
+
+
+def apply_sigmap_and_typecheck(
+    project: PythonProject,
+    sigmap: SignatureMap,
+    workdir: Path,
+    quote_types=True,
+    binary_path: Optional[Path] = None,
+) -> MypyResult:
+    assert workdir.is_dir(), f"Workdir is not a directory: {workdir}"
+
+    # write the type annotated source files to the workdir
+    for name, m in project.modules.items():
+        # file = workdir / project.module2src_file[name]
+        file = workdir / (name.replace(".", "/") + ".py")
+        file.parent.mkdir(parents=True, exist_ok=True)
+        m1 = apply_sigmap(m.tree, sigmap, name)
+        if quote_types:
+            m1 = quote_annotations(m1)
+        write_file(file, m1.code)
+    # handle __init__.py files specially
+    files = list(workdir.glob("**/*.py"))
+    for f in files:
+        if (d := f.with_suffix("")).exists():
+            f.rename(d / "__init__.py")
+
+    # now call the type checker
+    r = MypyChecker.check_project(workdir, binary_path)
+    if isinstance(r, str):
+        raise RuntimeError(f"Type checking failed: {r}")
+    return r
+
+
+def count_type_errors(
+    result: MypyResult, error_code_to_ignore={"has-type"}
+) -> Counter[str]:
+    msg_counter = Counter[str]()
+    for errors in result.error_dict.values():
+        msgs = set[str]()
+        for error in errors:
+            if error.error_code not in error_code_to_ignore:
+                msgs.add(error.message)
+        msg_counter.update(msgs)
+    return msg_counter
