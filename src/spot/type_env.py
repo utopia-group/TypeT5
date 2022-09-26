@@ -321,6 +321,7 @@ class AccuracyMetric:
     relaxed_equality: bool = True
     filter_none_any: bool = True
     match_base_only: bool = False
+    ignore_namespace: bool = True
     name: str = "acc"
 
     def process_type(self, t: PythonType) -> PythonType:
@@ -330,8 +331,15 @@ class AccuracyMetric:
             t = remove_top_final(t)
             t = remove_top_optional(t)
         if self.match_base_only:
-            t = PythonType.from_name(t.head_name())
+            t = PythonType(t.head, ())
+        if self.ignore_namespace:
+            t = remove_type_namespace(t)
         return t
+
+    def is_common_type(self, t: PythonType) -> bool:
+        return t.head_name() in self.common_type_names and all(
+            map(self.is_common_type, t.args)
+        )
 
     @staticmethod
     def default_metrics(common_type_names: set[str]):
@@ -340,10 +348,15 @@ class AccuracyMetric:
                 common_type_names,
                 relaxed_equality=False,
                 filter_none_any=False,
+                ignore_namespace=False,
                 name="plain_acc",
             ),
             AccuracyMetric(common_type_names),
-            AccuracyMetric(common_type_names, match_base_only=True, name="base_acc"),
+            AccuracyMetric(
+                common_type_names,
+                match_base_only=True,
+                name="base_acc",
+            ),
         ]
 
 
@@ -360,11 +373,6 @@ def type_accuracies(
     if crash_on_type_mask:
         if PythonType.from_name(SpecialNames.TypeMask) in label_types:
             raise RuntimeError("TypeMask found in label types.")
-
-    def is_common_type(t: PythonType) -> bool:
-        return t.head_name() in metric.common_type_names and all(
-            map(is_common_type, t.args)
-        )
 
     pred_types = list(map(metric.process_type, pred_types))
     label_types = list(map(metric.process_type, label_types))
@@ -387,22 +395,31 @@ def type_accuracies(
     acc_by_cat = GroupedAccCounter[AnnotCat]()
     # acc_by_pos = GroupedAccCounter[range]()
     acc_by_common = GroupedAccCounter[bool]()
+    acc_by_simple = GroupedAccCounter[bool]()
 
     for i, p, l, cat in zip(
-        range(len(pred_types)), pred_types, label_types, types_cat,
+        range(len(pred_types)),
+        pred_types,
+        label_types,
+        types_cat,
     ):
         is_correct = p == l
         acc_by_cat.count(cat, is_correct, 1)
+        acc_by_simple.count(ast_size(p) == 1, is_correct, 1)
         if metric.common_type_names is not None:
-            acc_by_common.count(is_common_type(l), is_correct, 1)
+            acc_by_common.count(metric.is_common_type(l), is_correct, 1)
         if not is_correct and output_incorrect_set is not None:
             output_incorrect_set.append(filtered_ids[i])
 
     acc_by_common = acc_by_common.grouped_accs(key=lambda x: "common" if x else "rare")
+    acc_by_simple = acc_by_simple.grouped_accs(
+        key=lambda x: "simple" if x else "complex"
+    )
     metric_name = metric.name
     return {
         metric_name: acc_by_cat.overall_acc(),
         f"{metric_name}_by_common": acc_by_common,
+        f"{metric_name}_by_simple": acc_by_simple,
         f"{metric_name}_by_cat": acc_by_cat.grouped_accs(
             key=lambda x: x.name, sort_by=lambda x: x.value
         ),

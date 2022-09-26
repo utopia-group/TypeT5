@@ -15,6 +15,7 @@ def eval_typilus_on_repos(
     metrics: list[AccuracyMetric],
     typilus_path: Path,
     work_dir: Path,
+    max_workers: int | None = None,
 ):
     out_dirs = [work_dir / r.name for r in repo_roots]
     for out_dir in out_dirs:
@@ -25,6 +26,7 @@ def eval_typilus_on_repos(
         out_dirs,
         [typilus_path] * len(repo_roots),
         desc="Running Typilus",
+        max_workers=max_workers,
     )
 
     typilus_outputs = []
@@ -63,6 +65,7 @@ def analyze_typilus_predictions(
     typilus_outputs: list[JSON],
     repo_roots: list[Path],
     metrics: list[AccuracyMetric],
+    common_labels_only: bool = True,
 ):
     assert_eq(
         len({r.name for r in repo_roots}),
@@ -91,6 +94,7 @@ def analyze_typilus_predictions(
 
     pred_list, label_list, cat_list = [], [], []
     n_missing = 0
+    n_skipped_rare = 0
     for label_map, pred_map in zip(label_maps, pred_maps):
         for mod, labels in label_map.items():
             preds = pred_map.get(mod)
@@ -113,6 +117,9 @@ def analyze_typilus_predictions(
                 except SyntaxError:
                     pred = PythonType.Any()
 
+                if common_labels_only and not metrics[0].is_common_type(ltype):
+                    n_skipped_rare += 1
+                    continue
                 label_list.append(ltype)
                 cat_list.append(linfo.cat)
                 pred_list.append(pred)
@@ -120,7 +127,10 @@ def analyze_typilus_predictions(
     accs = dict[str, dict]()
     for m in metrics:
         accs[m.name] = sub_a = type_accuracies(pred_list, label_list, cat_list, m)
-        sub_a["n_missing"] = n_missing
+        if n_missing > 0:
+            sub_a["n_missing"] = n_missing
+        if n_skipped_rare > 0:
+            sub_a["n_skipped_rare"] = n_skipped_rare
     return accs
 
 

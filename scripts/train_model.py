@@ -1,6 +1,7 @@
 # %%
 import os
 from typing import *
+from spot.experiments.typet5 import AblationConfigs
 
 from spot.utils import *
 
@@ -25,19 +26,7 @@ eval_only = False
 recreate_dataset = False
 
 
-config = TrainingConfig(
-    quicktest=False,
-    func_only=True,
-    pre_args=PreprocessArgs(
-        # imports_in_preamble=False,
-        # stub_in_preamble=False,
-        drop_env_types=False,
-        add_implicit_rel_imports=True,
-    ),
-    left_margin=2048,
-    right_margin=2048 - 512,
-    preamble_size=1000,
-)
+config = AblationConfigs.NoUsees
 
 TypeCheckSettings.temp_path = f"GPU-{gpu_id}"
 print(colored(f"Use GPU: {gpu_id}", "green"))
@@ -147,13 +136,13 @@ wrapper.args = bs_args
 
 eval_cache = PickleCache(get_eval_dir(dataset, model_name) / "eval_cache")
 # eval_cache.clear()
-r0_eval = eval_cache.cached(
+eval_r = eval_cache.cached(
     "dataset_pred.pkl",
     lambda: wrapper.eval_on_dataset(tk_dataset["test"]),
 )
 common_names = wrapper.common_type_names
 metrics = AccuracyMetric.default_metrics(common_names)
-r0_accs = {m.name: r0_eval.accuracies(m) for m in metrics}
+r0_accs = {m.name: eval_r.accuracies(m) for m in metrics}
 print("Accuracies on all user annotations:")
 pretty_print_dict(r0_accs)
 
@@ -186,8 +175,8 @@ test_projects = pmap(
     desc="Loading test projects",
 )
 
-pre_r = r0_eval
-pred_map, label_map = sigmap_from_file_predictions(pre_r, test_projects, repos_dir)
+eval_r = eval_r
+pred_map, label_map = sigmap_from_file_predictions(eval_r, test_projects, repos_dir)
 api_accs = {
     m.name: SignatureErrorAnalysis(pred_map, label_map, m).accuracies
     for m in AccuracyMetric.default_metrics(common_names)
@@ -207,12 +196,12 @@ export_preds = True
 
 if export_preds:
     max_samples = 500
-    sample_every = max(1, len(r0_eval.chunks) // max_samples)
-    sub_ids = range(0, len(r0_eval.chunks), sample_every)
+    sample_every = max(1, len(eval_r.chunks) // max_samples)
+    sub_ids = range(0, len(eval_r.chunks), sample_every)
     export_to = proj_root() / "caches" / "model_predictions" / model_name
     export_preds_on_code(
-        r0_eval.chunks[sub_ids],
-        [r0_eval.predictions[i] for i in sub_ids],
+        eval_r.chunks[sub_ids],
+        [eval_r.predictions[i] for i in sub_ids],
         export_to=export_to,
         metric=AccuracyMetric(common_names),
     )

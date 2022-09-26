@@ -425,8 +425,11 @@ def sigmap_from_file_predictions(
         }
 
         for preds, info in zip(pr.predictions, pr.chunks.chunks_info):
+            file = info.src_file
+            if file.parts and not file.name.endswith(".py"):
+                file = file.parent
             mname = PythonProject.rel_path_to_module_name(
-                (repos_dir / info.src_file).relative_to(repo)
+                (repos_dir / file).relative_to(repo)
             )
             for p, ai in zip(preds, info.annots_info):
                 mpath = ProjectPath.annot_path_to_module_path(ai.path)

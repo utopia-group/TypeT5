@@ -99,7 +99,7 @@ def remove_newer_syntax_for_file(file: Path, rules: SupportedSyntax) -> bool:
 
 
 def remove_newer_syntax_for_repo(root: Path, rules: SupportedSyntax) -> None:
-    all_files = list(root.glob("**/*.py"))
+    all_files = [p for p in root.glob("**/*.py") if p.is_file()]
     changed = pmap(
         remove_newer_syntax_for_file,
         all_files,

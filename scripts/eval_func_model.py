@@ -21,6 +21,7 @@ from spot.utils import (
     get_model_dir,
     get_modified_args,
     pickle_dump,
+    pickle_load,
     pmap,
     pretty_show_dict,
     proj_root,
@@ -41,18 +42,18 @@ def wandb_string(s: str):
 
 # experiment configurations
 
-
+load_results = True
 gpu_id = get_gpu_id(0)
 # model_name = "model-v6--TrainingConfig(drop_env_types=False, add_override_usages=True)"
-# model_name = "model-v7--TrainingConfig(drop_env_types=False)"
+# model_name = "model-v7--TrainingConfig(add_implicit_rel_imports=True)"
 model_name = (
     "model-v7--TrainingConfig(drop_env_types=False, add_implicit_rel_imports=True)"
 )
-# dataset_name = "ManyTypes4Py"
-dataset_name = "InferTypes4Py"
+dataset_name = "ManyTypes4Py"
+# dataset_name = "InferTypes4Py"
 
 test_pre_args = PreprocessArgs(add_implicit_rel_imports=True)
-experiment_name = "(implicit_imports) " + model_name
+experiment_name = "(implicit_imports, new) " + model_name
 
 print(colored(f"Use GPU: {gpu_id}", "green"))
 
@@ -84,9 +85,10 @@ from spot.function_decoding import (
 )
 
 ctx_args = model.args.ctx_args
+ctx_args.max_labels = 16
 model.args.sampling_max_tokens = ctx_args.ctx_size
 model.args.do_sample = False
-model.args.num_beams = 10
+model.args.num_beams = 16
 model.args.tokens_per_type = 16
 
 rctx = RolloutCtx(model=model)
@@ -102,38 +104,46 @@ decode_orders = {
 }
 
 metrics = AccuracyMetric.default_metrics(model.common_type_names)
-with run_long_task("Evaluating different decoding strategy"):
+with run_long_task("Evaluating different decoding strategy", notify=not load_results):
     results_dir = get_eval_dir(dataset_name, experiment_name)
     results_dir.mkdir(exist_ok=True, parents=True)
     print(colored(f"Results will be saved to: {str(results_dir)}", "green"))
 
-    wandb.init(
-        project="SPOT-eval",
-        name=dataset_name + ": " + experiment_name,
-        dir=str(results_dir),
-        config=get_modified_args(model.args),
-    )
+    if not load_results:
+        wandb.init(
+            project="SPOT-eval",
+            name=dataset_name + ": " + experiment_name,
+            dir=str(results_dir),
+            config=get_modified_args(model.args),
+        )
 
     evals = dict[str, EvalResult]()
     for oname, order in decode_orders.items():
-        print(f"Evaluating decoding strategy: {oname}")
-        pre_args = copy.deepcopy(test_pre_args)
-        if oname == "no-neighbors":
-            pre_args.max_callers = 0
-            pre_args.max_callees = 0
-        evalr = asyncio.run(
-            rctx.evaluate_on_projects(
-                test_projects,
-                pre_args,
-                order,
+        result_path = results_dir / f"{oname}-EvalResult.pkl"
+        if not load_results:
+            print(f"Evaluating decoding strategy: {oname}")
+            pre_args = copy.deepcopy(test_pre_args)
+            if oname == "no-neighbors":
+                pre_args.max_callers = 0
+                pre_args.max_callees = 0
+            evalr = asyncio.run(
+                rctx.evaluate_on_projects(
+                    test_projects,
+                    pre_args,
+                    order,
+                )
             )
-        )
-        pickle_dump(results_dir / f"{oname}-EvalResult.pkl", evalr)
+            pickle_dump(result_path, evalr)
+        else:
+            if not result_path.exists():
+                continue
+            evalr = pickle_load(result_path)
         evals[oname] = evalr
         accs = {m.name: evalr.error_analysis(None, m).accuracies for m in metrics}
         accs_str = pretty_show_dict(accs)
         write_file(results_dir / f"{oname}-accuracy.txt", accs_str)
-        wandb.log({f"test/{oname}": wandb_string(accs_str)})
+        if not load_results:
+            wandb.log({f"test/{oname}": wandb_string(accs_str)})
         print(f"========== {oname} ===========")
         print(accs_str)
 
@@ -149,7 +159,7 @@ results_table.align = "r"
 results_table.set_style(pt.SINGLE_BORDER)
 results_table.float_format = ".4"
 
-for oname in decode_orders:
+for oname in evals:
     accs = [
         evals[oname].error_analysis(None, metric).accuracies[metric.name].acc
         for metric in metrics

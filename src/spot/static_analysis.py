@@ -258,6 +258,11 @@ class VariableSignature:
     def n_annots(self) -> int:
         return 1
 
+    def get_annotated(self):
+        if self.annot is not None:
+            cat = AnnotCat.ClassAtribute if self.in_class else AnnotCat.GlobalVar
+            yield cat, self.annot
+
 
 @dataclass
 class FunctionSignature:
@@ -1107,7 +1112,9 @@ class SignatureErrorAnalysis:
                         n_missing[0] += 1
                         return
                 assert pred is not None
-                assert (pt := parse_type_expr(pred.annotation)) is not None
+                pt = parse_type_expr(pred.annotation, silent=True)
+                if pt is None:
+                    pt = PythonType.from_name("Any")
                 sig_pred = SingatureTypePrediction(
                     predicted=pt,
                     expected=lt,
@@ -1132,9 +1139,12 @@ class SignatureErrorAnalysis:
                         )
                     record_pair(p_return, l_return, AnnotCat.FuncReturn, len(l_params))
                 case _:
-                    raise RuntimeError(
-                        f"Mismatched signatures: label={l_sig}, pred={p_sig}"
-                    )
+                    if error_on_mismatched_signature:
+                        raise RuntimeError(
+                            f"Mismatched signatures: label={l_sig}, pred={p_sig}"
+                        )
+                    for i, (cat, a) in enumerate(l_sig.get_annotated()):
+                        record_pair(None, a, cat, i)
 
         for project in labels:
             l_map = labels[project]

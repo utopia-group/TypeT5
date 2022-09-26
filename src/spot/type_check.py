@@ -155,6 +155,14 @@ def remove_top_final(t: PythonType) -> PythonType:
     else:
         return t
 
+def remove_type_namespace(typ: PythonType) -> PythonType:
+    """
+    Remove the namespace from the type. i.e., convert typing.List[T] to List[T].
+    """
+    new_args = tuple(map(remove_type_namespace, typ.args))
+    new_head = (typ.head[-1],) if typ.head else ()
+    return PythonType(new_head, new_args)
+
 
 def parse_type_str(typ_str: str) -> PythonType:
     tree = ast.parse(typ_str, mode="eval").body
