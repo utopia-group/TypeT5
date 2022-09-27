@@ -30,6 +30,7 @@ from spot.utils import (
 )
 from spot.visualization import string_to_html
 from termcolor import colored
+from spot.experiments.typet5 import TypeT5Configs
 
 os.chdir(proj_root())
 
@@ -42,18 +43,21 @@ def wandb_string(s: str):
 
 # experiment configurations
 
-load_results = True
+load_results = False
+use_oracle = True
 gpu_id = get_gpu_id(0)
-# model_name = "model-v6--TrainingConfig(drop_env_types=False, add_override_usages=True)"
-# model_name = "model-v7--TrainingConfig(add_implicit_rel_imports=True)"
-model_name = (
-    "model-v7--TrainingConfig(drop_env_types=False, add_implicit_rel_imports=True)"
-)
+train_config = TypeT5Configs.Default
+
+model_name = train_config.get_model_name()
+# model_name = (
+#     "model-v7--TrainingConfig(drop_env_types=False, add_implicit_rel_imports=True)"
+# )
 dataset_name = "ManyTypes4Py"
 # dataset_name = "InferTypes4Py"
 
-test_pre_args = PreprocessArgs(add_implicit_rel_imports=True)
-experiment_name = "(implicit_imports, new) " + model_name
+test_pre_args = train_config.pre_args
+oracle_tag = "(use-oracle) " if use_oracle else ""
+experiment_name = oracle_tag + "" + model_name
 
 print(colored(f"Use GPU: {gpu_id}", "green"))
 
@@ -63,7 +67,7 @@ print(colored(f"Use GPU: {gpu_id}", "green"))
 model = ModelWrapper.from_pretrained(get_model_dir() / model_name)
 device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
 model.to(device)
-print(f"Model loaded to {device}")
+print(f"Model loaded:", model_name)
 
 # load test projects
 repos_dir = get_dataset_dir(dataset_name) / "repos" / "test"
@@ -80,7 +84,6 @@ assert len(test_projects) > 0
 from spot.function_decoding import (
     DecodingOrders,
     EvalResult,
-    PreprocessArgs,
     RolloutCtx,
 )
 
@@ -94,12 +97,15 @@ model.args.tokens_per_type = 16
 rctx = RolloutCtx(model=model)
 
 decode_orders = {
-    "double-traversal": DecodingOrders.DoubleTraversal(),
-    "non-incr": DecodingOrders.IndependentOrder(),
-    "random": DecodingOrders.RandomOrder(),
-    "no-neighbors": DecodingOrders.IndependentOrder(),
+    # "double-traversal": DecodingOrders.DoubleTraversal(),
+    # "reverse-double-traversal": DecodingOrders.Reversed(
+    #     DecodingOrders.DoubleTraversal()
+    # ),
+    # "non-incr": DecodingOrders.IndependentOrder(),
+    # "random": DecodingOrders.RandomOrder(),
+    # "no-neighbors": DecodingOrders.IndependentOrder(),
     "callee2caller": DecodingOrders.Callee2Caller(),
-    "caller2callee": DecodingOrders.Caller2Callee(),
+    # "caller2callee": DecodingOrders.Caller2Callee(),
     # "random-twice": DecodingOrders.RandomTwice(),
 }
 
@@ -131,6 +137,7 @@ with run_long_task("Evaluating different decoding strategy", notify=not load_res
                     test_projects,
                     pre_args,
                     order,
+                    use_oracle=use_oracle,
                 )
             )
             pickle_dump(result_path, evalr)

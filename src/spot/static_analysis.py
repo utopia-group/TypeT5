@@ -263,6 +263,12 @@ class VariableSignature:
             cat = AnnotCat.ClassAtribute if self.in_class else AnnotCat.GlobalVar
             yield cat, self.annot
 
+    def updated(self, other: "VariableSignature") -> "VariableSignature":
+        if other.annot is not None:
+            return VariableSignature(other.annot, self.in_class)
+        else:
+            return self
+
 
 @dataclass
 class FunctionSignature:
@@ -297,6 +303,14 @@ class FunctionSignature:
                 yield AnnotCat.FuncArg, a
         if self.returns is not None:
             yield AnnotCat.FuncReturn, self.returns
+
+    def updated(self, other: "FunctionSignature") -> "FunctionSignature":
+        params = copy.deepcopy(self.params)
+        for p, a in other.params.items():
+            if a is not None:
+                params[p] = a
+        returns = other.returns if other.returns is not None else self.returns
+        return FunctionSignature(params, returns, self.in_class)
 
     @staticmethod
     def from_function(func: cst.FunctionDef, in_class: bool) -> "FunctionSignature":

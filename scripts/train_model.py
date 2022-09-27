@@ -1,7 +1,7 @@
 # %%
 import os
 from typing import *
-from spot.experiments.typet5 import AblationConfigs
+from spot.experiments.typet5 import TypeT5Configs
 
 from spot.utils import *
 
@@ -26,7 +26,7 @@ eval_only = False
 recreate_dataset = False
 
 
-config = AblationConfigs.NoUsees
+config = TypeT5Configs.NoUsers
 
 TypeCheckSettings.temp_path = f"GPU-{gpu_id}"
 print(colored(f"Use GPU: {gpu_id}", "green"))

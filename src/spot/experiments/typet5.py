@@ -1,18 +1,18 @@
 from spot.train import *
 
-TypeT5Default = TrainingConfig(
-    func_only=True,
-    pre_args=PreprocessArgs(
-        drop_env_types=False,
-        add_implicit_rel_imports=True,
-    ),
-    left_margin=2048,
-    right_margin=2048 - 512,
-    preamble_size=1000,
-)
 
+class TypeT5Configs:
+    Default = TrainingConfig(
+        func_only=True,
+        pre_args=PreprocessArgs(
+            drop_env_types=False,
+            add_implicit_rel_imports=True,
+        ),
+        left_margin=2048,
+        right_margin=2048 - 512,
+        preamble_size=1000,
+    )
 
-class AblationConfigs:
     NoPreamble = TrainingConfig(
         func_only=True,
         pre_args=PreprocessArgs(

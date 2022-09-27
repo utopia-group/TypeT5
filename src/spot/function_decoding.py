@@ -39,9 +39,32 @@ from .utils import *
 
 @dataclass
 class RolloutPrediction:
+    """Record the information generated during a decoding rollout.
+
+    - final_sigmap: The final type assignments for each element.
+    - predicted_sigmap: The type assignments predicted by the model,
+    immediately before modified by the oracle (if any). This will be identical
+    to final_sigmap if no oracle is used.
+    - elem2inputs: Maps each element to the corresponding input fed to the model.
+    - elem2preds: Maps each element to the corresponding types predicted by
+    the model.
+    """
+
     assignments: SignatureMap
     elem2preds: dict[ProjectPath, Sequence[PythonType]]
     elem2inputs: dict[ProjectPath, dict]
+    pred_assignments: SignatureMap = field(default_factory=SignatureMap)
+
+    @property
+    def final_sigmap(self) -> SignatureMap:
+        return self.assignments
+
+    @property
+    def predicted_sigmap(self) -> SignatureMap:
+        if self.pred_assignments:
+            return self.pred_assignments
+        else:
+            return self.assignments
 
 
 @dataclass
@@ -63,7 +86,7 @@ class EvalResult:
         for i in projects:
             pname = self.project_roots[i].name
             label_maps[pname] = self.label_maps[i]
-            pred_maps[pname] = self.predictions[i].assignments
+            pred_maps[pname] = self.predictions[i].predicted_sigmap
 
         return SignatureErrorAnalysis(
             pred_maps,
@@ -88,7 +111,7 @@ class EvalResult:
         pid = self.find_projects(identifier)[0]
 
         print("Expected: ", self.label_maps[pid][path])
-        print("Predicted:", self.predictions[pid].assignments[path])
+        print("Predicted:", self.predictions[pid].final_sigmap[path])
         print("Code:")
         print(decode_tokens(self.predictions[pid].elem2inputs[path]["input_ids"]))
 
@@ -103,6 +126,7 @@ class RolloutCtx:
         pre_args: PreprocessArgs,
         decode_order: "DecodingOrder",
         concurrency: int = DefaultWorkers,
+        use_oracle: bool = False,
         tqdm_args: dict = {},
     ) -> EvalResult:
         """Evaluate the model's prediction accuracy on a given set of projects, masking
@@ -128,12 +152,14 @@ class RolloutCtx:
                 id, project = id_project
                 label_sigs = {e.path: e.get_signature() for e in project.all_elems()}
                 label_maps[id] = label_sigs
+                oracle = label_sigs if use_oracle else None
                 r = await self.project_rollout(
                     project.mask_types(),
                     pre_args,
                     decode_order,
                     cpu_executor=cpu_executor,
                     model_executor=model_executor,
+                    oracle=oracle,
                     progress_cbk=lambda e, p: pbar.update(),
                 )
                 rollouts[id] = r
@@ -151,6 +177,7 @@ class RolloutCtx:
         decode_order: "DecodingOrder",
         cpu_executor: ProcessPoolExecutor,
         model_executor: ThreadPoolExecutor,
+        oracle: SignatureMap | None = None,
         progress_cbk: Callable[
             [PythonElem, Sequence[PythonType]], Any
         ] = lambda x, y: None,
@@ -176,7 +203,8 @@ class RolloutCtx:
             assert e.path in visit_set, f"{e.path} not in the decoder order."
         preamble_cache = dict[ModuleName, tuple[str, TokenSeq]]()
 
-        assignments = SignatureMap()
+        pred_sigmap = SignatureMap()
+        final_sigmap = SignatureMap()
         elem2preds = dict[ProjectPath, Sequence[PythonType]]()
         elem2inputs = dict[ProjectPath, dict]()
         mask_annot = cst.Annotation(cst.Name(SpecialNames.TypeMask))
@@ -225,7 +253,7 @@ class RolloutCtx:
                 elem,
                 analysis,
                 pre_args,
-                assignments if decode_order.types_in_ctx() else {},
+                final_sigmap if decode_order.types_in_ctx() else {},
             )
 
             model_inputs = await eloop.run_in_executor(
@@ -271,11 +299,18 @@ class RolloutCtx:
                         sig.returns = cst.Annotation(
                             cst.parse_expression(str(pred_types[len(sig.params)]))
                         )
-            assignments[elem.path] = sig
+            pred_sigmap[elem.path] = sig
+            if (
+                oracle is not None
+                and (label := oracle.get(elem.path)) is not None
+                and type(label) == type(sig)
+            ):
+                sig = sig.updated(as_any(label))
+            final_sigmap[elem.path] = sig
             elem2preds[elem.path] = pred_types
             progress_cbk(elem, pred_types)
 
-        return RolloutPrediction(assignments, elem2preds, elem2inputs)
+        return RolloutPrediction(pred_sigmap, elem2preds, elem2inputs, final_sigmap)
 
 
 def is_mask_annot(a: cst.Annotation) -> bool:
@@ -361,6 +396,18 @@ class DecodingOrders:
         @staticmethod
         def traverse_length(n_elems: int) -> int:
             return 2 * n_elems - 1
+
+    @dataclass
+    class Reversed(DecodingOrder):
+        original: DecodingOrder
+
+        def traverse(self, analysis: UsageAnalysis) -> list[ProjectPath]:
+            order = self.original.traverse(analysis)
+            order.reverse()
+            return order
+
+        def traverse_length(self, n_elems: int) -> int:
+            return self.original.traverse_length(n_elems)
 
     class RandomTwice(DecodingOrder):
         """Perform random traversal twice."""
