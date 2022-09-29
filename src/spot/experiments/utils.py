@@ -1,3 +1,4 @@
+from spot.function_decoding import EvalResult
 from spot.static_analysis import (
     _VisitKind,
     ElemSignature,
@@ -10,12 +11,12 @@ from spot.static_analysis import (
     VariableSignature,
     is_type_rhs,
 )
-from spot.type_check import MypyChecker, MypyResult
+from spot.type_check import MypyChecker, MypyFeedback, MypyResult
 from spot.utils import *
 from spot.type_env import parse_type_expr, normalize_type
 
 _DefaultImport = cst.parse_statement(
-    "from typing import Any, List, Tuple, Dict, Set, Union # SPOT"
+    "from typing import Any, List, Tuple, Dict, Set, Union, Type, Callable # SPOT"
 )
 
 
@@ -159,7 +160,10 @@ def apply_sigmap(
 
         def leave_FunctionDef(self, node, updated: cst.FunctionDef):
             if isinstance(sig := sigmap.get(self.current_path), FunctionSignature):
-                updated = sig.apply(updated)
+                try:
+                    updated = sig.apply(updated)
+                except LookupError:
+                    pass
             self.exit_()
             return updated
 
@@ -217,7 +221,7 @@ def apply_sigmap(
     return m.visit(Rewriter())
 
 
-def quote_annotations(m: cst.Module) -> cst.Module:
+def quote_annotations(m: cst.Module, normalize_types: bool = True) -> cst.Module:
     """
     Quote all type annotations as strings in the module..
     """
@@ -226,7 +230,12 @@ def quote_annotations(m: cst.Module) -> cst.Module:
         def leave_Annotation(self, node, updated: "cst.Annotation"):
             if updated.annotation is None:
                 return updated
-            text = repr(show_expr(updated.annotation, quoted=False))
+            if normalize_types:
+                ty = parse_type_expr(updated.annotation)
+                assert ty is not None
+                text = repr(str(ty.normalized()))
+            else:
+                text = repr(show_expr(updated.annotation, quoted=False))
             return updated.with_changes(annotation=cst.SimpleString(text))
 
     return m.visit(Rewriter())
@@ -248,12 +257,12 @@ def apply_sigmap_and_typecheck(
         file.parent.mkdir(parents=True, exist_ok=True)
         m1 = apply_sigmap(m.tree, sigmap, name)
         if quote_types:
-            m1 = quote_annotations(m1)
+            m1 = quote_annotations(m1, normalize_types=True)
         write_file(file, m1.code)
     # handle __init__.py files specially
     files = list(workdir.glob("**/*.py"))
     for f in files:
-        if (d := f.with_suffix("")).exists():
+        if (d := f.with_suffix("")).is_dir():
             f.rename(d / "__init__.py")
 
     # now call the type checker
@@ -264,13 +273,36 @@ def apply_sigmap_and_typecheck(
 
 
 def count_type_errors(
-    result: MypyResult, error_code_to_ignore={"has-type"}
-) -> Counter[str]:
-    msg_counter = Counter[str]()
-    for errors in result.error_dict.values():
-        msgs = set[str]()
-        for error in errors:
-            if error.error_code not in error_code_to_ignore:
-                msgs.add(error.message)
-        msg_counter.update(msgs)
-    return msg_counter
+    result: Iterable[MypyFeedback],
+) -> int:
+    error_codes = {
+        "attr-defined",
+        "arg-type",
+        "return-value",
+        "assignment",
+    }
+
+    n = 0
+    for e in result:
+        if e.error_code in error_codes:
+            n += 1
+    return n
+
+
+def count_project_type_errors(
+    proj: PythonProject,
+    sigmap: SignatureMap,
+    workdir: Path = Path("mypy_temp"),
+    binary_path: Path | None = None,
+) -> list[MypyFeedback]:
+    workdir = workdir / proj.name
+    shutil.rmtree(workdir, ignore_errors=True)
+    workdir.mkdir(exist_ok=True, parents=True)
+    try:
+        check_r = apply_sigmap_and_typecheck(
+            proj, sigmap, workdir, binary_path=binary_path
+        )
+        return [e for es in check_r.error_dict.values() for e in es]
+    except RuntimeError as e:
+        print("Warning: mypy failed for project:", proj.name)
+        return []

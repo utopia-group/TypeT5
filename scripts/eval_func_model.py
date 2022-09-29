@@ -44,20 +44,22 @@ def wandb_string(s: str):
 # experiment configurations
 
 load_results = False
-use_oracle = True
+use_oracle = False
 gpu_id = get_gpu_id(0)
-train_config = TypeT5Configs.Default
+train_config = TypeT5Configs.NoSequential
 
 model_name = train_config.get_model_name()
 # model_name = (
 #     "model-v7--TrainingConfig(drop_env_types=False, add_implicit_rel_imports=True)"
 # )
-dataset_name = "ManyTypes4Py"
-# dataset_name = "InferTypes4Py"
+# dataset_name = "ManyTypes4Py"
+dataset_name = "InferTypes4Py"
 
 test_pre_args = train_config.pre_args
 oracle_tag = "(use-oracle) " if use_oracle else ""
-experiment_name = oracle_tag + "" + model_name
+# group_tag = "(implicit_imports, new) "
+group_tag = "(ablation) "
+experiment_name = oracle_tag + group_tag + model_name
 
 print(colored(f"Use GPU: {gpu_id}", "green"))
 
@@ -72,12 +74,13 @@ print(f"Model loaded:", model_name)
 # load test projects
 repos_dir = get_dataset_dir(dataset_name) / "repos" / "test"
 test_repo_paths = [f for f in repos_dir.iterdir() if f.is_dir()]
-test_projects = pmap(
-    data_project_from_dir,
-    test_repo_paths,
-    desc="Loading test projects",
-)
-assert len(test_projects) > 0
+if not load_results:
+    test_projects = pmap(
+        data_project_from_dir,
+        test_repo_paths,
+        desc="Loading test projects",
+    )
+    assert len(test_projects) > 0
 
 # %%
 
@@ -86,6 +89,7 @@ from spot.function_decoding import (
     EvalResult,
     RolloutCtx,
 )
+from spot.experiments.typet5 import accs_as_table_row
 
 ctx_args = model.args.ctx_args
 ctx_args.max_labels = 16
@@ -101,10 +105,10 @@ decode_orders = {
     # "reverse-double-traversal": DecodingOrders.Reversed(
     #     DecodingOrders.DoubleTraversal()
     # ),
-    # "non-incr": DecodingOrders.IndependentOrder(),
+    "non-incr": DecodingOrders.IndependentOrder(),
     # "random": DecodingOrders.RandomOrder(),
     # "no-neighbors": DecodingOrders.IndependentOrder(),
-    "callee2caller": DecodingOrders.Callee2Caller(),
+    # "callee2caller": DecodingOrders.Callee2Caller(),
     # "caller2callee": DecodingOrders.Caller2Callee(),
     # "random-twice": DecodingOrders.RandomTwice(),
 }
@@ -134,7 +138,7 @@ with run_long_task("Evaluating different decoding strategy", notify=not load_res
                 pre_args.max_callees = 0
             evalr = asyncio.run(
                 rctx.evaluate_on_projects(
-                    test_projects,
+                    test_projects,  # type: ignore
                     pre_args,
                     order,
                     use_oracle=use_oracle,
@@ -143,6 +147,7 @@ with run_long_task("Evaluating different decoding strategy", notify=not load_res
             pickle_dump(result_path, evalr)
         else:
             if not result_path.exists():
+                print(f"Result file not found, skip: {result_path}")
                 continue
             evalr = pickle_load(result_path)
         evals[oname] = evalr
@@ -153,6 +158,7 @@ with run_long_task("Evaluating different decoding strategy", notify=not load_res
             wandb.log({f"test/{oname}": wandb_string(accs_str)})
         print(f"========== {oname} ===========")
         print(accs_str)
+        accs_as_table_row(accs)
 
 
 # %%

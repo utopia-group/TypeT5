@@ -322,6 +322,7 @@ class AccuracyMetric:
     filter_none_any: bool = True
     match_base_only: bool = False
     ignore_namespace: bool = True
+    filter_rare: bool = False
     name: str = "acc"
 
     def process_type(self, t: PythonType) -> PythonType:
@@ -336,6 +337,13 @@ class AccuracyMetric:
             t = remove_type_namespace(t)
         return t
 
+    _NoneOrAny = {"None", "Any"}
+
+    def to_keep_type(self, t: PythonType) -> bool:
+        return (not self.filter_none_any or t.head_name() not in self._NoneOrAny) and (
+            not self.filter_rare or self.is_common_type(t)
+        )
+
     def is_common_type(self, t: PythonType) -> bool:
         return t.head_name() in self.common_type_names and all(
             map(self.is_common_type, t.args)
@@ -349,13 +357,28 @@ class AccuracyMetric:
                 relaxed_equality=False,
                 filter_none_any=False,
                 ignore_namespace=False,
-                name="plain_acc",
+                name="full_acc",
+            ),
+            AccuracyMetric(
+                common_type_names,
+                relaxed_equality=False,
+                filter_none_any=False,
+                ignore_namespace=False,
+                filter_rare=True,
+                name="full_acc_common",
             ),
             AccuracyMetric(common_type_names),
+            AccuracyMetric(common_type_names, filter_rare=True, name="acc_common"),
             AccuracyMetric(
                 common_type_names,
                 match_base_only=True,
                 name="base_acc",
+            ),
+            AccuracyMetric(
+                common_type_names,
+                match_base_only=True,
+                filter_rare=True,
+                name="base_acc_common",
             ),
         ]
 
@@ -377,11 +400,8 @@ def type_accuracies(
     pred_types = list(map(metric.process_type, pred_types))
     label_types = list(map(metric.process_type, label_types))
 
-    if metric.filter_none_any:
-        none_any = {"None", "Any"}
-        filtered_ids = [
-            i for i, t in enumerate(label_types) if t.head_name() not in none_any
-        ]
+    if metric.filter_none_any | metric.filter_rare:
+        filtered_ids = [i for i, t in enumerate(label_types) if metric.to_keep_type(t)]
         n_filtered = len(label_types) - len(filtered_ids)
         pred_types = [pred_types[i] for i in filtered_ids]
         label_types = [label_types[i] for i in filtered_ids]
@@ -394,7 +414,7 @@ def type_accuracies(
 
     acc_by_cat = GroupedAccCounter[AnnotCat]()
     # acc_by_pos = GroupedAccCounter[range]()
-    acc_by_common = GroupedAccCounter[bool]()
+    # acc_by_common = GroupedAccCounter[bool]()
     acc_by_simple = GroupedAccCounter[bool]()
 
     for i, p, l, cat in zip(
@@ -406,30 +426,39 @@ def type_accuracies(
         is_correct = p == l
         acc_by_cat.count(cat, is_correct, 1)
         acc_by_simple.count(ast_size(p) == 1, is_correct, 1)
-        if metric.common_type_names is not None:
-            acc_by_common.count(metric.is_common_type(l), is_correct, 1)
+        # if metric.common_type_names is not None:
+        #     acc_by_common.count(metric.is_common_type(l), is_correct, 1)
         if not is_correct and output_incorrect_set is not None:
             output_incorrect_set.append(filtered_ids[i])
 
-    acc_by_common = acc_by_common.grouped_accs(key=lambda x: "common" if x else "rare")
+    # acc_by_common = acc_by_common.grouped_accs(key=lambda x: "common" if x else "rare")
     acc_by_simple = acc_by_simple.grouped_accs(
         key=lambda x: "simple" if x else "complex"
     )
     metric_name = metric.name
+
+    extra_stats = (
+        dict()
+        if metric.match_base_only
+        else {
+            f"{metric_name}_by_simple": acc_by_simple,
+            f"{metric_name}_label_size": safe_div(
+                sum(ast_size(l) for l in label_types), len(label_types)
+            ),
+            f"{metric_name}_pred_size": safe_div(
+                sum(ast_size(p) for p in pred_types), len(pred_types)
+            ),
+        }
+    )
+
     return {
         metric_name: acc_by_cat.overall_acc(),
-        f"{metric_name}_by_common": acc_by_common,
-        f"{metric_name}_by_simple": acc_by_simple,
+        # f"{metric_name}_by_common": acc_by_common,
         f"{metric_name}_by_cat": acc_by_cat.grouped_accs(
             key=lambda x: x.name, sort_by=lambda x: x.value
         ),
+        **extra_stats,
         # f"{metric_name}_by_pos": acc_by_pos.grouped_accs(sort_by=lambda x: x.start),
-        f"{metric_name}_label_size": safe_div(
-            sum(ast_size(l) for l in label_types), len(label_types)
-        ),
-        f"{metric_name}_pred_size": safe_div(
-            sum(ast_size(p) for p in pred_types), len(pred_types)
-        ),
         f"{metric_name}_ignored_labels": n_filtered,
     }
 

@@ -61,7 +61,7 @@ class RolloutPrediction:
 
     @property
     def predicted_sigmap(self) -> SignatureMap:
-        if self.pred_assignments:
+        if hasattr(self, "pred_assignments") and self.pred_assignments:
             return self.pred_assignments
         else:
             return self.assignments
@@ -135,6 +135,11 @@ class RolloutCtx:
         annotation, but they are not counted in the accuracy computation (and only serve as
         an intermediate for information propogation).
         """
+        if pre_args.drop_env_types and decode_order.types_in_ctx():
+            logging.warning(
+                "The decoding order contains types in context, but the model is not trained to predict them."
+            )
+
         n_total_elems = sum(1 for p in projects for e in p.all_elems())
         project_roots = [p.root_dir for p in projects]
         rollouts: list[Any] = [None for _ in projects]
@@ -150,7 +155,7 @@ class RolloutCtx:
 
             async def eval_project(id_project: tuple[int, PythonProject]):
                 id, project = id_project
-                label_sigs = {e.path: e.get_signature() for e in project.all_elems()}
+                label_sigs = project.get_sigmap()
                 label_maps[id] = label_sigs
                 oracle = label_sigs if use_oracle else None
                 r = await self.project_rollout(
@@ -310,7 +315,7 @@ class RolloutCtx:
             elem2preds[elem.path] = pred_types
             progress_cbk(elem, pred_types)
 
-        return RolloutPrediction(pred_sigmap, elem2preds, elem2inputs, final_sigmap)
+        return RolloutPrediction(final_sigmap, elem2preds, elem2inputs, pred_sigmap)
 
 
 def is_mask_annot(a: cst.Annotation) -> bool:

@@ -70,6 +70,9 @@ class PythonType:
     def is_optional(self) -> bool:
         return self.head_name() == "Optional"
 
+    def normalized(self) -> "PythonType":
+        return normalize_type(self)
+
     @staticmethod
     def from_name(name: str) -> "PythonType":
         return PythonType((name,))
@@ -170,7 +173,7 @@ def parse_type_str(typ_str: str) -> PythonType:
     return parse_type_from_ast(tree)
 
 
-def parse_type_expr(annot: cst.BaseExpression, silent=False) -> PythonType | None:
+def parse_type_expr(annot: cst.BaseExpression, silent=True) -> PythonType | None:
     code = show_expr(annot, quoted=False)
     code = re.sub(r"#.*\n", "", code).replace("\n", "")
     try:
@@ -221,7 +224,7 @@ def parse_type_from_ast(tree: ast.expr) -> PythonType:
             return PythonType(("<Tuple>",), tuple(map(parse_type_from_ast, elts)))
         case _:
             raise SyntaxError(
-                None, f"Unsupported ast type: {ast.dump(tree, include_attributes=True)}"
+                f"Unsupported ast type: {ast.dump(tree, include_attributes=True)}"
             )
 
 
@@ -347,12 +350,12 @@ class MypyChecker:
     @staticmethod
     def parse_mypy_output(
         output: subprocess.CompletedProcess[str],
-        cmd: list[str],
+        cmd: list,
         cwd: Path,
     ) -> MypyResult | str:
         lines = output.stdout.splitlines()
         if len(lines) == 0:
-            return f"mypy failed. Command: `{' '.join(cmd)}` in cwd='{cwd}'\nError: {output.stderr}"
+            return f"mypy failed. Command: `{' '.join(map(str, cmd))}` in cwd='{cwd}'\nError: {output.stderr}"
         error_dict: dict[Path, list[MypyFeedback]] = {}
         for l in lines:
             m = re.match(r"(.*\.py|<string>):(\d+:\d+): error: (.+) \[([a-z\-]+)\]", l)

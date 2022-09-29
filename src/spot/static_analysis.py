@@ -269,6 +269,8 @@ class VariableSignature:
         else:
             return self
 
+    def drop_types(self) -> "VariableSignature":
+        return VariableSignature(None, self.in_class)
 
 @dataclass
 class FunctionSignature:
@@ -312,6 +314,11 @@ class FunctionSignature:
         returns = other.returns if other.returns is not None else self.returns
         return FunctionSignature(params, returns, self.in_class)
 
+    def drop_types(self) -> "FunctionSignature":
+        return FunctionSignature(
+            {p: None for p in self.params}, None, self.in_class
+        )
+
     @staticmethod
     def from_function(func: cst.FunctionDef, in_class: bool) -> "FunctionSignature":
         extractor = FunctionSignature._ParamsExtractor()
@@ -344,7 +351,8 @@ class FunctionSignature:
             if updated.name.value == "self":
                 return updated
             pname = updated.name.value
-            assert pname in self.params, f"param {pname} not in {self.params}"
+            if pname not in self.params:
+                raise LookupError(f"param {pname} not in {self.params.keys()}")
             return updated.with_changes(annotation=self.params[pname])
 
 
@@ -542,6 +550,9 @@ class PythonProject:
     def all_elems(self) -> Generator[PythonElem, None, None]:
         for module in self.modules.values():
             yield from module.all_elements()
+
+    def get_sigmap(self) -> SignatureMap:
+        return {e.path: e.get_signature() for e in self.all_elems()}
 
     def mask_types(self):
         """Replace all type annotations with `SpecialNames.TYPE_MASK`."""
