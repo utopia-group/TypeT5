@@ -110,9 +110,7 @@ def train_spot_model(
     print("Disk space left:")
     subprocess.run(["df", "-h", str(running_dir)])
 
-    model_path = (
-        "Salesforce/codet5-small" if use_small_model else "Salesforce/codet5-base"
-    )
+    model_path = ModelWrapper.get_codet5_path(use_small_model)
     lit_model = TrainModelWrapper(model_path, model_saving_path=running_dir / "ckpts")
     tokenizer: TokenizerSPOT = lit_model.tokenizer
 

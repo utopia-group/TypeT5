@@ -91,6 +91,12 @@ class ModelWrapper:
     common_type_names: set[str]
     monitor: TaskMonitor = EmptyLoggingMonitor()
 
+    @staticmethod
+    def get_codet5_path(use_small_model: bool = False) -> str:
+        return (
+            "Salesforce/codet5-small" if use_small_model else "Salesforce/codet5-base"
+        )
+
     def scale_ctx_size(self, factor) -> "ModelWrapper":
         r = copy(self)
         r.args = r.args.scale_ctx_size(factor)
