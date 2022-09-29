@@ -8,7 +8,6 @@ import pickle
 import shutil
 import time
 from abc import ABC, abstractmethod
-from asyncio import current_task
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, redirect_stdout
@@ -24,7 +23,8 @@ from typing import (
     Optional,
     Sequence,
     TypeVar,
-    Union,
+    Mapping,
+    Collection,
     cast,
 )
 
@@ -50,6 +50,71 @@ T1 = TypeVar("T1")
 T2 = TypeVar("T2")
 
 
+def proj_root() -> Path:
+    return Path(__file__).parent.parent.parent
+
+
+def get_config_dict() -> dict:
+    if (path := proj_root() / "config" / "SPOT.json").exists():
+        return json.loads(read_file(path))
+    else:
+        return {}
+
+
+def get_config(key: str) -> Optional[str]:
+    return get_config_dict().get(key)
+
+
+def get_gpu_id(default: int) -> int:
+    if (s := os.getenv("GPU_ID")) is not None:
+        return int(s)
+    else:
+        print("GPU_ID not set, using:", default)
+        return default
+
+
+def get_dataroot() -> Path:
+    if (v := get_config("data_root")) is None:
+        return proj_root()
+    else:
+        return Path(v)
+
+
+def get_dataset_dir(dataname: str) -> Path:
+    if (v := get_config("datasets_root")) is None:
+        return get_dataroot() / "datasets" / dataname
+    else:
+        return Path(v) / dataname
+
+
+def get_model_dir(trained=True) -> Path:
+    post = "trained" if trained else "training"
+    return get_dataroot() / "models" / post
+
+
+def get_eval_dir(dataname: str, experiment_name: str) -> Path:
+    return get_dataroot() / "evaluations" / dataname / experiment_name
+
+
+def mk_testset_from_repos(name="InferTypes4Py", repos: Sequence[Path] | None = None):
+    if repos is None:
+        repos = [proj_root()]
+    dest = get_dataset_dir(name) / "repos" / "test" / "SPOT"
+    if dest.exists():
+        print("Deleting old dataset at: ", dest)
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    for root in repos:
+        root = proj_root()
+        shutil.copytree(root / "src", dest / "src")
+        shutil.copytree(root / "tests", dest / "tests")
+        return dest
+
+
+def raise_error(msg: str) -> T1:  # type: ignore
+    raise RuntimeError(msg)
+
+
 def load_model_spot(path) -> ModelSPOT:
     return cast(ModelSPOT, ModelSPOT.from_pretrained(path))
 
@@ -70,6 +135,27 @@ _turn_off_tokenizer_warning(DefaultTokenizer)
 
 def decode_tokens(tks, skip_special_tokens=False):
     return DefaultTokenizer.decode(tks, skip_special_tokens=skip_special_tokens)
+
+
+def rec_iter_files(
+    dir: Path,
+    dir_filter: Callable[[Path], bool],
+) -> Generator[Path, None, None]:
+    """Recursively iterate over all files in a directory whose parent dirs satisfies the given
+    `dir_filter`. Note that unlike `glob`, if a directory is filtered out, all
+    its children won't be traversed, leading to potentially better performance in certain use cases."""
+    assert dir.is_dir()
+
+    def rec(path: Path) -> Generator[Path, None, None]:
+        if path.is_dir():
+            if not dir_filter(path):
+                return
+            for child in path.iterdir():
+                yield from rec(child)
+        else:
+            yield path
+
+    return rec(dir)
 
 
 DefaultWorkers: int = multiprocessing.cpu_count() // 2
@@ -141,17 +227,6 @@ def write_file(path, content: str) -> None:
         f.write(content)
 
 
-def proj_root() -> Path:
-    return Path(__file__).parent.parent.parent
-
-
-def get_data_dir() -> Path:
-    if (v := os.getenv("datadir")) is not None:
-        return Path(v)
-    else:
-        return proj_root() / "data"
-
-
 def not_none(x: Optional[T1]) -> T1:
     assert x is not None
     return x
@@ -215,9 +290,7 @@ def groupby(iterable: Iterable[T1], keyfunc: Callable[[T1], T2]) -> dict[T2, lis
     groups = dict[T2, list[T1]]()
     for item in iterable:
         key = keyfunc(item)
-        if key not in groups:
-            groups[key] = list[T1]()
-        groups[key].append(item)
+        groups.setdefault(key, []).append(item)
     return groups
 
 
@@ -389,12 +462,12 @@ def pushover_alert(
 
     conn = http.client.HTTPSConnection("api.pushover.net:443")
     config_file = proj_root() / "config/pushover.json"
-    if print_to_console:
-        print(f"Pushover: ({title}) {message}")
     if not config_file.exists():
-        print(
+        logging.warning(
             f"No pushover config file found at {config_file}. Not able to push message."
         )
+    if print_to_console or not config_file.exists():
+        print(f"Pushover: ({title}) {message}")
     elif notify:
         config = json.loads(config_file.read_text())
         conn.request(
@@ -470,10 +543,14 @@ class PickleCache:
             logging.warning(f"No cache found at: {self.cache_dir}, skip clearing.")
 
 
-def assert_eq(*xs: T1) -> None:
-    assert len(xs) > 1
-    for i, (x, y) in enumerate(zip(xs, xs[1:])):
-        assert x == y, f"{x} != {y} at index {i}"
+def assert_eq(x: T1, *xs: T1, extra_message: Callable[[], str] = lambda: "") -> None:
+    for i in range(len(xs)):
+        x = xs[i - 1] if i > 0 else x
+        y = xs[i]
+        assert x == y, (
+            f"{x} (of type {type(x).__name__}) != {y} (of type {type(y).__name__}) at equality {i}.\n"
+            + extra_message()
+        )
 
 
 def scalar_stats(xs) -> dict[str, Any]:
@@ -513,6 +590,11 @@ def get_subset(data, key: slice | Iterable):
         return data[key]
     else:
         return [data[i] for i in key]
+
+
+def dict_subset(d: dict[T1, T2], n: int) -> dict[T1, T2]:
+    keys = list(d)[:n]
+    return {k: d[k] for k in keys}
 
 
 def pretty_print_dict(
@@ -598,7 +680,7 @@ class GroupedAccCounter(Generic[T1]):
         self.total_counter[key] += total
 
     def grouped_accs(
-        self, key=lambda x: x, sort_by=lambda x: x
+        self, key: Callable = lambda x: x, sort_by: Callable = lambda x: x
     ) -> dict[Any, CountedAcc]:
         return {
             str(key(k)): CountedAcc(self.correct_counter[k], self.total_counter[k])
@@ -617,30 +699,51 @@ def safe_div(a, b):
     return a / b
 
 
-def get_modified_args(instance, recursive: bool = False) -> dict[str, Any] | Any:
+def get_modified_args(instance, flatten: bool = False) -> dict[str, Any] | None:
     """Collect only the arguments that differ from the default value, or return the value
     itself if `instance` does not contain `__annotations__`."""
     if not hasattr(instance, "__annotations__"):
-        return instance
+        return None
 
     cls = type(instance)
     delta = dict[str, Any]()
     # collect all values that are different from the default
+    if hasattr(cls, "_field_defaults"):
+        default_values = cls._field_defaults
+    else:
+        default_values = {
+            attr: getattr(cls, attr)
+            for attr in instance.__annotations__
+            if hasattr(cls, attr)
+        }
     for attr in instance.__annotations__:
         v = getattr(instance, attr)
-        if hasattr(cls, attr) and getattr(cls, attr) == v:
+        if attr in default_values and default_values[attr] == v:
             continue
-        delta[attr] = get_modified_args(v) if recursive else v
+        rec_args = get_modified_args(v, flatten=flatten)
+        if rec_args is None:
+            delta[attr] = v
+        else:
+            if flatten:
+                delta.update(rec_args)
+            else:
+                delta[attr] = rec_args
     return delta
 
 
-def repr_modified_args(instance) -> str:
-    ma = get_modified_args(instance, False)
-    if isinstance(ma, dict):
-        type_name = type(instance).__name__
-        return f"{type_name}({', '.join(f'{k}={v}' for k, v in ma.items())})"
-    else:
-        return repr(ma)
+def show_dict_as_tuple(d: dict) -> str:
+    elems = dict[str, str]()
+    for k, v in d.items():
+        if isinstance(v, dict):
+            v = show_dict_as_tuple(v)
+        elems[k] = str(v)
+    return "(" + ", ".join(f"{k}={v}" for k, v in elems.items()) + ")"
+
+
+def repr_modified_args(instance, flatten: bool = False) -> str:
+    ma = get_modified_args(instance, flatten=flatten)
+    type_name = type(instance).__name__
+    return type_name + show_dict_as_tuple(ma) if ma else type_name + "()"
 
 
 def merge_dicts(dicts: Sequence[dict[T1, Any]]) -> dict[T1, list]:
@@ -698,3 +801,36 @@ class MovingAvg:
 
     def __repr__(self) -> str:
         return f"(value={self.value:.4f}, count={self.count})"
+
+
+import asyncio
+
+
+async def throttled_async_run(f, xs: Sequence, concurrency: int):
+    """Run `f` on `xs` asynchronously, but limit the max number of concurrent tasks to `concurrency`."""
+    sem = asyncio.Semaphore(concurrency)
+
+    async def task(x):
+        async with sem:
+            return await f(x)
+
+    tasks = [task(x) for x in xs]
+    return await asyncio.gather(*tasks)
+
+
+def move_all_files(src_dir: Path, dest_dir: Path, glob_pattern: str = "**/*"):
+    for f in src_dir.glob(glob_pattern):
+        target = dest_dir / f.relative_to(src_dir)
+        target.parent.mkdir(exist_ok=True, parents=True)
+        shutil.copy(f, target)
+
+
+# used for showing cst nodes.
+_EmptyModule = cst.Module([])
+
+
+def show_expr(expr: cst.CSTNode, quoted: bool = True) -> str:
+    s = _EmptyModule.code_for_node(expr)
+    if quoted:
+        s = f"cst'{s}'"
+    return s

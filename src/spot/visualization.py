@@ -6,16 +6,17 @@ import colored
 import ipywidgets as widgets
 import plotly.express as px
 
-from spot.data import (
+from .data import (
     ChunkedDataset,
     CountedAcc,
     CtxArgs,
     PythonType,
-    SrcDataset,
+    TokenizedSrcSet,
 )
-from spot.model import DatasetPredResult, DecodingArgs
-from spot.type_check import normalize_type
-from spot.utils import *
+from .model import DatasetPredResult, DecodingArgs
+from .type_check import normalize_type
+from .type_env import AccuracyMetric
+from .utils import *
 
 from io import StringIO
 from IPython.display import HTML
@@ -60,13 +61,15 @@ def visualize_chunk(
     input_ids: list[int],
     pred_types: dict[int, PythonType],
     label_types: list[PythonType],
+    src_file: Path,
+    metric: AccuracyMetric,
     contain_extra_id: bool = True,
 ):
     def id_replace(id: int) -> str:
         if id in pred_types:
             p = pred_types[id]
             t = label_types[id]
-            correct = normalize_type(p) == normalize_type(t)
+            correct = metric.process_type(p) == metric.process_type(t)
             id_str = f"prediction-{id}"
             if correct:
                 return f"<span id='{id_str}' style='color: green;'>{str(p)}</span>"
@@ -82,9 +85,10 @@ def visualize_chunk(
     else:
         code = code_inline_mask_ids(code, id_replace)
     return widgets.HTML(
-        "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30);'>"
+        "<pre style='line-height: 1.2; padding: 10px; color: rgb(212,212,212); background-color: rgb(30,30,30);'>\n"
+        + f"# file: {src_file}\n"
         + code
-        + "</pre>"
+        + "\n</pre>"
     )
 
 
@@ -130,9 +134,10 @@ def code_inline_mask_ids(code: str, id2replace: Callable[[int], str]):
 
 
 def export_preds_on_code(
-    dataset: SrcDataset | ChunkedDataset,
+    dataset: TokenizedSrcSet | ChunkedDataset,
     preds: list[dict] | list[list],
     export_to: Path,
+    metric: AccuracyMetric,
 ):
     if export_to.exists():
         shutil.rmtree(export_to)
@@ -143,14 +148,20 @@ def export_preds_on_code(
             preds_dict = {k: v for k, v in enumerate(preds_dict)}
         page = (
             visualize_chunk(
-                dataset.data[i]["input_ids"], preds_dict, dataset.chunks_info[i].types
+                dataset.data[i]["input_ids"],
+                preds_dict,
+                dataset.chunks_info[i].types,
+                dataset.chunks_info[i].src_file,
+                metric,
             )
             if isinstance(dataset, ChunkedDataset)
             else visualize_chunk(
                 dataset.all_srcs[i].tokenized_code,
                 preds_dict,
                 dataset.all_srcs[i].types,
+                dataset.all_srcs[i].file,
                 contain_extra_id=False,
+                metric=metric,
             )
         )
         assert isinstance(page.value, str)
@@ -163,23 +174,33 @@ def export_preds_on_code(
             if isinstance(dataset, ChunkedDataset)
             else [s.types for s in dataset.all_srcs]
         )
+        file_list = (
+            [str(info.src_file) for info in dataset.chunks_info]
+            if isinstance(dataset, ChunkedDataset)
+            else [str(s.repo) for s in dataset.all_srcs]
+        )
         for labels, ps in zip(labels_list, preds):
             if isinstance(ps, list):
                 ps = {k: v for k, v in enumerate(ps)}
             n_correct = sum(
-                normalize_type(ps[t]) == normalize_type(labels[t]) for t in ps
+                metric.process_type(ps[t]) == metric.process_type(labels[t]) for t in ps
             )
             chunk_accs.append(CountedAcc(n_correct, len(ps)))
             pbar.update()
 
-    chunk_sorted = sorted(range(len(chunk_accs)), key=lambda i: chunk_accs[i].acc)
-    links = "\n".join(
-        f"<li><a href='chunks/chunk{i}.html#prediction-0'>chunk{i} (Acc: {chunk_accs[i]})</a></li>"
-        for i in chunk_sorted
-    )
-    index = f""" Chunks sorted by accuracy (from low to high).
-    <ol> {links} </ol>
-    """
+    chunk_groups = groupby(range(len(chunk_accs)), lambda i: file_list[i])
+    chunk_links = list[str]()
+    for file, ids in chunk_groups.items():
+        ids.sort(key=lambda i: chunk_accs[i].acc)
+        links = "\n".join(
+            f"<li><a href='chunks/chunk{i}.html#prediction-0'>chunk{i} (Acc: {chunk_accs[i]})</a></li>"
+            for i in ids
+        )
+        section = f"<h5>{file}</h5>\n<ol>{links}</ol>"
+        chunk_links.append(section)
+    links_str = "\n".join(chunk_links)
+
+    index = f"<h2> Model Predictions ({metric.name})</h2>\n{links_str}"
     write_file(export_to / "index.html", index)
     return None
 
@@ -188,6 +209,7 @@ def visualize_preds_on_code(
     dataset: ChunkedDataset,
     preds: list[list[Any]],
     preds_extra: dict[str, list[list[Any]]],
+    metric: AccuracyMetric,
 ):
     assert_eq(len(dataset.data), len(preds))
 
@@ -201,7 +223,7 @@ def visualize_preds_on_code(
         if prev_types is not None:
             meta_data["prev_types"] = prev_types
             prev_correct = [
-                normalize_type(t) == normalize_type(l)
+                metric.process_type(t) == metric.process_type(l)
                 for t, l in zip(prev_types, label_types)
             ]
             meta_data["prev_correct"] = prev_correct
@@ -209,17 +231,15 @@ def visualize_preds_on_code(
         for k, v in preds_extra.items():
             meta_data[k] = v[i]
 
-        src_ids = sorted(list(set(dataset.chunks_info[i].src_ids)))
-        files = [dataset.files[sid] for sid in src_ids]
-
         pred_types_dict = {i: v for i, v in enumerate(pred_types)}
+        file = dataset.chunks_info[i].src_file
         code = visualize_chunk(
-            dataset.data[i]["input_ids"], pred_types_dict, label_types
+            dataset.data[i]["input_ids"], pred_types_dict, label_types, file, metric
         )
 
         rows = [
             in_scroll_pane(display_as_widget(pd.DataFrame(meta_data)), height="100px"),
-            in_scroll_pane(str(files), height=None),
+            in_scroll_pane(str(dataset.chunks_info[i].src_file), height=None),
             in_scroll_pane(code),
         ]
         return widgets.VBox(rows)
@@ -445,8 +465,8 @@ def visualize_counts(
 
 import plotly.express as px
 
-from spot.type_env import MypyFeedback
-from spot.utils import groupby, pretty_print_dict
+from .type_env import AccuracyMetric, MypyFeedback
+from .utils import groupby, pretty_print_dict
 
 
 def plot_feedback_distribution(
@@ -461,7 +481,7 @@ def plot_feedback_distribution(
     return top_feedbacks
 
 
-def show_feedback_stats(dataset: SrcDataset):
+def show_feedback_stats(dataset: TokenizedSrcSet):
     fb_list: list[list[MypyFeedback]] = dataset.extra_stats["mypy_feedbacks"]
     stats = {}
     for k in ["feedbacks_per_file", "type_check_success_ratio"]:
@@ -480,7 +500,7 @@ def show_feedback_stats(dataset: SrcDataset):
 
 
 def visualize_feedbacks_in_srcs(
-    dataset: SrcDataset,
+    dataset: TokenizedSrcSet,
 ):
     error_groups = show_feedback_stats(dataset)
     fdbks = list(seq_flatten(list(error_groups.values())))
@@ -488,10 +508,14 @@ def visualize_feedbacks_in_srcs(
 
     def viz(i):
         fdbk, src = fdbks[i]
-        code = code_inline_type_masks(src.origin_code, src.types)
+        code = code_inline_type_masks(src.main_code, src.types)
         text = (
             f"feedback: {fdbk}\n" + "=========code=========\n" + add_line_numbers(code)
         )
         display(string_widget(text))
 
     return interactive_sized(viz, {"i": (0, n_total - 1)})
+
+
+def show_code_range(crange: CodeRange) -> str:
+    return f"[{crange.start.line}:{crange.start.column+1}--{crange.end.line}:{crange.end.column+1}]"

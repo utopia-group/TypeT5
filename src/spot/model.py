@@ -10,15 +10,15 @@ from torch import Tensor
 from torch.utils.data import DataLoader, RandomSampler
 from transformers.data.data_collator import DataCollatorForSeq2Seq
 
-from spot.data import (
+from .data import (
     ChunkedDataset,
     CtxArgs,
-    SrcDataset,
+    TokenizedSrcSet,
     output_ids_as_types,
     preds_to_accuracies,
 )
-from spot.type_env import PythonType
-from spot.utils import *
+from .type_env import AccuracyMetric, PythonType
+from .utils import *
 
 
 @dataclass
@@ -26,7 +26,9 @@ class DecodingArgs:
     ctx_args: CtxArgs
     sampling_max_tokens: int
     max_workers: int = DefaultWorkers
-    max_tokens_per_type: int = 10
+    # the maximal prediction length = tokens_per_type * num_types + slack_tokens
+    tokens_per_type: int = 16
+    slack_tokens: int = 10
     do_sample: bool = False
     top_p: float = 0.9
     num_beams: Optional[int] = None
@@ -59,15 +61,13 @@ class DatasetPredResult(Generic[T1]):
     predictions: list[list[PythonType]]
     extra_info: list[T1] = field(default_factory=list)
 
-    @property
-    def accuracies(self) -> dict:
-        return preds_to_accuracies(self.predictions, self.chunks)
+    def accuracies(self, metric: AccuracyMetric) -> dict:
+        return preds_to_accuracies(self.predictions, self.chunks, metric)
 
-    def group_by_repo(self) -> dict[Path, "DatasetPredResult[T1]"]:
+    def group_by_repo(self, repos_dir: Path) -> dict[Path, "DatasetPredResult[T1]"]:
         chunk2repo = list[Path]()
         for i, info in enumerate(self.chunks.chunks_info):
-            sid = info.src_ids[0]
-            file = self.chunks.files[sid]
+            file = repos_dir / info.src_file
             repo = self.chunks.file2repo[file]
             chunk2repo.append(repo)
 
@@ -88,7 +88,14 @@ class ModelWrapper:
     model: ModelSPOT
     tokenizer: TokenizerSPOT
     args: DecodingArgs
+    common_type_names: set[str]
     monitor: TaskMonitor = EmptyLoggingMonitor()
+
+    @staticmethod
+    def get_codet5_path(use_small_model: bool = False) -> str:
+        return (
+            "Salesforce/codet5-small" if use_small_model else "Salesforce/codet5-base"
+        )
 
     def scale_ctx_size(self, factor) -> "ModelWrapper":
         r = copy(self)
@@ -102,25 +109,26 @@ class ModelWrapper:
     ) -> tuple[list[list[PythonType]], Tensor]:
         """Run the model on the given batch and return the predicted types for each row."""
         model = self.model
+        args = self.args
         n_labels = batch["n_labels"]
         max_labels = max(n_labels)
 
-        div_pen = self.args.diversity_penalty
-        if self.args.num_beam_groups is not None:
+        div_pen = args.diversity_penalty
+        if args.num_beam_groups is not None:
             assert (
                 div_pen is not None and div_pen > 0
             ), "num_beam_groups requires diversity_penalty > 0"
 
         output_ids = model.generate(
             inputs=batch["input_ids"].to(model.device),
-            do_sample=self.args.do_sample,
-            top_p=self.args.top_p,
-            num_beams=self.args.num_beams,
+            do_sample=args.do_sample,
+            top_p=args.top_p,
+            num_beams=args.num_beams,
             num_return_sequences=num_return_sequences,
-            num_beam_groups=self.args.num_beam_groups,
-            max_length=self.args.max_tokens_per_type * max_labels,
+            num_beam_groups=args.num_beam_groups,
+            max_length=args.tokens_per_type * max_labels + args.slack_tokens,
             diversity_penalty=div_pen,
-            length_penalty=self.args.length_penalty,
+            length_penalty=args.length_penalty,
             renormalize_logits=True,
         ).cpu()  # type: ignore
         assert len(output_ids.shape) == 2
@@ -170,7 +178,9 @@ class ModelWrapper:
         device = model.device
         # we use this dict to keep the order of the chunks since it may be permuted by dynamic_dataloader
         pred_types = dict[int, list]()
-        with tqdm(total=len(dataset), desc="predict", **tqdm_args) as tqdm_bar:
+        with tqdm(
+            total=len(dataset), desc="predict", smoothing=0.01, **tqdm_args
+        ) as tqdm_bar:
             for batch in loader:
                 n_chunks = batch["input_ids"].shape[0]
                 batch["input_ids"] = batch["input_ids"].to(device)
@@ -190,8 +200,8 @@ class ModelWrapper:
         """Save the model to the given path along with its tokenizer and args."""
         self.model.save_pretrained(str(path))
         self.tokenizer.save_pretrained(str(path))
-        with open(path / "args.pkl", "wb") as f:
-            pickle.dump(self.args, f)
+        pickle_dump(path / "args.pkl", self.args)
+        pickle_dump(path / "common_names.pkl", self.common_type_names)
 
     def to(self, device) -> "ModelWrapper":
         self.model = self.model.to(device)
@@ -202,18 +212,26 @@ class ModelWrapper:
         """Load a pretrained model from the given path."""
         model = cast(ModelSPOT, ModelSPOT.from_pretrained(str(path)))
         tokenizer = TokenizerSPOT.from_pretrained(str(path))
-        with open(path / "args.pkl", "rb") as f:
-            args = pickle.load(f)
+        args = pickle_load(path / "args.pkl")
+        common_type_names = ModelWrapper.load_common_type_names(path)
         return ModelWrapper(
             model=model,
             tokenizer=tokenizer,
             args=args,
+            common_type_names=common_type_names,
             monitor=TaskLoggingMonitor(path.name),
         )
 
+    @staticmethod
+    def load_common_type_names(model_path: Path) -> set[str]:
+        if (model_path / "common_names.pkl").exists():
+            return pickle_load(model_path / "common_names.pkl")
+        else:
+            return set()
+
     def eval_on_dataset(
         self,
-        src_data: SrcDataset,
+        src_data: TokenizedSrcSet,
         max_labels: Optional[int] = None,
         tqdm_args: dict = {},
     ) -> DatasetPredResult:

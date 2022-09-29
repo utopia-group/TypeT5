@@ -1,18 +1,20 @@
 import asyncio
 from typing import *
-from spot.data import (
+
+from spot.type_env import AccuracyMetric
+from .data import (
     CtxArgs,
-    SrcDataset,
+    TokenizedSrcSet,
     TypeCheckingEnv,
     chunk_from_src,
     src_preds_to_accuracies,
     type_check_src_in_project,
 )
-from spot.model import ModelWrapper
-from spot.tokenized_src import TokenizedSrc, feedbacks_to_tokenized_src
-from spot.train import _configure_optimizers
-from spot.type_check import MypyFeedback, PythonType, TypeCheckArgs, normalize_type
-from spot.utils import *
+from .model import ModelWrapper
+from .tokenized_src import TokenizedSrc, feedbacks_to_tokenized_src
+from .train import _configure_optimizers
+from .type_check import MypyFeedback, PythonType, TypeCheckArgs, normalize_type
+from .utils import *
 from transformers.modeling_outputs import Seq2SeqLMOutput
 from collections import deque as Deque
 
@@ -139,7 +141,7 @@ class DAggerModel:
 
     async def train_on_data(
         self,
-        train_set: SrcDataset,
+        train_set: TokenizedSrcSet,
         dagger_args: DAggerArgs,
         log_fn: Callable[[int, dict], None],
     ):
@@ -223,7 +225,7 @@ class DAggerModel:
 
     async def eval_on_data(
         self,
-        dataset: SrcDataset,
+        dataset: TokenizedSrcSet,
         concurrency: int = DefaultWorkers,
     ):
         result = DAggerEvalResult([], [])
@@ -332,7 +334,7 @@ class DAggerModel:
 
 
 def src_to_batch(src: TokenizedSrc, t: int, ctx_args: CtxArgs):
-    chunk, info = chunk_from_src(src, 0, t, ctx_args)
+    chunk, info = chunk_from_src(src, t, ctx_args)
     assert_eq(chunk["n_labels"], 1)
     batch = {
         "input_ids": torch.tensor([chunk["input_ids"]]),
@@ -347,20 +349,8 @@ class DAggerEvalResult:
     final_srcs: list[TokenizedSrc]
     final_preds: list[dict[int, PythonType]]
 
-    @property
-    def accuracies(self):
-        return src_preds_to_accuracies(self.final_preds, self.final_srcs)
-
-
-async def throttled_async_run(f, xs: Sequence, concurrency: int):
-    sem = asyncio.Semaphore(concurrency)
-
-    async def task(x):
-        async with sem:
-            return await f(x)
-
-    tasks = [task(x) for x in xs]
-    return await asyncio.gather(*tasks)
+    def accuracies(self, metric: AccuracyMetric):
+        return src_preds_to_accuracies(self.final_preds, self.final_srcs, metric)
 
 
 def get_typechecked_src(src: TokenizedSrc, assignment, check_r) -> TokenizedSrc:

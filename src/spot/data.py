@@ -1,12 +1,9 @@
-import logging
-import math
+import copy
 import multiprocessing
 import pickle
-import random
 import shutil
 import subprocess
 import warnings
-import copy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import *
@@ -15,25 +12,22 @@ import dateparser
 from datasets import Dataset
 
 from .tokenized_src import *
-from spot.type_check import (
-    TypeCheckArgs,
-    remove_top_optional,
-)
-from spot.type_env import (
+from .type_check import TypeCheckArgs
+from .type_env import (
+    AccuracyMetric,
     AnnotCat,
     AnnotInfo,
     AnnotPath,
     MypyChecker,
     MypyFeedback,
     PythonType,
-    apply_annotations,
     collect_annots_info,
-    collect_user_annotations,
     normalize_type,
     parse_type_expr,
     parse_type_from_ast,
+    type_accuracies,
 )
-from spot.utils import *
+from .utils import *
 
 warnings.filterwarnings(
     "ignore",
@@ -121,7 +115,7 @@ class GitRepo:
             file_to_annots[rpath] = {
                 (k := info.path): (
                     parse_type_expr(
-                        m, cast(cst.Annotation, info.annot).annotation, silent
+                        cast(cst.Annotation, info.annot).annotation, silent
                     ),
                     path_to_cat[k],
                 )
@@ -157,24 +151,33 @@ class GitRepo:
 @dataclass
 class CtxArgs:
     ctx_size: int
+    # up to how much of the left_margin to be allocated as preamble
+    preamble_size: int
     left_margin: int
     right_margin: int
     max_labels: int = 16
+    # whether to inline all the labels that precede the context. Set to true when in interactive mode.
+    inline_prev_gold: bool = False
+
+    def __post_init__(self):
+        assert self.preamble_size > 0
+        assert (
+            self.preamble_size < self.left_margin
+        ), "Preamble bigger than left_margin.(Preamble is allcoated from the left margin.)"
+        assert (
+            self.left_margin + self.right_margin < self.ctx_size
+        ), "No window size left."
 
     @property
     def window_size(self) -> int:
         return self.ctx_size - self.left_margin - self.right_margin
-
-    def as_tuple(self):
-        "Returns (left_margin, window_size, right_margin, max_labels)."
-        return self.left_margin, self.window_size, self.right_margin, self.max_labels
 
     def __repr__(self):
         return repr_modified_args(self)
 
 
 def _compute_ctx(
-    src: TokenizedSrc, label_range: tuple[int, int], ctx_args: "CtxArgs"
+    src: TokenizedSrc, label_range: tuple[int, int], ctx_args: CtxArgs
 ) -> tuple[list[int], tuple[int, int]]:
     src_len = len(src.tokenized_code)
     assert label_range[0] < len(
@@ -185,8 +188,6 @@ def _compute_ctx(
     left_margin_size = window_start - left_margin_start
 
     max_window_size = ctx_args.window_size
-    label_ids = list[int]()
-
     right_margin_end = left_margin_start + ctx_args.ctx_size
     if right_margin_end >= src_len:
         right_margin_end = src_len
@@ -194,6 +195,7 @@ def _compute_ctx(
         assert max_window_size > 0
 
     label_pos = 0
+    label_ids = list[int]()
     assert len(src.types) > 0
     for i in range(label_range[0], label_range[1]):
         label_pos = src.types_pos[i] - window_start
@@ -215,7 +217,7 @@ def _compute_ctx(
 
 
 def chunk_from_src(
-    src: TokenizedSrc, src_id: int, label_id: int, ctx_args: CtxArgs
+    src: TokenizedSrc, label_id: int, ctx_args: CtxArgs
 ) -> tuple[dict, "SrcChunkInfo"]:
     """Helper function to extract a single chunk from a source file."""
     chunks = list[dict]()
@@ -224,7 +226,6 @@ def chunk_from_src(
         chunks,
         chunks_info,
         src,
-        src_id,
         (label_id, label_id + 1),
         ctx_args,
     )
@@ -232,13 +233,24 @@ def chunk_from_src(
     return chunks[0], chunks_info[0]
 
 
-def src_to_chunks_(
-    chunks: list,
-    chunks_info: list,
+def src_to_chunks(
     src: TokenizedSrc,
-    src_id: int,
     label_range: tuple[int, int],
-    ctx_args: "CtxArgs",
+    ctx_args: CtxArgs,
+) -> tuple[list[dict], list["SrcChunkInfo"]]:
+    """Helper function to extract chunks from a source file."""
+    chunks = list[dict]()
+    chunks_info = list[SrcChunkInfo]()
+    src_to_chunks_(chunks, chunks_info, src, label_range, ctx_args)
+    return chunks, chunks_info
+
+
+def src_to_chunks_(
+    chunks: list[dict],
+    chunks_info: list["SrcChunkInfo"],
+    src: TokenizedSrc,
+    label_range: tuple[int, int],
+    ctx_args: CtxArgs,
 ) -> None:
     assert 0 <= label_range[0]
     assert label_range[1] <= len(
@@ -249,8 +261,23 @@ def src_to_chunks_(
     special_tks = [tokenizer.additional_special_tokens_ids[99 - i] for i in range(100)]
     bos_id, eos_id = not_none(tokenizer.bos_token_id), not_none(tokenizer.eos_token_id)
 
-    label_ids, (ctx_start, ctx_end) = _compute_ctx(src, label_range, ctx_args)
+    if len(src.tokenized_preamble) > ctx_args.preamble_size:
+        # cut preamble at the start
+        preamble = src.tokenized_preamble[-ctx_args.preamble_size :]
+        preamble[0] = bos_id
+    else:
+        preamble = src.tokenized_preamble
+    new_ctx_args = copy.deepcopy(ctx_args)
+    new_ctx_args.ctx_size -= len(preamble)
+    new_ctx_args.left_margin -= len(preamble)
+    new_ctx_args.preamble_size = 0
+
+    label_ids, (ctx_start, ctx_end) = _compute_ctx(src, label_range, new_ctx_args)
     tks = src.tokenized_code[ctx_start:ctx_end]
+    if ctx_start > 0:
+        tks[0] = bos_id
+    if ctx_end < len(src.tokenized_code) - 1:
+        tks[-1] = eos_id
     label_tkns = [bos_id]
     types = list[PythonType]()
     types_info = list[AnnotInfo]()
@@ -271,9 +298,10 @@ def src_to_chunks_(
     label_tkns.append(eos_id)
 
     assert len(label_ids) > 0
-    assert len(tks) <= ctx_args.ctx_size
+    assert len(preamble) + len(tks) <= ctx_args.ctx_size
+
     this_chunk = {
-        "input_ids": tks,
+        "input_ids": preamble + tks,
         "labels": label_tkns,
         "n_labels": len(label_ids),
     }
@@ -282,16 +310,20 @@ def src_to_chunks_(
     meta = SrcChunkInfo(
         types,
         types_info,
-        src_ids=[src_id] * len(label_ids),
+        src_file=src.file,
         label_ids=label_ids,
         prev_types=prev_types,
         inlined_spans=inlined_spans,
     )
     chunks_info.append(meta)
 
+    if ctx_args.inline_prev_gold:
+        prev_types = {t: src.types[t] for t in label_ids}
+        src = src.inline_prev_predictions(as_comment=False, prev_types=prev_types)
+
     new_label_range = (label_ids[-1] + 1, label_range[1])
     if new_label_range[0] < label_range[1]:
-        src_to_chunks_(chunks, chunks_info, src, src_id, new_label_range, ctx_args)
+        src_to_chunks_(chunks, chunks_info, src, new_label_range, ctx_args)
 
 
 def chunk_srcs_per_file(
@@ -302,14 +334,17 @@ def chunk_srcs_per_file(
 ) -> "ChunkedDataset":
     """Turn each file into a single chunk when possible, or break it down into multiple chunks."""
 
-    chunks = list[dict]()
-    chunks_info: list[SrcChunkInfo] = []
-
-    for src_id, src in enumerate(tqdm(srcs, desc="chunk_srcs_per_file", **tqdm_args)):
-        if len(src.types) == 0:
-            continue
-        labels_range = 0, len(src.types)
-        src_to_chunks_(chunks, chunks_info, src, src_id, labels_range, ctx_args)
+    # TODO: parallelize this
+    srcs = [s for s in srcs if len(s.types) > 0]
+    label_ranges = [(0, len(s.types)) for s in srcs]
+    chunk_rs = pmap(
+        src_to_chunks,
+        srcs,
+        label_ranges,
+        [ctx_args] * len(srcs),
+        desc="map src_to_chunks",
+        tqdm_args=tqdm_args,
+    )
 
     data: dict[str, list] = {
         "input_ids": [],
@@ -317,6 +352,9 @@ def chunk_srcs_per_file(
         "n_labels": [],
         "chunk_id": [],
     }
+    chunks = [chunk for r in chunk_rs for chunk in r[0]]
+    chunks_info = [info for r in chunk_rs for info in r[1]]
+
     chunk_id = 0
     for chunk in chunks:
         data["input_ids"].append(chunk["input_ids"])
@@ -330,7 +368,7 @@ def chunk_srcs_per_file(
         data=Dataset.from_dict(data),
         chunks_info=chunks_info,
         files=files,
-        file2src={f: s.origin_code for f, s in zip(files, srcs)},
+        file2src={f: s.main_code for f, s in zip(files, srcs)},
         file2repo={f: (repos_root / s.repo).resolve() for f, s in zip(files, srcs)},
     )
 
@@ -342,7 +380,7 @@ class TypeCheckingEnv:
 
 
 @dataclass
-class SrcDataset:
+class TokenizedSrcSet:
     repos_root: Path
     all_srcs: list[TokenizedSrc]
     extra_stats: dict = field(default_factory=dict)
@@ -350,7 +388,7 @@ class SrcDataset:
     def __len__(self):
         return len(self.all_srcs)
 
-    def inline_predictions(self, as_comment: bool, tqdm_args={}) -> "SrcDataset":
+    def inline_predictions(self, as_comment: bool, tqdm_args={}) -> "TokenizedSrcSet":
         new_srcs = pmap(
             TokenizedSrc.inline_predictions,
             self.all_srcs,
@@ -358,11 +396,19 @@ class SrcDataset:
             desc="inline_predictions",
             tqdm_args=tqdm_args,
         )
-        return SrcDataset(
+        return TokenizedSrcSet(
             self.repos_root,
             new_srcs,
             extra_stats=copy.deepcopy(self.extra_stats),
         )
+
+    def common_type_names(self, top_k=100) -> set[str]:
+        count = Counter()
+        for src in self.all_srcs:
+            for t in src.types:
+                for n in normalize_type(t).all_names():
+                    count[n] += 1
+        return {n for n, _ in count.most_common(top_k)}
 
     def get_src_by_file(self, file: Path) -> TokenizedSrc:
         assert isinstance(file, Path)
@@ -383,7 +429,7 @@ class SrcDataset:
         self.extra_stats.update(stats)
 
     def __getitem__(self, ids: slice | Iterable):
-        return SrcDataset(
+        return TokenizedSrcSet(
             self.repos_root,
             get_subset(self.all_srcs, ids),
             {"subset_ids": ids},
@@ -409,9 +455,13 @@ class SrcDataset:
         num_repos = len(set(s.repo for s in self.all_srcs))
         useful_srcs = self.all_srcs
         num_files = len(useful_srcs)
-        num_lines = sum(len(s.origin_code.split("\n")) for s in useful_srcs)
+        num_lines = sum(
+            len(s.main_code.split("\n")) + len(s.preamble_code.split("\n"))
+            for s in useful_srcs
+        )
         num_labels = sum(len(s.types) for s in useful_srcs)
-        tokens_per_file = [len(s.tokenized_code) for s in useful_srcs]
+        main_tokens_per_file = [len(s.tokenized_code) for s in useful_srcs]
+        preamble_tokens_per_file = [len(s.tokenized_preamble) for s in useful_srcs]
         target_tks_per_file = [
             sum(len(tks) + 1 for tks in s.types_tks) for s in useful_srcs
         ]
@@ -420,7 +470,8 @@ class SrcDataset:
             "num_files": num_files,
             "num_lines": num_lines,
             "num_labels": num_labels,
-            "tokens_per_file": scalar_stats(tokens_per_file),
+            "main_tokens_per_file": scalar_stats(main_tokens_per_file),
+            "preamble_tokens_per_file": scalar_stats(preamble_tokens_per_file),
             "target_tks_per_file": scalar_stats(target_tks_per_file),
         }
         basic_stats.update(self.extra_stats)
@@ -534,7 +585,7 @@ class SrcDataset:
         max_workers: int,
         tqdm_args: dict,
         tc_args: TypeCheckArgs,
-    ) -> "SrcDataset":
+    ) -> "TokenizedSrcSet":
         """Add the predictions to the corresponding files, call the type checker to
         collect the feedbacks, and then patch the feedbacks as well as the original
         predictions to form the new inputs.
@@ -580,7 +631,7 @@ class SrcDataset:
                 n_checked += 1
             code_list.append(new_code)
             feedback_list.append(errors)
-        result = SrcDataset(self.repos_root, [], copy.deepcopy(self.extra_stats))
+        result = TokenizedSrcSet(self.repos_root, [], copy.deepcopy(self.extra_stats))
         silent = tqdm_args.get("disable", False)
         result.add_stats(
             {
@@ -612,32 +663,27 @@ class SrcDataset:
         return result
 
     def __repr__(self):
-        return f"SrcDataset(root='{self.repos_root}', n_repos={len(self.repos2srcs())}, n_labeled_files={len(self.all_srcs)})"
+        return f"TokenizedSrcSet(root='{self.repos_root}', n_repos={len(self.repos2srcs())}, n_labeled_files={len(self.all_srcs)})"
 
     @staticmethod
     def from_repos(
         repos_root: Path,
         repos_paths: Iterable[Path],
-        drop_comments: bool,
+        preprocess_args: PreprocessArgs,
         max_workers: int | None = None,
-        label_ratio: float = 0.5,
         tqdm_args: dict = {},
-        max_line_width: int = 200,
-        seed: int = 42,
-    ) -> "SrcDataset":
-        """Generate the dataset by randomly mask out a fraction of the type annotations as labels.
-        If keep_comments if False, will also remove all comments and docstrings.
-        """
-
+        max_line_width: int = 400,
+        ignore_dirs: set[str] = {".venv", ".mypy_cache", ".git", "venv"},
+    ) -> "TokenizedSrcSet":
         for r in repos_paths:
             assert r.is_dir(), f"Provided path {r} is not a directory."
 
-        # file_path, code, repo_path
+        # file_path, (code, repo_path)
         srcs: dict[Path, tuple[str, Path]] = {
             f: (f.read_text(), r)
             for r in repos_paths
-            for f in sorted(r.glob("**/*.py"))
-            if not f.is_symlink()
+            for f in rec_iter_files(r, dir_filter=lambda d: d.name not in ignore_dirs)
+            if f.suffix == ".py" and not f.is_symlink()
         }
         num_all_srcs = len(srcs)
 
@@ -649,96 +695,122 @@ class SrcDataset:
             for f, (code, r) in srcs.items()
             if file_width(code) <= max_line_width
         }
-        result = SrcDataset(repos_root, [])
+        result = TokenizedSrcSet(repos_root, [])
         result.add_stats(
             {
                 "n_files_too_wide": num_all_srcs - len(srcs),
                 "too_wide_ratio": (1 - len(srcs) / num_all_srcs),
-                "drop_comments": drop_comments,
+                "preprocess": preprocess_args,
             }
         )
-        masked_srcs: list[dict | None] = pmap(
-            mask_type_annots,
-            [(f, code[0]) for f, code in srcs.items()],
-            [drop_comments] * len(srcs),
+
+        def avoid_type_mask(code: str):
+            return code.replace(SpecialNames.TypeMask, "MaskReplaced")
+
+        code_list = [avoid_type_mask(x[0]) for x in srcs.values()]
+        file_list = list(srcs.keys())
+        repo_list = [x[1] for x in srcs.values()]
+        parsing_results = pmap(
+            _try_parse_src,
+            code_list,
+            file_list,
+            repo_list,
+            [preprocess_args] * len(srcs),
             max_workers=max_workers,
-            desc="mask_type_annots",
+            desc="parse src code",
             tqdm_args=tqdm_args,
         )
+
         filtered_srcs = []
-
-        srcs_list = list(srcs.items())
-
-        rands = random.getstate()
-        random.seed(seed)
-        for i, x in enumerate(masked_srcs):
-            if x is None:
+        for x in parsing_results:
+            if x is None or len(x.types) == 0:
                 continue
-            n = len(x["types"])
-            x["is_label"] = [random.random() < label_ratio for _ in range(n)]
-            if sum(int(b) for b in x["is_label"]) == 0:
-                continue  # skip srcs with no labels
-            x["file"] = srcs_list[i][0].relative_to(repos_root)
-            x["repo"] = srcs_list[i][1][1].relative_to(repos_root)
-            x["prev_types"] = None
+            x.file = x.file.relative_to(repos_root)
+            x.repo = x.repo.relative_to(repos_root)
             filtered_srcs.append(x)
-        random.setstate(rands)
 
-        tk_srcs: list[TokenizedSrc] = pmap(
-            dict_to_tokenized_src,
-            filtered_srcs,
-            max_workers=max_workers,
-            desc="dict_to_tokenized_src",
-            tqdm_args=tqdm_args,
-        )
-
-        for f, g in groupby(tk_srcs, lambda s: s.file).items():
+        for f, g in groupby(filtered_srcs, lambda s: s.file).items():
             assert len(g) == 1, f"{f} appears {len(g)} times."
 
-        result.all_srcs = tk_srcs
+        result.all_srcs = filtered_srcs
         return result
 
 
-def load_src_datasets(
-    datadir: Path,
-    datasets_name: str,
+def _try_parse_src(
+    code: str, file: Path, repo: Path, args: PreprocessArgs
+) -> Optional[TokenizedSrc]:
+    try:
+        return TokenizedSrc.parse(code, file, repo, args)
+    except cst.ParserSyntaxError as e:
+        return None
+
+
+def create_tokenized_srcsets(
+    dataset: str,
+    out_dir: Path,
+    func_only: bool,
+    pre_args: PreprocessArgs,
     data_reduction: int = 1,
+) -> None:
+    import spot.function_dataset as fd
+
+    repos_dir = get_dataset_dir(dataset) / "repos"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    tk_dataset: dict[str, TokenizedSrcSet] = {}
+    with run_long_task(f"Generating TokenizedSrcSets: {out_dir.name}", notify=False):
+        for name in ["test", "train", "valid"]:
+            base = repos_dir / name
+            if not base.exists():
+                print(f"[Warning] Split {name} not found. Skip.")
+                continue
+
+            print(f"Creating: {name}")
+            repo_roots = [d for d in base.iterdir() if d.is_dir()]
+            if name == "train":
+                n_train = len(repo_roots) // data_reduction
+                repo_roots = repo_roots[:n_train]
+            if func_only:
+                tk_data = fd.dataset_from_repos(base, repo_roots, pre_args)
+            else:
+                tk_data = TokenizedSrcSet.from_repos(base, repo_roots, pre_args)
+            for s in tk_data.all_srcs:
+                assert len(s.types) > 0, f"{s.file} has no labels."
+            tk_dataset[name] = tk_data
+            save_path = out_dir / f"{name}.pkl"
+            pickle_dump(save_path, tk_data)
+            stats_str = pretty_show_dict(tk_data.stats_to_show())
+            write_file(out_dir / f"{name}-stats.txt", stats_str)
+            print(f"Saved to {save_path}")
+        assert tk_dataset, "Empty dataset."
+
+
+def load_tokenized_srcsets(
+    path: Path,
     quicktest: bool = False,
-    sets_to_load=["train", "valid", "test"],
-) -> dict[str, SrcDataset]:
-    print("Loading datasets: ", datasets_name)
-    src_datasets = dict[str, SrcDataset]()
+    sets_to_load=["test", "train", "valid"],
+) -> dict[str, TokenizedSrcSet]:
+    print("Loading TokenizedSrcSets: ", path)
+    subprocess.run(["du", "-sh", path])
+    tk_dataset = dict[str, TokenizedSrcSet]()
     for n in sets_to_load:
-        with open(datadir / "SPOT-data" / datasets_name / f"{n}.pkl", "rb") as f:
-            src: SrcDataset = pickle.load(f)
-            _fix_src_paths_(src)
-            src.repos_root = datadir / "SPOT-data/repos/downloaded"
-            if n == "train":
-                n_train = len(src.all_srcs) // data_reduction
-                src = src[:n_train]
-            if quicktest:
-                ids = range(0, len(src.all_srcs), max(1, len(src.all_srcs) // 10))
-                src = src[ids]
-            src_datasets[n] = src
-    return src_datasets
-
-
-def _fix_src_paths_(dataset: SrcDataset) -> None:
-    if str(dataset.repos_root).endswith("/downloaded"):
-        # already fixed
-        return
-    for src in dataset.all_srcs:
-        assert str(src.file).startswith("downloaded/")
-        assert str(src.repo).startswith("downloaded/")
-        src.file = Path(str(src.file).replace("downloaded/", ""))
-        src.repo = Path(str(src.repo).replace("downloaded/", ""))
-    dataset.repos_root = dataset.repos_root / "downloaded"
+        file = path / f"{n}.pkl"
+        if not file.exists():
+            print(f"{file} not found. Skip.")
+            continue
+        sdata = pickle_load(file)
+        if quicktest:
+            ids = range(0, len(sdata.all_srcs), max(1, len(sdata.all_srcs) // 10))
+            sdata = sdata[ids]
+        tk_dataset[n] = sdata
+    assert tk_dataset, "Empty dataset."
+    return tk_dataset
 
 
 def code_to_check_from_preds(
     src: TokenizedSrc, preds: dict[int, str] | dict[int, PythonType]
 ):
-    code = src.origin_code
+    code = src.main_code
     if not preds:
         return code
     changes = list[tuple[CodeRange, int, str]]()
@@ -847,109 +919,20 @@ def type_check_src_in_project(
     return from_preds(preds).remove_preexisting(preexisting)
 
 
-class CommentRemover(cst.CSTTransformer):
-    """Removes comments and docstrings."""
-
-    def leave_IndentedBlock(
-        self, node: cst.IndentedBlock, updated: cst.IndentedBlock
-    ) -> cst.IndentedBlock:
-        new_body = type(updated.body)(  # type: ignore
-            filter(lambda n: not CommentRemover.is_doc_string(n), updated.body)
-        )
-        if len(new_body) != len(updated.body):
-            return updated.with_changes(body=new_body)
-        else:
-            return updated
-
-    def leave_Module(self, node, updated):
-        return self.leave_IndentedBlock(node, updated)
-
-    def leave_EmptyLine(self, node: cst.EmptyLine, updated: cst.EmptyLine):
-        if updated.comment is not None:
-            return cst.RemoveFromParent()
-        else:
-            return updated
-
-    def leave_TrailingWhitespace(self, node, updated: cst.TrailingWhitespace):
-        if updated.comment is not None:
-            return updated.with_changes(comment=None)
-        else:
-            return updated
-
-    @staticmethod
-    def is_doc_string(node: cst.BaseStatement) -> bool:
-        match node:
-            case cst.SimpleStatementLine(body=[cst.Expr(value=cst.SimpleString())]):
-                return True
-            case _:
-                return False
-
-
-def remove_comments(m: cst.Module) -> cst.Module:
-    """Removes all comments and docstrings."""
-    return m.visit(CommentRemover())
-
-
-def mask_type_annots(
-    file_code: Union[str, tuple[Path, str]], drop_comments: bool, silent: bool = True
-) -> Optional[dict]:
-    """Preprocess the Python code to carve out all the type annotations. The original
-    code is split into sequences at the type annotations."""
-
-    if isinstance(file_code, tuple):
-        src_path, code = file_code
-    else:
-        assert isinstance(file_code, str)
-        src_path = Path("[no source file]")
-        code = file_code
-    try:
-        m = cst.parse_module(code)
-        if drop_comments:
-            m = remove_comments(m)
-    except cst.ParserSyntaxError as e:
-        if not silent:
-            logging.warning(f"Failed to parse src file: `{src_path}`")
-        return None
-
-    annots_info, types = collect_user_annotations(m)
-    cst_code = m.code
-    types_str = [
-        m.code_for_node(not_none(info.annot).annotation) for info in annots_info
-    ]
-    mask_annot = cst.Annotation(cst.Name(SpecialNames.TypeMask))
-    replaces = dict()
-    for info in annots_info:
-        replaces[info.path] = mask_annot
-    new_code = apply_annotations(m, replaces).code
-    code_segs = new_code.split(SpecialNames.TypeMask)
-
-    assert (
-        len(code_segs) == len(types) + 1
-    ), f"{len(code_segs)} != {len(types) + 1}. replaces: {replaces}\ncode: {new_code}"
-    return {
-        "code_segs": code_segs,
-        "types": types,
-        "types_str": types_str,
-        "annots_info": annots_info,
-        "cst_code": cst_code,
-    }
-
-
 @dataclass
 class SrcChunkInfo:
     """Stores the source code information for a chunk of tokens."""
 
     types: list[PythonType]  # the label types in this chunk
     annots_info: list[AnnotInfo]  # the label AnnotInfos in this chunk
-    # maps each label to its source file id
-    src_ids: list[int]
+    src_file: Path
     # maps each label to its label id in the corresponding TokenizedSrc
     label_ids: list[int]
     prev_types: list[PythonType] | None
     inlined_spans: list[slice] | None
 
     def __repr__(self):
-        return f"SrcChunkInfo(num_types={len(self.types)}, unique_src_ids={set(self.src_ids)})"
+        return f"SrcChunkInfo(num_types={len(self.types)}, src_file='{self.src_file}')"
 
 
 @dataclass
@@ -986,49 +969,32 @@ class ChunkedDataset:
     def __repr__(self):
         return f"ChunkedDataset(num_chunks={len(self.chunks_info)}, num_srcs={len(self.files)})"
 
-    def verify_labels(self, srcs: SrcDataset, tqdm_args={}):
+    def verify_labels(self, srcs: TokenizedSrcSet, tqdm_args={}):
         """
         Verify that the labels in the dataset match the source code.
         """
 
         src_path_map = dict[Path, dict[AnnotPath, PythonType]]()
-        for f, src in srcs.file2src().items():
+        for f, src in tqdm(
+            srcs.file2src(resolve=False).items(), desc="building label map", **tqdm_args
+        ):
             src_path_map[f] = {
                 info.path: ty for ty, info in zip(src.types, src.types_info)
             }
             assert_eq(len(src_path_map[f]), len(src.types))
         input_ids = tqdm(self.data["input_ids"], desc="verify_labels", **tqdm_args)
         for input, chunk in zip(input_ids, self.chunks_info):
-            for info, ty, sid in zip(chunk.annots_info, chunk.types, chunk.src_ids):
-                file = self.files[sid]
+            file = chunk.src_file
+            for info, ty in zip(chunk.annots_info, chunk.types):
                 assert file in src_path_map, f"{file} not in file2src."
                 assert (
                     info.path in src_path_map[file]
-                ), f"{info.path} should not be a label in {file}. Chunk code:\n{decode_tokens(input)}"
-                assert_eq(src_path_map[file][info.path], ty)
-
-
-def save_datasets(
-    datasets: dict[str, ChunkedDataset],
-    repos_split: dict[str, list[GitRepo]],
-    datasets_dir: Path,
-):
-    if datasets_dir.exists():
-        print("Deleting old datasets at:", datasets_dir)
-        shutil.rmtree(datasets_dir)
-    datasets_dir.mkdir(parents=True)
-
-    with open(datasets_dir / "repos_split.pkl", "wb") as f:
-        pickle.dump(repos_split, f)
-
-    for name, dataset in datasets.items():
-        dataset.data.save_to_disk(str(datasets_dir / name))
-        extra = dataset.chunks_info, dataset.files, dataset.file2src, dataset.file2repo
-        with open(datasets_dir / f"{name}-extra.pkl", "wb") as f:
-            pickle.dump(extra, f)
-    import subprocess
-
-    subprocess.run(["du", "-sh", datasets_dir])
+                ), f"{info.path} should not be a label in {file}.\nExpected label map: {src_path_map[file]}\nChunk code:\n{decode_tokens(input)}"
+                assert_eq(
+                    src_path_map[file][info.path],
+                    ty,
+                    extra_message=lambda: f"file={file}, path={info.path}",
+                )
 
 
 def output_ids_as_seqs(output_ids: Iterable[int]):
@@ -1079,20 +1045,19 @@ def output_ids_as_types(output_ids: Iterable[int], n_types: int) -> list[PythonT
 
 
 def R1_srcs_from_preds(
-    r0_src: SrcDataset,
+    r0_src: TokenizedSrcSet,
     chunks_info: list[SrcChunkInfo],
     src_files: list[Path],
     r0_preds: list[list[PythonType]],
     tc_args: TypeCheckArgs,
     max_workers: int,
     tqdm_args: dict = {},
-) -> SrcDataset:
+) -> TokenizedSrcSet:
     file2preds = dict[Path, dict[AnnotPath, str]]()
     for preds, chunk_info in zip(r0_preds, chunks_info):
         assert_eq(len(preds), len(chunk_info.types))
+        file = (r0_src.repos_root / chunk_info.src_file).resolve()
         for i, pred in enumerate(preds):
-            sid = chunk_info.src_ids[i]
-            file = src_files[sid]
             if file not in file2preds:
                 file2preds[file] = dict()
             label_path = chunk_info.annots_info[i].path
@@ -1118,96 +1083,26 @@ def R1_srcs_from_preds(
     )
 
 
-def type_accuracies(
-    pred_types: Sequence[PythonType],
-    label_types: Sequence[PythonType],
-    types_cat: Sequence[AnnotCat],
-    types_pos: Sequence[int],
-    normalize_types=True,
-    allow_implicit_none=False,
-) -> dict[str, Any]:
-    assert_eq(len(pred_types), len(label_types), len(types_cat), len(types_pos))
-
-    if normalize_types:
-        pred_types = [normalize_type(ty) for ty in pred_types]
-        label_types = [normalize_type(ty) for ty in label_types]
-
-    if allow_implicit_none:
-        pred_types = [remove_top_optional(t) for t in pred_types]
-        label_types = [remove_top_optional(t) for t in label_types]
-
-    def i_to_range(i):
-        if i == 0:
-            return range(0, 1)
-        p = int(math.log(i, 2))
-        return range(2**p, 2 ** (p + 1))
-
-    def ast_size(ty: PythonType) -> int:
-        return 1 + sum(ast_size(a) for a in ty.args)
-
-    def ast_overlap(ty1: PythonType, ty2: PythonType) -> int:
-        if ty1.head != ty2.head:
-            return 0
-        return 1 + sum(ast_overlap(a1, a2) for a1, a2 in zip(ty1.args, ty2.args))
-
-    partial_by_cat = GroupedAccCounter[AnnotCat]()
-    partial_by_pos = GroupedAccCounter[range]()
-    full_acc = GroupedAccCounter[None]()
-    ast_acc = GroupedAccCounter[None]()
-
-    for p, l, cat, pos in zip(pred_types, label_types, types_cat, types_pos):
-        partial_by_cat.count(cat, p.head_name() == l.head_name(), 1)
-        partial_by_pos.count(i_to_range(pos), p.head_name() == l.head_name(), 1)
-        full_acc.count(None, p == l, 1)
-        ast_acc.count(None, ast_overlap(p, l), ast_size(l))
-
-    return {
-        "partial_acc": partial_by_cat.overall_acc(),
-        "ast_acc": ast_acc.overall_acc(),
-        "full_acc": full_acc.overall_acc(),
-        "partial_acc_by_cat": partial_by_cat.grouped_accs(
-            key=lambda x: x.name, sort_by=lambda x: x.value
-        ),
-        "partial_acc_by_pos": partial_by_pos.grouped_accs(sort_by=lambda x: x.start),
-        "avg_label_size": safe_div(
-            sum(ast_size(l) for l in label_types), len(label_types)
-        ),
-        "avg_pred_size": safe_div(
-            sum(ast_size(p) for p in pred_types), len(pred_types)
-        ),
-    }
-
-
 def preds_to_accuracies(
     preds: Sequence[Sequence[PythonType]],
     dataset: ChunkedDataset,
-    normalize_types=True,
+    metric: AccuracyMetric,
 ):
     cats = [an.cat for info in dataset.chunks_info for an in info.annots_info]
     labels = [ty for info in dataset.chunks_info for ty in info.types]
-    poses = [i for info in dataset.chunks_info for i in range(len(info.types))]
-    results = [
-        type_accuracies(
-            list(seq_flatten(preds)),
-            labels,
-            cats,
-            poses,
-            normalize_types=normalize_types,
-            allow_implicit_none=allow,
-        )
-        for allow in [False, True]
-    ]
-    result = dict[str, Any]()
-    result["partial_acc (ImNone)"] = results[1]["partial_acc"]
-    result["full_acc (ImNone)"] = results[1]["full_acc"]
-    result.update(results[0])
-    return result
+    # poses = [i for info in dataset.chunks_info for i in info.label_ids]
+    return type_accuracies(
+        list(seq_flatten(preds)),
+        labels,
+        cats,
+        metric=metric,
+    )
 
 
 def src_preds_to_accuracies(
     preds: Sequence[dict[int, PythonType]] | Sequence[Sequence[PythonType]],
     srcs: Sequence[TokenizedSrc],
-    normalize_types=True,
+    metric: AccuracyMetric,
 ):
     pred_types = list[PythonType]()
     cats, labels, poses = [], [], []
@@ -1221,26 +1116,23 @@ def src_preds_to_accuracies(
             labels.append(src.types[t])
             poses.append(t)
 
-    results = [
-        type_accuracies(
-            pred_types,
-            labels,
-            cats,
-            poses,
-            normalize_types=normalize_types,
-            allow_implicit_none=allow,
-        )
-        for allow in [False, True]
-    ]
-    result = dict[str, Any]()
-    result["partial_acc (ImNone)"] = results[1]["partial_acc"]
-    result["full_acc (ImNone)"] = results[1]["full_acc"]
-    result.update(results[0])
-    return result
+    return type_accuracies(
+        pred_types,
+        labels,
+        cats,
+        metric=metric,
+    )
 
 
-def get_dataset_name(drop_comments: bool, all_labels: bool, spot_round: int = 0):
-    drop_tag = "-drop_comments" if drop_comments else ""
-    label_tag = "-all_labels" if all_labels else ""
-    round_tag = f"-R{spot_round}" if spot_round > 0 else ""
-    return f"src_datasets{round_tag}{label_tag}{drop_tag}"
+def get_tk_dataset_name(
+    dataset: str,
+    pre_args: PreprocessArgs,
+    func_only: bool,
+    data_reduction: int = 1,
+):
+    reduction_tag = f"-reduction={data_reduction}" if data_reduction != 1 else ""
+    pre_parts = repr_modified_args(pre_args)
+    if func_only:
+        return f"func-{dataset}-v7{reduction_tag}-{pre_parts}"
+    else:
+        return f"{dataset}-v5{reduction_tag}-{pre_parts}"

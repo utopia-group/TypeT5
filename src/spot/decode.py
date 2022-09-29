@@ -3,14 +3,14 @@ import multiprocessing
 
 from datasets import Dataset
 import torch
-from spot.critic import CriticCollator, CriticModel
+from .critic import CriticCollator, CriticModel
 
-from spot.data import (
+from .data import (
     ChunkedDataset,
     CtxArgs,
     SrcCheckResult,
     SrcChunkInfo,
-    SrcDataset,
+    TokenizedSrcSet,
     TokenizedSrc,
     TypeCheckingEnv,
     chunk_from_src,
@@ -19,15 +19,15 @@ from spot.data import (
     type_check_src_in_project,
     feedbacks_to_tokenized_src,
 )
-from spot.model import DatasetPredResult, DecodingArgs, ModelWrapper, dynamic_dataloader
-from spot.type_check import (
+from .model import DatasetPredResult, DecodingArgs, ModelWrapper, dynamic_dataloader
+from .type_check import (
     MypyChecker,
     MypyFeedback,
     MypyResult,
     PythonType,
     normalize_type,
 )
-from spot.utils import *
+from .utils import *
 
 
 class IncrSelector:
@@ -54,7 +54,7 @@ class SelectByCritic(IncrSelector):
 
 def incr_inference_with_feedback(
     wrapper: ModelWrapper,
-    src_data: SrcDataset,
+    src_data: TokenizedSrcSet,
     beam_width: int,
     selector: IncrSelector,
     print_times: bool = True,
@@ -107,7 +107,7 @@ def incr_inference_with_feedback(
         assignment = dict[int, PythonType]()
         for lid in range(len(src.types_info)):
             with t_logger.timed("chunk_from_src"):
-                chunk, info = chunk_from_src(src, src_id, lid, ctx_args)
+                chunk, info = chunk_from_src(src, lid, ctx_args)
                 batch = dict()
                 batch["input_ids"] = torch.tensor([chunk["input_ids"]], device=device)
                 batch["n_labels"] = [chunk["n_labels"]]
@@ -169,7 +169,6 @@ def incr_inference_with_feedback(
                     critic_inputs_metas = executor.map(
                         to_critic_inputs,
                         [src] * N,
-                        [src_id] * N,
                         new_assignments,
                         check_rs,
                         [ctx_args] * N,
@@ -214,7 +213,7 @@ def incr_inference_with_feedback(
                 raise NotImplementedError(f"Unknown selector type: {type(selector)}")
 
             assignment = new_assignments[best_i]
-            src = src.inline_single_prediction(lid, preds[best_i], as_comment=False)
+            src = inline_single_prediction(src, lid, preds[best_i], as_comment=False)
             prog.update()
         return src, list(assignment.values())
 
@@ -241,9 +240,48 @@ def incr_inference_with_feedback(
     return srcs, predictions
 
 
+def inline_single_prediction(
+    src: TokenizedSrc, label_id: int, ty: PythonType, as_comment: bool
+) -> "TokenizedSrc":
+    tokenizer = DefaultTokenizer
+    mask_id = tokenizer.mask_token_id
+    to_insert = tokenizer.encode(str(ty), add_special_tokens=False)
+    if as_comment:
+        comment_start = tokenizer.encode("/* ", add_special_tokens=False)
+        comment_end = tokenizer.encode(" */", add_special_tokens=False)
+        to_insert = comment_start + to_insert + comment_end
+
+    l_pos = src.types_pos[label_id]
+    assert_eq(src.tokenized_code[l_pos], mask_id)
+
+    new_code = src.tokenized_code[:l_pos] + to_insert + src.tokenized_code[l_pos + 1 :]
+    # inlined_span = slice(l_pos, l_pos + len(to_insert))
+    offset = len(to_insert) - 1
+    new_types_pos = [
+        pos + offset if i > label_id else pos for i, pos in enumerate(src.types_pos)
+    ]
+
+    return TokenizedSrc(
+        file=src.file,
+        repo=src.repo,
+        types=src.types,
+        types_pos=new_types_pos,
+        types_str=src.types_str,
+        types_tks=src.types_tks,
+        types_info=src.types_info,
+        main_code=src.main_code,
+        tokenized_code=new_code,
+        preamble_code=src.preamble_code,
+        tokenized_preamble=src.tokenized_preamble,
+        prev_types=None,  # don't need them for now
+        inlined_spans=None,  # don't need them for now
+        feedbacks=src.feedbacks,
+    )
+
+
 def sample_candidates(
     wrapper: ModelWrapper,
-    src_data: SrcDataset,
+    src_data: TokenizedSrcSet,
     n_samples: int,
 ) -> tuple[ChunkedDataset, list[list[list[PythonType]]]]:
     ctx_args = wrapper.args.ctx_args
@@ -282,7 +320,7 @@ def sample_candidates(
 
 
 def select_candidates_by_type_errors(
-    src_data: SrcDataset,
+    src_data: TokenizedSrcSet,
     chunks: ChunkedDataset,
     pred_candidates: list[list[list[PythonType]]],
     only_same_file_error: bool = False,
@@ -294,7 +332,7 @@ def select_candidates_by_type_errors(
         to_check = dict[tuple[int, int], tuple[TokenizedSrc, dict[int, str], Path]]()
         for i in range(len(chunks.data)):
             info = chunks.chunks_info[i]
-            file = chunks.files[info.src_ids[0]]
+            file = info.src_file
             src = file2src[file.relative_to(src_data.repos_root)]
             proj_root = env.template_root / src.repo
             for j, candidates in enumerate(pred_candidates[i]):
@@ -373,7 +411,7 @@ class CriticAssesInfo:
 def select_candidates_using_critic(
     critic: CriticModel,
     no_feedback: bool,
-    src_data: SrcDataset,
+    src_data: TokenizedSrcSet,
     chunks: ChunkedDataset,
     pred_candidates: list[list[list[PythonType]]],
     dec_args: DecodingArgs,
@@ -387,7 +425,7 @@ def select_candidates_using_critic(
         to_check = dict[tuple[int, int], tuple[TokenizedSrc, dict[int, str], Path]]()
         for i in range(len(chunks.data)):
             info = chunks.chunks_info[i]
-            file = chunks.files[info.src_ids[0]]
+            file = info.src_file
             src = file2src[file.relative_to(src_data.repos_root)]
             proj_root = env.template_root / src.repo
             for j, candidates in enumerate(pred_candidates[i]):
@@ -399,7 +437,7 @@ def select_candidates_using_critic(
         to_check_values = to_check.values()
         if no_feedback:
             check_rs = [
-                SrcCheckResult("no_feedback=True", x[0].origin_code)
+                SrcCheckResult("no_feedback=True", x[0].main_code)
                 for x in to_check_values
             ]
         else:
@@ -432,7 +470,6 @@ def select_candidates_using_critic(
     critic_inputs_metas = pmap(
         to_critic_inputs,
         [x[0] for x in to_check_values],
-        src_ids,
         [x[1] for x in to_check_values],
         check_rs,
         [dec_args.ctx_args] * len(to_check_values),
@@ -488,7 +525,6 @@ def select_candidates_using_critic(
 
 def to_critic_inputs(
     src: TokenizedSrc,
-    src_id: int,
     preds: dict[int, PythonType],
     check_r: SrcCheckResult,
     ctx_args: CtxArgs,
@@ -509,12 +545,12 @@ def to_critic_inputs(
     chunks_info = list[SrcChunkInfo]()
     if labels_range is None:
         labels_range = min(preds.keys()), max(preds.keys()) + 1
-    src_to_chunks_(chunks, chunks_info, new_src, src_id, labels_range, ctx_args)
+    src_to_chunks_(chunks, chunks_info, new_src, labels_range, ctx_args)
     return chunks, chunks_info
 
 
 def collect_type_errors_from_predictions(
-    src_data: SrcDataset, result: DatasetPredResult, max_workers: int
+    src_data: TokenizedSrcSet, result: DatasetPredResult, max_workers: int
 ) -> list[tuple[Path, MypyFeedback]]:
     "Apply all the predictioins and call the type checker once per project."
 
@@ -529,7 +565,7 @@ def collect_type_errors_from_predictions(
         to_check = dict[Path, dict[Path, dict[int, str]]]()
         for i in range(len(chunks_info)):
             info = chunks.chunks_info[i]
-            file = chunks.files[info.src_ids[0]]
+            file = info.src_file
             src = file2src[file.relative_to(src_data.repos_root)]
             file = src.file
             proj_root = env.template_root / src.repo

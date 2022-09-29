@@ -11,7 +11,6 @@ from .utils import *
 class PythonType:
     head: tuple[str, ...]
     args: tuple["PythonType", ...] = ()
-    is_quoted: bool = False
 
     def __str__(self):
         h = ".".join(self.head)
@@ -35,18 +34,21 @@ class PythonType:
             out = h
         else:
             out = f"{h}[{', '.join(map(str, self.args))}]"
-        if self.is_quoted:
-            out = f'"{out}"'
         return out
 
     def __repr__(self):
-        return f"PythonType('{str(self)}')"
+        return f"ty'{str(self)}'"
 
     def all_heads(self):
         """Return an iterator of all the type heads."""
         yield self.head
         for arg in self.args:
             yield from arg.all_heads()
+
+    def all_names(self):
+        yield self.head_name()
+        for arg in self.args:
+            yield from arg.all_names()
 
     def head_name(self) -> str:
         """Return the last part of the type head."""
@@ -68,13 +70,20 @@ class PythonType:
     def is_optional(self) -> bool:
         return self.head_name() == "Optional"
 
+    def normalized(self) -> "PythonType":
+        return normalize_type(self)
+
     @staticmethod
-    def Any() -> "PythonType":
-        return PythonType(("Any",))
+    def from_name(name: str) -> "PythonType":
+        return PythonType((name,))
 
     @staticmethod
     def from_str(s: str) -> "PythonType":
         return parse_type_str(s)
+
+    @staticmethod
+    def Any() -> "PythonType":
+        return PythonType.from_name("Any")
 
 
 _type_name_map = {
@@ -97,7 +106,7 @@ def normalize_type_head(head: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def normalize_type(typ: PythonType) -> PythonType:
-    n_args = map(normalize_type, typ.args)
+    n_args = tuple(map(normalize_type, typ.args))
     if typ.is_union() or typ.is_optional():
         arg_set = set[PythonType]()
         if typ.is_optional():
@@ -115,18 +124,18 @@ def normalize_type(typ: PythonType) -> PythonType:
         # if all arguments are Any, we can drop them all
         n_args = tuple()
 
-    return PythonType(
-        normalize_type_head(typ.head),
-        tuple(n_args),
-    )
+    return PythonType(normalize_type_head(typ.head), n_args)
 
 
 def remove_top_optional(t: PythonType) -> PythonType:
     """
     Remove the top-level Optional. i.e., convert Optional[T] to T.
     """
-    if t.is_optional() and len(t.args) == 1:
-        return t.args[0]
+    if t.is_optional():
+        if len(t.args) == 1:
+            return t.args[0]
+        else:
+            return PythonType.Any()
     elif t.is_union():
         new_args = tuple(a for a in t.args if not a.is_none())
         if len(new_args) == 1:
@@ -137,17 +146,35 @@ def remove_top_optional(t: PythonType) -> PythonType:
         return t
 
 
+def remove_top_final(t: PythonType) -> PythonType:
+    """
+    Remove the top-level Final. i.e., convert Final[T] to T.
+    """
+    if t.head_name() == "Final":
+        if len(t.args) == 1:
+            return t.args[0]
+        else:
+            return PythonType.Any()
+    else:
+        return t
+
+
+def remove_type_namespace(typ: PythonType) -> PythonType:
+    """
+    Remove the namespace from the type. i.e., convert typing.List[T] to List[T].
+    """
+    new_args = tuple(map(remove_type_namespace, typ.args))
+    new_head = (typ.head[-1],) if typ.head else ()
+    return PythonType(new_head, new_args)
+
+
 def parse_type_str(typ_str: str) -> PythonType:
     tree = ast.parse(typ_str, mode="eval").body
-    ty = parse_type_from_ast(tree)
-    assert isinstance(ty, PythonType), f"{ty} is not a PythonType"
-    return ty
+    return parse_type_from_ast(tree)
 
 
-def parse_type_expr(
-    m: cst.Module, annot: cst.BaseExpression, silent=False
-) -> PythonType | None:
-    code = m.code_for_node(annot)
+def parse_type_expr(annot: cst.BaseExpression, silent=True) -> PythonType | None:
+    code = show_expr(annot, quoted=False)
     code = re.sub(r"#.*\n", "", code).replace("\n", "")
     try:
         return parse_type_str(code)
@@ -156,17 +183,16 @@ def parse_type_expr(
             return None
         else:
             print(f"Failed to parse type expression: `{code}` in source module:")
-            print(m.code)
             raise e
 
 
 def parse_type_from_ast(tree: ast.expr) -> PythonType:
+    assert isinstance(tree, ast.expr)
     match tree:
         case ast.Name() | ast.Attribute():
             return PythonType(parse_qualified_name(tree))
         case ast.Constant(value=str() as s):
             ty = parse_type_from_ast(ast.parse(s, mode="eval").body)
-            ty.is_quoted = True
             return ty
         case ast.Constant(value=v):
             if v == None:
@@ -197,8 +223,8 @@ def parse_type_from_ast(tree: ast.expr) -> PythonType:
         case ast.Tuple(elts=elts):
             return PythonType(("<Tuple>",), tuple(map(parse_type_from_ast, elts)))
         case _:
-            raise RuntimeError(
-                None, f"Unsupported ast type: {ast.dump(tree, include_attributes=True)}"
+            raise SyntaxError(
+                f"Unsupported ast type: {ast.dump(tree, include_attributes=True)}"
             )
 
 
@@ -272,12 +298,13 @@ class MypyChecker:
     MypyErrorCodesToIgnore = {"valid-type"}
 
     @staticmethod
-    def check_project(proj: Path, mypy_path: Path | None = None) -> MypyResult | str:
-        if mypy_path is None:
-            mypy_path = proj_root() / ".venv/bin/mypy"
+    def check_project(proj: Path, binary_path: Path | None = None) -> MypyResult | str:
+        if binary_path is None:
+            binary_path = proj_root() / ".venv/bin"
+        binary_path = binary_path.resolve()
         cmd = [
-            "python",
-            str(mypy_path),
+            binary_path / "python",
+            binary_path / "mypy",
             ".",
             *MypyChecker.TypeCheckFlags,
         ]
@@ -323,12 +350,12 @@ class MypyChecker:
     @staticmethod
     def parse_mypy_output(
         output: subprocess.CompletedProcess[str],
-        cmd: list[str],
+        cmd: list,
         cwd: Path,
     ) -> MypyResult | str:
         lines = output.stdout.splitlines()
         if len(lines) == 0:
-            return f"mypy failed. Command: `{' '.join(cmd)}` in cwd='{cwd}'\nError: {output.stderr}"
+            return f"mypy failed. Command: `{' '.join(map(str, cmd))}` in cwd='{cwd}'\nError: {output.stderr}"
         error_dict: dict[Path, list[MypyFeedback]] = {}
         for l in lines:
             m = re.match(r"(.*\.py|<string>):(\d+:\d+): error: (.+) \[([a-z\-]+)\]", l)

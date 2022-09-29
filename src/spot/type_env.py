@@ -33,7 +33,7 @@ class AnnotPath:
         return f"AnnotPath({self.__str__()})"
 
     def __str__(self):
-        return f"'{'.'.join(map(str, self.value.reverse()))}'"
+        return f"{'.'.join(map(str, self.value.reverse()))}"
 
     def append(self, seg: str, id: int) -> "AnnotPath":
         seg = seg if id == 0 else f"{seg}[{id}]"
@@ -77,13 +77,12 @@ def collect_user_annotations(
     code: cst.Module | cst.MetadataWrapper,
 ) -> tuple[list[AnnotInfo], list["PythonType"]]:
     """Collect all user-added type annotations in the given source code. Unlike `collect_annots_info`,
-    The order of the returned annotations is gurated to follow the order of the source code."""
+    The order of the returned annotations is guaranteed to follow the order of the source code."""
 
     def as_tuple(pos: CodePosition):
         return pos.line, pos.column
 
     annots = collect_annots_info(code)
-    m = code if isinstance(code, cst.Module) else cast(cst.MetadataWrapper, code).module
 
     types: list[PythonType] = []
     annots_info: list[AnnotInfo] = []
@@ -92,7 +91,7 @@ def collect_user_annotations(
     for info in annots:
         if info.annot is None:
             continue
-        ty = parse_type_expr(m, info.annot.annotation, silent=True)
+        ty = parse_type_expr(info.annot.annotation, silent=True)
         if ty is None:
             continue
         types.append(ty)
@@ -126,7 +125,6 @@ def add_stmts(
 
 class CodePathManager:
     def __init__(self):
-        super().__init__()
         self.path: AnnotPath = annot_path()
         self.path_name_counts: dict[AnnotPath, dict[str, int]] = {}
 
@@ -137,36 +135,46 @@ class CodePathManager:
         counts[name] = id + 1
         return self.path.append(name, id)
 
+    def on_visit(self, node):
+        match node:
+            case cst.FunctionDef():
+                self.path = self.get_path(node.name.value)
+            case cst.ClassDef():
+                self.path = self.get_path(node.name.value)
+            case cst.Lambda():
+                self.path = self.get_path(SpecialNames.Lambda)
 
-class AnnotCollector(cst.CSTVisitor, CodePathManager):
+    def on_leave(self, node):
+        match node:
+            case cst.ClassDef() | cst.FunctionDef() | cst.Lambda():
+                self.path = self.path.pop()
+
+
+class AnnotCollector(cst.CSTVisitor):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self):
         super().__init__()
-        CodePathManager.__init__(self)
+        self.pm = CodePathManager()
         # store the type annotations
         self.annots_info: list[AnnotInfo] = []
         self.cat_stack = [AnnotCat.GlobalVar]
 
     def on_visit(self, node):
+        self.pm.on_visit(node)
         match node:
-            case cst.FunctionDef():
-                self.path = self.get_path(node.name.value)
+            case cst.FunctionDef() | cst.Lambda():
                 self.cat_stack.append(AnnotCat.LocalVar)
             case cst.ClassDef():
-                self.path = self.get_path(node.name.value)
                 self.cat_stack.append(AnnotCat.ClassAtribute)
-            case cst.Lambda():
-                self.path = self.get_path(SpecialNames.Lambda)
-                self.cat_stack.append(AnnotCat.LocalVar)
         return super().on_visit(node)
 
     def on_leave(self, node):
         r = super().on_leave(node)
         match node:
             case cst.ClassDef() | cst.FunctionDef() | cst.Lambda():
-                self.path = self.path.pop()
                 self.cat_stack.pop()
+        self.pm.on_leave(node)
         return r
 
     def _record_annot(
@@ -175,15 +183,11 @@ class AnnotCollector(cst.CSTVisitor, CodePathManager):
         cat: AnnotCat,
         annot: cst.Annotation | None,
     ) -> None:
-        def fix_pos(pos: CodePosition):
-            return CodePosition(pos.line, pos.column + 1)
-
-        path = self.get_path(name)
+        path = self.pm.get_path(name)
         crange = None
         if annot:
             crange = self.get_metadata(PositionProvider, annot)
-            # use 1-based indexing for columns
-            crange = CodeRange(fix_pos(crange.start), fix_pos(crange.end))
+            crange = CodeRange(fix_code_pos(crange.start), fix_code_pos(crange.end))
         self.annots_info.append(AnnotInfo(path, cat, annot, crange))
 
     def leave_FunctionDef(self, node: cst.FunctionDef):
@@ -201,15 +205,20 @@ class AnnotCollector(cst.CSTVisitor, CodePathManager):
                 self._record_annot(l + "." + r, AnnotCat.ClassAtribute, node.annotation)
 
 
-class AnnotApplier(cst.CSTTransformer, CodePathManager):
+def fix_code_pos(pos: CodePosition):
+    "convert to 1-based indexing for columns"
+    return CodePosition(pos.line, pos.column + 1)
+
+
+class AnnotApplier(cst.CSTTransformer):
     """Apply the annotations to the code. Note that each AnnotPath will be
     applied at most once."""
 
     def __init__(self, annots: Dict[AnnotPath, cst.Annotation]):
         super().__init__()
-        CodePathManager.__init__(self)
 
         self.annots = annots.copy()
+        self.pm = CodePathManager()
 
         # store the target prefixes
         self.prefixes: Set[AnnotPath] = {annot_path()}
@@ -219,26 +228,20 @@ class AnnotApplier(cst.CSTTransformer, CodePathManager):
                 path = path.pop()
 
     def on_visit(self, node):
-        match node:
-            case cst.ClassDef() | cst.FunctionDef():
-                self.path = self.get_path(node.name.value)
-            case cst.Lambda():
-                self.path = self.get_path(SpecialNames.Lambda)
-        if self.path not in self.prefixes:
+        self.pm.on_visit(node)
+        if self.pm.path not in self.prefixes:
             return False
         return super().on_visit(node)
 
     def on_leave(self, node, updated):
         r = super().on_leave(node, updated)
-        match node:
-            case cst.ClassDef() | cst.FunctionDef() | cst.Lambda():
-                self.path = self.path.pop()
+        self.pm.on_leave(node)
         return r
 
     def leave_FunctionDef(
         self, node: cst.FunctionDef, updated: cst.FunctionDef
     ) -> cst.FunctionDef:
-        path = self.get_path(SpecialNames.Return)
+        path = self.pm.get_path(SpecialNames.Return)
         if path in self.annots:
             rep = self.annots.pop(path)
             return updated.with_changes(returns=rep)
@@ -246,7 +249,7 @@ class AnnotApplier(cst.CSTTransformer, CodePathManager):
             return updated
 
     def leave_Param(self, node: cst.Param, updated: cst.Param) -> cst.Param:
-        path = self.get_path(updated.name.value)
+        path = self.pm.get_path(updated.name.value)
         if path in self.annots:
             rep = self.annots.pop(path)
             return updated.with_changes(annotation=rep)
@@ -263,7 +266,7 @@ class AnnotApplier(cst.CSTTransformer, CodePathManager):
                 key_name = l + "." + r
             case _:
                 key_name = SpecialNames.Missing
-        path = self.get_path(key_name)
+        path = self.pm.get_path(key_name)
 
         if path in self.annots:
             rep = self.annots.pop(path)
@@ -309,6 +312,155 @@ to_annotate: {self.to_annot}
 ------------------------ code -------------------------------
 {self.module.code}
 """
+
+
+@dataclass
+class AccuracyMetric:
+    common_type_names: set[str]
+    normalize_types: bool = True
+    relaxed_equality: bool = True
+    filter_none_any: bool = True
+    match_base_only: bool = False
+    ignore_namespace: bool = True
+    filter_rare: bool = False
+    name: str = "acc"
+
+    def process_type(self, t: PythonType) -> PythonType:
+        if self.normalize_types:
+            t = normalize_type(t)
+        if self.relaxed_equality:
+            t = remove_top_final(t)
+            t = remove_top_optional(t)
+        if self.match_base_only:
+            t = PythonType(t.head, ())
+        if self.ignore_namespace:
+            t = remove_type_namespace(t)
+        return t
+
+    _NoneOrAny = {"None", "Any"}
+
+    def to_keep_type(self, t: PythonType) -> bool:
+        return (not self.filter_none_any or t.head_name() not in self._NoneOrAny) and (
+            not self.filter_rare or self.is_common_type(t)
+        )
+
+    def is_common_type(self, t: PythonType) -> bool:
+        return t.head_name() in self.common_type_names and all(
+            map(self.is_common_type, t.args)
+        )
+
+    @staticmethod
+    def default_metrics(common_type_names: set[str]):
+        return [
+            AccuracyMetric(
+                common_type_names,
+                relaxed_equality=False,
+                filter_none_any=False,
+                ignore_namespace=False,
+                name="full_acc",
+            ),
+            AccuracyMetric(
+                common_type_names,
+                relaxed_equality=False,
+                filter_none_any=False,
+                ignore_namespace=False,
+                filter_rare=True,
+                name="full_acc_common",
+            ),
+            AccuracyMetric(common_type_names),
+            AccuracyMetric(common_type_names, filter_rare=True, name="acc_common"),
+            AccuracyMetric(
+                common_type_names,
+                match_base_only=True,
+                name="base_acc",
+            ),
+            AccuracyMetric(
+                common_type_names,
+                match_base_only=True,
+                filter_rare=True,
+                name="base_acc_common",
+            ),
+        ]
+
+
+def type_accuracies(
+    pred_types: Sequence[PythonType],
+    label_types: Sequence[PythonType],
+    types_cat: Sequence[AnnotCat],
+    metric: AccuracyMetric,
+    crash_on_type_mask=True,
+    output_incorrect_set: list[int] | None = None,
+) -> dict[str, Any]:
+    assert_eq(len(pred_types), len(label_types), len(types_cat))
+
+    if crash_on_type_mask:
+        if PythonType.from_name(SpecialNames.TypeMask) in label_types:
+            raise RuntimeError("TypeMask found in label types.")
+
+    pred_types = list(map(metric.process_type, pred_types))
+    label_types = list(map(metric.process_type, label_types))
+
+    if metric.filter_none_any | metric.filter_rare:
+        filtered_ids = [i for i, t in enumerate(label_types) if metric.to_keep_type(t)]
+        n_filtered = len(label_types) - len(filtered_ids)
+        pred_types = [pred_types[i] for i in filtered_ids]
+        label_types = [label_types[i] for i in filtered_ids]
+    else:
+        filtered_ids = range(len(label_types))
+        n_filtered = 0
+
+    def ast_size(ty: PythonType) -> int:
+        return 1 + sum(ast_size(a) for a in ty.args)
+
+    acc_by_cat = GroupedAccCounter[AnnotCat]()
+    # acc_by_pos = GroupedAccCounter[range]()
+    # acc_by_common = GroupedAccCounter[bool]()
+    acc_by_simple = GroupedAccCounter[bool]()
+
+    for i, p, l, cat in zip(
+        range(len(pred_types)),
+        pred_types,
+        label_types,
+        types_cat,
+    ):
+        is_correct = p == l
+        acc_by_cat.count(cat, is_correct, 1)
+        acc_by_simple.count(ast_size(p) == 1, is_correct, 1)
+        # if metric.common_type_names is not None:
+        #     acc_by_common.count(metric.is_common_type(l), is_correct, 1)
+        if not is_correct and output_incorrect_set is not None:
+            output_incorrect_set.append(filtered_ids[i])
+
+    # acc_by_common = acc_by_common.grouped_accs(key=lambda x: "common" if x else "rare")
+    acc_by_simple = acc_by_simple.grouped_accs(
+        key=lambda x: "simple" if x else "complex"
+    )
+    metric_name = metric.name
+
+    extra_stats = (
+        dict()
+        if metric.match_base_only
+        else {
+            f"{metric_name}_by_simple": acc_by_simple,
+            f"{metric_name}_label_size": safe_div(
+                sum(ast_size(l) for l in label_types), len(label_types)
+            ),
+            f"{metric_name}_pred_size": safe_div(
+                sum(ast_size(p) for p in pred_types), len(pred_types)
+            ),
+        }
+    )
+
+    return {
+        metric_name: acc_by_cat.overall_acc(),
+        # f"{metric_name}_by_common": acc_by_common,
+        f"{metric_name}_by_cat": acc_by_cat.grouped_accs(
+            key=lambda x: x.name, sort_by=lambda x: x.value
+        ),
+        **extra_stats,
+        # f"{metric_name}_by_pos": acc_by_pos.grouped_accs(sort_by=lambda x: x.start),
+        f"{metric_name}_ignored_labels": n_filtered,
+    }
 
 
 class SelectAnnotations:

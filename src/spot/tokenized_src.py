@@ -1,6 +1,16 @@
+import copy
+
+import numpy
+
+from .static_analysis import remove_comments, remove_imports, stub_from_module
 from .utils import *
-from spot.type_env import AnnotInfo, collect_user_annotations
+from .type_env import AnnotInfo, AnnotPath, CodePathManager, collect_user_annotations
 from .type_check import MypyFeedback, PythonType, parse_type_str
+from .type_env import apply_annotations, collect_user_annotations
+from libcst.metadata import CodeRange, PositionProvider
+
+
+TokenSeq = list[int]  # might need to make this more space-efficient
 
 
 @dataclass
@@ -12,90 +22,81 @@ class TokenizedSrc:
     types: list[PythonType]
     types_pos: list[int]  # the position of the types in tokenized_code.
     types_str: list[str]
-    types_tks: list[list[int]]
+    types_tks: list[TokenSeq]
     types_info: list[AnnotInfo]
-    origin_code: str
-    tokenized_code: list[int]  # with certain types masked out
+    main_code: str
+    tokenized_code: TokenSeq  # with certain types masked out
+    preamble_code: str
+    tokenized_preamble: TokenSeq
     prev_types: dict[int, PythonType] | None = None  # previously predicted types
     inlined_spans: dict[int, slice] | None = None  # the spans of inlined previous types
     feedbacks: list[MypyFeedback] | None = None
 
-    def inline_single_prediction(
-        self, label_id: int, ty: PythonType, as_comment: bool
+    @staticmethod
+    def parse(
+        code: str,
+        file: Path,
+        repo: Path,
+        args: "PreprocessArgs",
     ) -> "TokenizedSrc":
-        tokenizer = DefaultTokenizer
-        mask_id = tokenizer.mask_token_id
-        to_insert = tokenizer.encode(str(ty), add_special_tokens=False)
-        if as_comment:
-            comment_start = tokenizer.encode("/* ", add_special_tokens=False)
-            comment_end = tokenizer.encode(" */", add_special_tokens=False)
-            to_insert = comment_start + to_insert + comment_end
+        d = preprocess_code(code, args)
+        d["file"] = file
+        d["repo"] = repo
+        return tokenized_src_from_segs(**d)
 
-        l_pos = self.types_pos[label_id]
-        assert_eq(self.tokenized_code[l_pos], mask_id)
-
-        new_code = (
-            self.tokenized_code[:l_pos] + to_insert + self.tokenized_code[l_pos + 1 :]
-        )
-        # inlined_span = slice(l_pos, l_pos + len(to_insert))
-        offset = len(to_insert) - 1
-        new_types_pos = [
-            pos + offset if i > label_id else pos
-            for i, pos in enumerate(self.types_pos)
+    def __str__(self):
+        segs = [
+            "========TokenizedSrc========",
+            f"file:{self.file}",
+            f"repo:{self.repo}",
+            "--------Preamble--------",
+            self.preamble_code,
+            "--------Main Code--------",
+            decode_tokens(self.tokenized_code),
+            "========End of TokenizedSrc========",
         ]
-
-        return TokenizedSrc(
-            file=self.file,
-            repo=self.repo,
-            types=self.types,
-            types_pos=new_types_pos,
-            types_str=self.types_str,
-            types_tks=self.types_tks,
-            types_info=self.types_info,
-            origin_code=self.origin_code,
-            tokenized_code=new_code,
-            prev_types=None,  # don't need them for now
-            inlined_spans=None,  # don't need them for now
-            feedbacks=self.feedbacks,
-        )
+        return "\n".join(segs)
 
     def inline_prev_predictions(
         self, as_comment: bool, prev_types: dict[int, PythonType] | None = None
     ) -> "TokenizedSrc":
         "Inine the previous predictions into the code, either directly or as comments."
+        if len(self.types) == 0:
+            return copy.copy(self)
+
         if prev_types is None:
             prev_types = self.prev_types
         assert isinstance(prev_types, dict), f"prev_types has type: {type(prev_types)}"
         assert len(prev_types) > 0
 
         types_pos = list[int]()
-        tokenized_code = list[int]()
+        inlined_spans = dict[int, slice]()
+        new_tks = list[int]()
         tokenizer = DefaultTokenizer
         mask_id = tokenizer.mask_token_id
         comment_start = tokenizer.encode("/* ", add_special_tokens=False)
         comment_end = tokenizer.encode(" */", add_special_tokens=False)
 
-        inlined_spans = dict[int, slice]()
+        start = 0
 
-        i_types = 0
-        for tk in self.tokenized_code:
-            tokenized_code.append(tk)
-            if tk == mask_id:
-                span_start = len(tokenized_code)
-                types_pos.append(span_start - 1)
+        for t in range(len(self.types)):
+            new_tks.extend(self.tokenized_code[start : self.types_pos[t]])
+            types_pos.append(len(new_tks))
+            type_tk = self.tokenized_code[self.types_pos[t]]
+            if t in prev_types:
+                assert type_tk == mask_id
+                to_insert = tokenizer.encode(
+                    str(prev_types[t]), add_special_tokens=False
+                )
+                if as_comment:
+                    to_insert = comment_start + to_insert + comment_end
+                new_tks.extend(to_insert)
+                inlined_spans[t] = slice(types_pos[t], len(new_tks))
+            else:
+                new_tks.append(type_tk)
+            start = self.types_pos[t] + 1
+        new_tks.extend(self.tokenized_code[start:])
 
-                if i_types in prev_types:
-                    to_insert = tokenizer.encode(
-                        str(prev_types[i_types]), add_special_tokens=False
-                    )
-                    if as_comment:
-                        to_insert = comment_start + to_insert + comment_end
-                    tokenized_code.extend(to_insert)
-                    span_end = len(tokenized_code)
-                    inlined_spans[i_types] = slice(span_start, span_end)
-                    assert_eq(tokenized_code[span_start:span_end], to_insert)
-                i_types += 1
-        assert_eq(i_types, len(self.types))
         assert prev_types.keys() == inlined_spans.keys()
 
         return TokenizedSrc(
@@ -106,16 +107,20 @@ class TokenizedSrc:
             types_str=self.types_str,
             types_tks=self.types_tks,
             types_info=self.types_info,
-            origin_code=self.origin_code,
-            tokenized_code=tokenized_code,
+            main_code=self.main_code,
+            tokenized_code=new_tks,
+            preamble_code=self.preamble_code,
+            tokenized_preamble=self.tokenized_preamble,
             prev_types=prev_types,
             inlined_spans=inlined_spans,
             feedbacks=self.feedbacks,
         )
 
-    def print_code(self, max_lines: int = 50):
+    def print_code(self, max_lines: int = 100, body_only: bool = False):
         "Print out the (decoded) token sequence"
         code = decode_tokens(self.tokenized_code)
+        if not body_only:
+            code = decode_tokens(self.tokenized_preamble) + code
         print_limited(code, max_lines)
 
     @staticmethod
@@ -127,40 +132,99 @@ class TokenizedSrc:
         return src.inline_prev_predictions(as_comment=as_comment, prev_types=prev_types)
 
 
-def dict_to_tokenized_src(d: dict) -> TokenizedSrc:
+@dataclass
+class PreprocessArgs:
+    imports_in_preamble: bool = True
+    stub_in_preamble: bool = True
+    drop_comments: bool = True
+    max_callees: int = 80  # only applicable to functional dataset
+    max_callers: int = 20  # only applicable to functional dataset
+    drop_env_types: bool = True  # only applicable to functional dataset
+    add_override_usages: bool = False  # only applicable to functional dataset
+    add_implicit_rel_imports: bool = False  # only applicable to functional dataset
+
+
+def preprocess_code(code: str, args: PreprocessArgs) -> dict:
+    """Preprocess the Python code to carve out all the type annotations. The original
+    code is split into sequences at the type annotations."""
+    m = cst.parse_module(code)
+    preamble_segs = list[str]()
+
+    if args.drop_comments:
+        m = remove_comments(m)
+    if args.imports_in_preamble:
+        m, imports = remove_imports(m)
+        imports_part = cst.Module([cst.SimpleStatementLine([s]) for s in imports])
+        preamble_segs.append(imports_part.code)
+    if args.stub_in_preamble:
+        stub_m = stub_from_module(m)
+        preamble_segs.append(stub_m.code)
+
+    cst_code = m.code
+    annots_info, types = collect_user_annotations(m)
+    types_str = [
+        m.code_for_node(not_none(info.annot).annotation) for info in annots_info
+    ]
+    mask_annot = cst.Annotation(cst.Name(SpecialNames.TypeMask))
+    replaces = dict()
+    for info in annots_info:
+        replaces[info.path] = mask_annot
+    new_code = apply_annotations(m, replaces).code
+    code_segs = new_code.split(SpecialNames.TypeMask)
+
+    assert (
+        len(code_segs) == len(types) + 1
+    ), f"{len(code_segs)} != {len(types) + 1}. replaces: {replaces}\ncode: {new_code}"
+    return {
+        "preamble": "".join(preamble_segs),
+        "code_segs": code_segs,
+        "types": types,
+        "types_str": types_str,
+        "annots_info": annots_info,
+        "cst_code": cst_code,
+        "prev_types": None,
+    }
+
+
+def tokenized_src_from_segs(
+    file: Path,
+    repo: Path,
+    cst_code: str,
+    preamble: str,
+    code_segs: list[str],
+    types: list[PythonType],
+    types_str: list[str],
+    annots_info: list[AnnotInfo],
+    tokenized_preamble: list[int] | None = None,
+    prev_types: dict[int, PythonType] | None = None,
+    is_label: list[bool] | None = None,
+    left_extra_tks: list[int] | None = None,
+    right_extra_tks: list[int] | None = None,
+) -> TokenizedSrc:
+    tkn = DefaultTokenizer
     r = TokenizedSrc(
-        file=d["file"],
-        repo=d["repo"],
-        origin_code=d["cst_code"],
+        file=file,
+        repo=repo,
+        main_code=cst_code,
         tokenized_code=list[int](),
+        preamble_code=preamble,
+        tokenized_preamble=tkn.encode(preamble, add_special_tokens=False)
+        if tokenized_preamble is None
+        else tokenized_preamble,
         types=list[PythonType](),
         types_pos=list[int](),
         types_str=list[str](),
         types_info=list[AnnotInfo](),
         types_tks=list[list[int]](),
-        prev_types=d["prev_types"],
+        prev_types=prev_types,
     )
 
-    match d:
-        case {
-            "code_segs": segs,
-            "types": types,
-            "types_str": types_str,
-            "annots_info": annots_info,
-            "is_label": is_label,
-        }:
-            assert len(segs) == len(types) + 1
-        case _:
-            raise ValueError(f"Invalid dict with keys: {d.keys()}")
-
-    tkn = DefaultTokenizer
-    bos_id = not_none(tkn.bos_token_id)
-    eos_id = not_none(tkn.eos_token_id)
     mask_id = not_none(tkn.mask_token_id)
     all_tks = r.tokenized_code
-    all_tks.append(bos_id)
+    if left_extra_tks:
+        all_tks.extend(left_extra_tks)
     for i in range(len(types)):
-        all_tks.extend(tkn.encode(segs[i], add_special_tokens=False))
+        all_tks.extend(tkn.encode(code_segs[i], add_special_tokens=False))
         if is_label is None or is_label[i]:
             r.types_pos.append(len(all_tks))
             r.types.append(types[i])
@@ -170,8 +234,9 @@ def dict_to_tokenized_src(d: dict) -> TokenizedSrc:
             all_tks.append(mask_id)
         else:
             all_tks.extend(tkn.encode(types_str[i], add_special_tokens=False))
-    all_tks.extend(tkn.encode(segs[-1], add_special_tokens=False))
-    all_tks.append(eos_id)
+    all_tks.extend(tkn.encode(code_segs[-1], add_special_tokens=False))
+    if right_extra_tks:
+        all_tks.extend(right_extra_tks)
 
     return r
 
@@ -219,18 +284,18 @@ def feedbacks_to_tokenized_src(
         len(code_segs) == len(types) + 1
     ), f"{len(code_segs)} != {len(types)} + 1.\nNew Code:\n{new_code}"
 
-    d = {
-        "file": src.file,
-        "repo": src.repo,
-        "cst_code": new_code,
-        "code_segs": code_segs,
-        "types": types,
-        "types_str": types_str,
-        "annots_info": annots_info,
-        "prev_types": prev_types,
-        "is_label": None,
-    }
-    new_src = dict_to_tokenized_src(d)
+    new_src = tokenized_src_from_segs(
+        file=src.file,
+        repo=src.repo,
+        cst_code=new_code,
+        preamble=src.preamble_code,
+        tokenized_preamble=src.tokenized_preamble,
+        code_segs=code_segs,
+        types=types,
+        types_str=types_str,
+        annots_info=annots_info,
+        prev_types=prev_types,
+    )
     new_src.feedbacks = feedbacks
     return new_src
 
