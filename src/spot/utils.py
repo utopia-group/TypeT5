@@ -462,12 +462,12 @@ def pushover_alert(
 
     conn = http.client.HTTPSConnection("api.pushover.net:443")
     config_file = proj_root() / "config/pushover.json"
-    if print_to_console:
-        print(f"Pushover: ({title}) {message}")
     if not config_file.exists():
-        print(
+        logging.warning(
             f"No pushover config file found at {config_file}. Not able to push message."
         )
+    if print_to_console or not config_file.exists():
+        print(f"Pushover: ({title}) {message}")
     elif notify:
         config = json.loads(config_file.read_text())
         conn.request(
