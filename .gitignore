@@ -5,6 +5,7 @@ temp
 wandb
 checkpoints
 caches
+lightning_logs/
 
 build/
 __pycache__
