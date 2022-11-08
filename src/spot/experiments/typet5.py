@@ -6,34 +6,29 @@ def accs_as_table_row(accs_dict: dict):
         segs = path.split(".")
         target = accs_dict
         for s in segs:
+            if s not in target:
+                return "N/A"
             target = target[s]
         assert isinstance(target, CountedAcc)
         return f"{target.acc * 100:.2f}"
 
-    row1 = {
-        "full.all": "full_acc.full_acc",
-        "calibrated.all": "acc.acc",
-        "calibrated.simple": "acc.acc_by_simple.simple",
-        "calibrated.complex": "acc.acc_by_simple.complex",
-        "base.all": "base_acc.base_acc",
-    }
+    def print_row(name: str, postfix: str):
+        row = {
+            "full.all": f"full_acc{postfix}.full_acc{postfix}",
+            "calibrated.all": f"acc{postfix}.acc{postfix}",
+            "calibrated.simple": f"acc{postfix}.acc{postfix}_by_simple.simple",
+            "calibrated.complex": f"acc{postfix}.acc{postfix}_by_simple.complex",
+            "base.all": f"base_acc{postfix}.base_acc{postfix}",
+        }
 
-    nums = [retrive(path) for path in row1.values()]
-    print("Accuracies on all types:")
-    print("header: ", list(row1.keys()))
-    print(" & ".join(nums))
+        nums = [retrive(path) for path in row.values()]
+        print(f"Accuracies on {name} types:")
+        print("header: ", list(row.keys()))
+        print(" & ".join(nums))
 
-    row2 = {
-        "full.all": "full_acc_common.full_acc_common",
-        "calibrated.all": "acc_common.acc_common",
-        "calibrated.simple": "acc_common.acc_common_by_simple.simple",
-        "calibrated.complex": "acc_common.acc_common_by_simple.complex",
-        "base.all": "base_acc_common.base_acc_common",
-    }
-    nums = [retrive(path) for path in row2.values()]
-    print("Accuracies on common types:")
-    print("header: ", list(row2.keys()))
-    print(" & ".join(nums))
+    print_row("all", "")
+    print_row("common", "_common")
+    print_row("rare", "_rare")
 
 
 class TypeT5Configs:

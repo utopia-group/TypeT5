@@ -1,5 +1,7 @@
 # Env example 1: no existing annotations
 
+good = 5
+
 
 def fib(n):
     if n == 0:
@@ -10,8 +12,15 @@ def fib(n):
         return fib(n - 1) + fib(n - 2)
 
 
-def foo(bar):
-    return fib(bar)
+class Wrapper:
+    x_elem: int
+
+    @staticmethod
+    def foo(bar):
+        return fib(bar)
+
+    def inc(self):
+        self.x_elem += 1
 
 
 def int_add(a, b):

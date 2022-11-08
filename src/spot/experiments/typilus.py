@@ -134,7 +134,7 @@ def analyze_typilus_predictions(
     return accs
 
 
-Type4PySupportedSyntax = SupportedSyntax(
+TypilusSupportedSyntax = SupportedSyntax(
     pattern_match=False,
     union_types=False,
     basic_types=False,

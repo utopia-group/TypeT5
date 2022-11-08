@@ -193,7 +193,7 @@ def pmap(
             outs.append(f(*(a[i] for a in f_args)))
         return outs
 
-    chunksize = max(1, n // (10 * max_workers))
+    chunksize = max(1, n // (50 * max_workers))
     r = process_map(
         f,
         *f_args,

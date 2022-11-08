@@ -322,7 +322,12 @@ class AccuracyMetric:
     filter_none_any: bool = True
     match_base_only: bool = False
     ignore_namespace: bool = True
-    filter_rare: bool = False
+    filter_rare: bool = (
+        False  # when filter_rare=True and keep_rare=False, only common types are kept
+    )
+    keep_rare: bool = (
+        False  # when filter_rare=True and keep_rare=True, only rare types are kept
+    )
     name: str = "acc"
 
     def process_type(self, t: PythonType) -> PythonType:
@@ -341,7 +346,7 @@ class AccuracyMetric:
 
     def to_keep_type(self, t: PythonType) -> bool:
         return (not self.filter_none_any or t.head_name() not in self._NoneOrAny) and (
-            not self.filter_rare or self.is_common_type(t)
+            not self.filter_rare or (self.is_common_type(t) != self.keep_rare)
         )
 
     def is_common_type(self, t: PythonType) -> bool:
@@ -367,8 +372,20 @@ class AccuracyMetric:
                 filter_rare=True,
                 name="full_acc_common",
             ),
+            AccuracyMetric(
+                common_type_names,
+                relaxed_equality=False,
+                filter_none_any=False,
+                ignore_namespace=False,
+                filter_rare=True,
+                keep_rare=True,
+                name="full_acc_rare",
+            ),
             AccuracyMetric(common_type_names),
             AccuracyMetric(common_type_names, filter_rare=True, name="acc_common"),
+            AccuracyMetric(
+                common_type_names, filter_rare=True, keep_rare=True, name="acc_rare"
+            ),
             AccuracyMetric(
                 common_type_names,
                 match_base_only=True,
@@ -379,6 +396,13 @@ class AccuracyMetric:
                 match_base_only=True,
                 filter_rare=True,
                 name="base_acc_common",
+            ),
+            AccuracyMetric(
+                common_type_names,
+                match_base_only=True,
+                filter_rare=True,
+                keep_rare=True,
+                name="base_acc_rare",
             ),
         ]
 
