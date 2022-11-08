@@ -272,13 +272,14 @@ class VariableSignature:
     def drop_types(self) -> "VariableSignature":
         return VariableSignature(None, self.in_class)
 
+
 @dataclass
 class FunctionSignature:
     params: dict[str, cst.Annotation | None]
     returns: cst.Annotation | None
     in_class: bool
 
-    def __repr__(self):
+    def __str__(self):
         param_strs = [
             p if a is None else f"{p}: {show_expr(a.annotation, False)}"
             for p, a in self.params.items()
@@ -288,8 +289,11 @@ class FunctionSignature:
             if self.returns is None
             else show_expr(self.returns.annotation, False)
         )
+        return f"({', '.join(param_strs)}) -> {return_str}"
+
+    def __repr__(self):
         head = "MethodSig" if self.in_class else "FuncSig"
-        return f"{head}(({', '.join(param_strs)}) -> {return_str})"
+        return f"{head}({str(self)})"
 
     def n_annotated(self) -> int:
         return sum(a is not None for a in self.params.values()) + (
@@ -315,9 +319,7 @@ class FunctionSignature:
         return FunctionSignature(params, returns, self.in_class)
 
     def drop_types(self) -> "FunctionSignature":
-        return FunctionSignature(
-            {p: None for p in self.params}, None, self.in_class
-        )
+        return FunctionSignature({p: None for p in self.params}, None, self.in_class)
 
     @staticmethod
     def from_function(func: cst.FunctionDef, in_class: bool) -> "FunctionSignature":
@@ -358,6 +360,35 @@ class FunctionSignature:
 
 ElemSignature = VariableSignature | FunctionSignature
 SignatureMap = dict[ProjectPath, ElemSignature]
+
+
+def reorder_signature_map(
+    pred_map: SignatureMap, label_map: SignatureMap
+) -> SignatureMap:
+    """Reorder the function args in the prediction to match the labels (if present)."""
+    new_sigmap = SignatureMap()
+    for path in label_map:
+        match pred_map.get(path), label_map.get(path):
+            case FunctionSignature(params=pred_params) as pred_sig, FunctionSignature(
+                params=label_params
+            ):
+                new_params = {
+                    p: pred_params[p] for p in label_params if p in pred_params
+                }
+                for p in pred_params:
+                    if p not in new_params:
+                        new_params[p] = pred_params[p]
+                new_sigmap[path] = FunctionSignature(
+                    new_params, pred_sig.returns, pred_sig.in_class
+                )
+            case _:
+                pass
+
+    for path in pred_map:
+        if path not in new_sigmap:
+            new_sigmap[path] = pred_map[path]
+
+    return new_sigmap
 
 
 from functools import cached_property
@@ -421,11 +452,20 @@ class PythonModule:
     def all_vars(self) -> Generator[PythonVariable, None, None]:
         return (e for e in self.all_elements() if isinstance(e, PythonVariable))
 
-    def all_elements(self) -> Generator[PythonElem, None, None]:
+    def _all_elements(self) -> Generator[PythonElem, None, None]:
         yield from self.global_vars
         yield from self.functions
         for c in self.classes:
             yield from c.all_elements()
+
+    def all_elements(self) -> list[PythonElem]:
+        def to_tuple(pos: CodePosition):
+            return (pos.line, pos.column)
+
+        return sorted(
+            self._all_elements(),
+            key=lambda e: to_tuple(self.elem2pos[e.path.path].start),
+        )
 
     def all_classes(self) -> Generator[PythonClass, None, None]:
         def rec(c: PythonClass) -> Generator[PythonClass, None, None]:

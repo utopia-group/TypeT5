@@ -10,6 +10,7 @@ from spot.static_analysis import (
     PythonProject,
     VariableSignature,
     FunctionSignature,
+    reorder_signature_map,
 )
 
 PredList = list[list]  # of the form [[type1, score1], [type2, score2], ...]
@@ -92,6 +93,14 @@ def run_type4py_request(
 class Type4PyEvalResult:
     pred_maps: dict[str, SignatureMap]
     label_maps: dict[str, SignatureMap]
+
+    def __post_init__(self):
+        # reorder the function args to match the labels
+        for pname, pred_map in self.pred_maps.items():
+            if pname not in self.label_maps:
+                continue
+            label_map = self.label_maps[pname]
+            self.pred_maps[pname] = reorder_signature_map(pred_map, label_map)
 
 
 Type4PySupportedSyntax = SupportedSyntax(

@@ -134,6 +134,11 @@ class RolloutCtx:
         Note that the model does make predictions for those places with a missing type
         annotation, but they are not counted in the accuracy computation (and only serve as
         an intermediate for information propogation).
+
+        Args:
+        - use_oracle: If True, the model's predictions are immediately replaced by the 
+        ground truth type annotations before moving on to the next element. This simulates 
+        an interactive setting where the user corrects the model's incorrect predictions. 
         """
         if pre_args.drop_env_types and decode_order.types_in_ctx():
             logging.warning(
