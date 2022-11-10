@@ -168,6 +168,16 @@ def remove_type_namespace(typ: PythonType) -> PythonType:
     return PythonType(new_head, new_args)
 
 
+def limit_type_depth(typ: PythonType, max_depth: int) -> PythonType:
+    """
+    Limit the depth of the type to max_depth.
+    """
+    if max_depth <= 0:
+        return PythonType.Any()
+    new_args = tuple(map(lambda t: limit_type_depth(t, max_depth - 1), typ.args))
+    return PythonType(typ.head, new_args)
+
+
 def parse_type_str(typ_str: str) -> PythonType:
     tree = ast.parse(typ_str, mode="eval").body
     return parse_type_from_ast(tree)

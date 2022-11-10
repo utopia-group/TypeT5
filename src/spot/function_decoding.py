@@ -26,6 +26,7 @@ from .static_analysis import (
     SignatureErrorAnalysis,
     UsageAnalysis,
     VariableSignature,
+    reorder_signature_map,
 )
 from .tokenized_src import PreprocessArgs, TokenSeq, tokenized_src_from_segs
 from .type_check import PythonType, parse_type_str
@@ -115,6 +116,15 @@ class EvalResult:
         print("Code:")
         print(decode_tokens(self.predictions[pid].elem2inputs[path]["input_ids"]))
 
+    def print_predictions(self) -> None:
+        for proj, rollout, label_map in zip(
+            self.project_roots, self.predictions, self.label_maps
+        ):
+            sig_map = reorder_signature_map(rollout.predicted_sigmap, label_map)
+            print("=" * 20, proj, "=" * 20)
+            for path, sig in sig_map.items():
+                print(f"\t{path}: {str(sig)}")
+
 
 @dataclass
 class RolloutCtx:
@@ -136,9 +146,9 @@ class RolloutCtx:
         an intermediate for information propogation).
 
         Args:
-        - use_oracle: If True, the model's predictions are immediately replaced by the 
-        ground truth type annotations before moving on to the next element. This simulates 
-        an interactive setting where the user corrects the model's incorrect predictions. 
+        - use_oracle: If True, the model's predictions are immediately replaced by the
+        ground truth type annotations before moving on to the next element. This simulates
+        an interactive setting where the user corrects the model's incorrect predictions.
         """
         if pre_args.drop_env_types and decode_order.types_in_ctx():
             logging.warning(

@@ -322,6 +322,7 @@ class AccuracyMetric:
     filter_none_any: bool = True
     match_base_only: bool = False
     ignore_namespace: bool = True
+    ast_depth_limit: int | None = None
     filter_rare: bool = (
         False  # when filter_rare=True and keep_rare=False, only common types are kept
     )
@@ -340,6 +341,8 @@ class AccuracyMetric:
             t = PythonType(t.head, ())
         if self.ignore_namespace:
             t = remove_type_namespace(t)
+        if self.ast_depth_limit is not None:
+            t = limit_type_depth(t, self.ast_depth_limit)
         return t
 
     _NoneOrAny = {"None", "Any"}
@@ -355,13 +358,16 @@ class AccuracyMetric:
         )
 
     @staticmethod
-    def default_metrics(common_type_names: set[str]):
+    def default_metrics(
+        common_type_names: set[str], ast_depth_limit: int | None = None
+    ):
         return [
             AccuracyMetric(
                 common_type_names,
                 relaxed_equality=False,
                 filter_none_any=False,
                 ignore_namespace=False,
+                ast_depth_limit=ast_depth_limit,
                 name="full_acc",
             ),
             AccuracyMetric(
@@ -370,6 +376,7 @@ class AccuracyMetric:
                 filter_none_any=False,
                 ignore_namespace=False,
                 filter_rare=True,
+                ast_depth_limit=ast_depth_limit,
                 name="full_acc_common",
             ),
             AccuracyMetric(
@@ -379,22 +386,36 @@ class AccuracyMetric:
                 ignore_namespace=False,
                 filter_rare=True,
                 keep_rare=True,
+                ast_depth_limit=ast_depth_limit,
                 name="full_acc_rare",
             ),
-            AccuracyMetric(common_type_names),
-            AccuracyMetric(common_type_names, filter_rare=True, name="acc_common"),
             AccuracyMetric(
-                common_type_names, filter_rare=True, keep_rare=True, name="acc_rare"
+                common_type_names, ast_depth_limit=ast_depth_limit, name="acc"
+            ),
+            AccuracyMetric(
+                common_type_names,
+                ast_depth_limit=ast_depth_limit,
+                filter_rare=True,
+                name="acc_common",
+            ),
+            AccuracyMetric(
+                common_type_names,
+                filter_rare=True,
+                keep_rare=True,
+                ast_depth_limit=ast_depth_limit,
+                name="acc_rare",
             ),
             AccuracyMetric(
                 common_type_names,
                 match_base_only=True,
+                ast_depth_limit=ast_depth_limit,
                 name="base_acc",
             ),
             AccuracyMetric(
                 common_type_names,
                 match_base_only=True,
                 filter_rare=True,
+                ast_depth_limit=ast_depth_limit,
                 name="base_acc_common",
             ),
             AccuracyMetric(
@@ -402,6 +423,7 @@ class AccuracyMetric:
                 match_base_only=True,
                 filter_rare=True,
                 keep_rare=True,
+                ast_depth_limit=ast_depth_limit,
                 name="base_acc_rare",
             ),
         ]

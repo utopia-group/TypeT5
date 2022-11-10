@@ -43,22 +43,24 @@ def wandb_string(s: str):
 
 # experiment configurations
 
-load_results = False
-use_oracle = False
-gpu_id = get_gpu_id(0)
-train_config = TypeT5Configs.NoSequential
+load_results = True
+use_oracle = True
+gpu_id = get_gpu_id(1)
+train_config = TypeT5Configs.Default
 
 model_name = train_config.get_model_name()
 # model_name = (
 #     "model-v7--TrainingConfig(drop_env_types=False, add_implicit_rel_imports=True)"
 # )
-# dataset_name = "ManyTypes4Py"
-dataset_name = "InferTypes4Py"
+dataset_name = "ManyTypes4Py"
+# dataset_name = "InferTypes4Py"
+# dataset_name = "TinyEval"
 
 test_pre_args = train_config.pre_args
 oracle_tag = "(use-oracle) " if use_oracle else ""
 # group_tag = "(implicit_imports, new) "
-group_tag = "(ablation) "
+# group_tag = "(ablation) "
+group_tag = ""
 experiment_name = oracle_tag + group_tag + model_name
 
 print(colored(f"Use GPU: {gpu_id}", "green"))
@@ -105,10 +107,10 @@ decode_orders = {
     # "reverse-double-traversal": DecodingOrders.Reversed(
     #     DecodingOrders.DoubleTraversal()
     # ),
-    "non-incr": DecodingOrders.IndependentOrder(),
+    # "non-incr": DecodingOrders.IndependentOrder(),
     # "random": DecodingOrders.RandomOrder(),
     # "no-neighbors": DecodingOrders.IndependentOrder(),
-    # "callee2caller": DecodingOrders.Callee2Caller(),
+    "callee2caller": DecodingOrders.Callee2Caller(),
     # "caller2callee": DecodingOrders.Caller2Callee(),
     # "random-twice": DecodingOrders.RandomTwice(),
 }
@@ -160,6 +162,12 @@ with run_long_task("Evaluating different decoding strategy", notify=not load_res
         print(accs_str)
         accs_as_table_row(accs)
 
+# %%
+if False:
+    # print predictions
+    for oname, evalr in evals.items():
+        print(f"========== {oname} ===========")
+        evalr.print_predictions()
 
 # %%
 from prettytable import PrettyTable
