@@ -1,32 +1,30 @@
 # %%
 import os
+from termcolor import colored
 from typing import *
-from spot.experiments.typet5 import TypeT5Configs
-
 from spot.utils import *
-
-os.chdir(proj_root())
-
-# %%
-# experiment configurations
-
 from spot.data import (
     create_tokenized_srcsets,
     get_tk_dataset_name,
     load_tokenized_srcsets,
     TypeCheckSettings,
 )
-from spot.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper
-from spot.train import TrainingConfig, TypeCheckArgs
-from spot.tokenized_src import PreprocessArgs
-from termcolor import colored
+from spot.model import DecodingArgs, ModelWrapper
+from spot.train import TypeCheckArgs
+from spot.experiments.typet5 import TypeT5Configs
 
-gpu_id = get_gpu_id(0)
-eval_only = False
-recreate_dataset = False
+os.chdir(proj_root())
 
+# %%
+# -----------------------------------------------------------
+# experiment configurations
 
-config = TypeT5Configs.NoUsers
+gpu_id = get_gpu_id(0)  # which GPU to use
+eval_only = False  # whether to skip training and only evaluate the model
+recreate_dataset = False  # whether to recreate the tokenized dataset if found
+
+config = TypeT5Configs.Default  # which model configuration to use
+
 
 TypeCheckSettings.temp_path = f"GPU-{gpu_id}"
 print(colored(f"Use GPU: {gpu_id}", "green"))
@@ -79,6 +77,7 @@ model_name = config.get_model_name()
 print(colored(f"Training model: {model_name}", "green"))
 
 # %%
+# -----------------------------------------------------------
 # train the model
 from spot.train import ModelTrainingArgs, train_spot_model, TypeCheckArgs
 from spot.utils import run_long_task
@@ -120,6 +119,7 @@ wrapper.to(device)
 
 
 # %%
+# -----------------------------------------------------------
 # model evaluation
 
 from spot.utils import PickleCache
@@ -148,6 +148,7 @@ pretty_print_dict(r0_accs)
 
 
 # %%
+# -----------------------------------------------------------
 # close wandb
 from spot.utils import pretty_show_dict
 from spot.visualization import string_to_html
@@ -162,8 +163,8 @@ if not eval_only:
     wandb.log({f"test/accuracies": wandb_string(pretty_show_dict(r0_accs))})
 
 # %%
-# compute accuracies on the public APIs
-from spot.function_decoding import PreprocessArgs
+# -----------------------------------------------------------
+# compute accuracies on the top-level elements
 from spot.static_analysis import SignatureErrorAnalysis
 from spot.function_dataset import data_project_from_dir, sigmap_from_file_predictions
 
@@ -182,12 +183,13 @@ api_accs = {
     for m in AccuracyMetric.default_metrics(common_names)
 }
 
-print("Accuracies on public APIs:")
+print("Accuracies on top-level elements:")
 pretty_print_dict(api_accs)
 if not eval_only:
     wandb.log({f"test/api_accuracies": wandb_string(pretty_show_dict(api_accs))})
 
 # %%
+# -----------------------------------------------------------
 # export the code with inlined predictions as HTML
 
 from spot.visualization import export_preds_on_code, proj_root

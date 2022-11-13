@@ -278,6 +278,7 @@ def count_type_errors(
     result: Iterable[MypyFeedback],
 ) -> int:
     error_codes = {
+        "name-defined",
         "attr-defined",
         "arg-type",
         "return-value",
@@ -291,7 +292,7 @@ def count_type_errors(
     return n
 
 
-def count_project_type_errors(
+def collect_project_type_errors(
     proj: PythonProject,
     sigmap: SignatureMap,
     workdir: Path = Path("mypy_temp"),

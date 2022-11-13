@@ -9,7 +9,7 @@ def accs_as_table_row(accs_dict: dict):
             if s not in target:
                 return "N/A"
             target = target[s]
-        assert isinstance(target, CountedAcc)
+        assert isinstance(target, CountedAcc), f"Unexpected type: {CountedAcc}"
         return f"{target.acc * 100:.2f}"
 
     def print_row(name: str, postfix: str):
