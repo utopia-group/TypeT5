@@ -1,17 +1,19 @@
 # %%
 import os
-from termcolor import colored
 from typing import *
-from typet5.utils import *
+
+from termcolor import colored
+
 from typet5.data import (
+    TypeCheckSettings,
     create_tokenized_srcsets,
     get_tk_dataset_name,
     load_tokenized_srcsets,
-    TypeCheckSettings,
 )
+from typet5.experiments.typet5 import TypeT5Configs
 from typet5.model import DecodingArgs, ModelWrapper
 from typet5.train import TypeCheckArgs
-from typet5.experiments.typet5 import TypeT5Configs
+from typet5.utils import *
 
 os.chdir(proj_root())
 
@@ -76,13 +78,14 @@ tk_dataset["train"].print_stats()
 model_name = config.get_model_name()
 print(colored(f"Training model: {model_name}", "green"))
 
+import torch
+import wandb
+
 # %%
 # -----------------------------------------------------------
 # train the model
-from typet5.train import ModelTrainingArgs, train_spot_model, TypeCheckArgs
+from typet5.train import ModelTrainingArgs, TypeCheckArgs, train_spot_model
 from typet5.utils import run_long_task
-import wandb
-import torch
 
 if not eval_only:
     train_args = ModelTrainingArgs(
@@ -122,9 +125,9 @@ wrapper.to(device)
 # -----------------------------------------------------------
 # model evaluation
 
+from typet5.type_env import AccuracyMetric
 from typet5.utils import PickleCache
 from typet5.visualization import pretty_print_dict
-from typet5.type_env import AccuracyMetric
 
 bs_args = DecodingArgs(
     sampling_max_tokens=max_tokens_per_file,
@@ -147,12 +150,13 @@ print("Accuracies on all user annotations:")
 pretty_print_dict(r0_accs)
 
 
+import wandb
+
 # %%
 # -----------------------------------------------------------
 # close wandb
 from typet5.utils import pretty_show_dict
 from typet5.visualization import string_to_html
-import wandb
 
 
 def wandb_string(s: str):
@@ -162,11 +166,12 @@ def wandb_string(s: str):
 if not eval_only:
     wandb.log({f"test/accuracies": wandb_string(pretty_show_dict(r0_accs))})
 
+from typet5.function_dataset import data_project_from_dir, sigmap_from_file_predictions
+
 # %%
 # -----------------------------------------------------------
 # compute accuracies on the top-level elements
 from typet5.static_analysis import SignatureErrorAnalysis
-from typet5.function_dataset import data_project_from_dir, sigmap_from_file_predictions
 
 repos_dir = get_dataset_dir(dataset) / "repos" / "test"
 test_repo_paths = [f for f in repos_dir.iterdir() if f.is_dir()]

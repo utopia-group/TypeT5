@@ -1,5 +1,6 @@
 from typet5.model import DatasetPredResult
 from typet5.type_check import PythonType
+
 from .data import TokenizedSrcSet
 from .static_analysis import (
     ElemSignature,

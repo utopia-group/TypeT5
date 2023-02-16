@@ -1,10 +1,10 @@
 # %%
 
-import os
 import asyncio
+import os
 from typing import *
 
-from typet5.utils import not_none, proj_root, get_data_dir
+from typet5.utils import get_data_dir, not_none, proj_root
 
 os.chdir(proj_root())
 
@@ -13,14 +13,11 @@ datadir = get_data_dir()
 # %%
 # experiment configurations
 
-from typet5.data import (
-    get_tk_dataset_name,
-    load_tokenized_srcsets,
-    TypeCheckSettings,
-)
+from termcolor import colored
+
+from typet5.data import TypeCheckSettings, get_tk_dataset_name, load_tokenized_srcsets
 from typet5.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper
 from typet5.train import TrainingConfig, TypeCheckArgs
-from termcolor import colored
 
 use_type_checker = False
 
@@ -55,12 +52,12 @@ tk_dataset = load_tokenized_srcsets(
 )
 
 
+import torch
+from spot.dagger import DAggerModel
+
 # %%
 # initialize the model
-from typet5.model import load_model_spot, DefaultTokenizer
-from typet5.model import ModelWrapper
-from spot.dagger import DAggerModel
-import torch
+from typet5.model import DefaultTokenizer, ModelWrapper, load_model_spot
 
 train_dec_args = DecodingArgs(
     sampling_max_tokens=8 * config.ctx_size,
@@ -84,12 +81,15 @@ dmodel = DAggerModel(wrapper, use_type_checker=use_type_checker)
 # pretty_print_dict(eval_r.accuracies)
 
 
+import shutil
+
+import wandb
+
 # %%
 # train the model
 from spot.dagger import DAggerArgs
+
 from typet5.utils import run_long_task
-import wandb
-import shutil
 
 ckpt_dir = datadir / f"checkpoints/running/{model_name}"
 
@@ -126,7 +126,7 @@ with run_long_task("DAgger training"):
 
 # %%
 # post-train full evaluation
-from typet5.utils import pretty_print_dict, pretty_show_dict, PickleCache
+from typet5.utils import PickleCache, pretty_print_dict, pretty_show_dict
 from typet5.visualization import string_to_html
 
 test_dec_args = DecodingArgs(
@@ -158,6 +158,7 @@ wandb.log({"test/accuracies": wandb_string(pretty_show_dict(eval_r.accuracies))}
 # %%
 # compute valid set performance
 import re
+
 from typet5.utils import not_none
 
 validset = tk_dataset["valid"][0:-1:3]

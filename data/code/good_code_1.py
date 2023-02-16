@@ -1,13 +1,13 @@
-from typing import Any  # [added by SPOT]
-
 import math
-from typing import Any, Optional
+from typing import Any  # [added by SPOT]
+from typing import Optional
 
 print(math.sin(4))
 
 x_str: str = "x"
 y: Any = 1
 z_str: str = x_str + y
+
 
 class Foo:
     def __init__(self, x: int):

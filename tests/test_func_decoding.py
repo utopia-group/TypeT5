@@ -1,15 +1,12 @@
+import copy
 from pathlib import Path
-from typet5.utils import *
-
-from typet5.static_analysis import (
-    cst,
-    to_abs_import_path as to_abs,
-)
-from typet5.function_dataset import FunctionSignature
 
 import pytest
-import copy
 
+from typet5.function_dataset import FunctionSignature
+from typet5.static_analysis import cst
+from typet5.static_analysis import to_abs_import_path as to_abs
+from typet5.utils import *
 from typet5.utils import assert_eq, groupby, not_none, show_string_diff
 
 

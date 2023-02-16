@@ -31,23 +31,23 @@ commit: None
  <9>      finally:
 <10>          if checker is not None:
 <11>              checker.close()
-      
-      
+
+
 ===========reference-0===========
     at: contextlib
         contextmanager(func: Callable[..., Iterator[_T]]) -> Callable[..., _GeneratorContextManager[_T]]
-    
+
     at: pathlib
         Path()
-    
+
     at: typet5.type_check
         IncrementalChekcer(dmypy_path, code_dir, wait_before_check=1.0)
-    
+
         mypy_checker(code_dir: Path, dmypy_path: Path | None=None, wait_before_check=1.0)
-    
+
     at: typet5.type_check.IncrementalChekcer
         close()
-    
+
     at: typet5.type_check.mypy_checker
         yield (
                     checker := IncrementalChekcer(
@@ -55,28 +55,27 @@ commit: None
                     )
                 )
         checker = None
-    
+
         dmypy_path = proj_root() / ".venv/bin/dmypy"
-    
+
     at: typet5.utils
         proj_root() -> Path
-    
-    
+
+
 ===========reference-1===========
     # module: tests.test_model_creation
   + device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
   - device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    
+
 ===========reference-2===========
     # module: setup
     setup(
-  +     name="TypeT5",    
-  -     name="SPOT",    
-        version="0.1",    
-  +     packages=["typet5"],    
-  -     packages=["spot"],    
-        package_dir={"": "src"},    
+  +     name="TypeT5",
+  -     name="SPOT",
+        version="0.1",
+  +     packages=["typet5"],
+  -     packages=["spot"],
+        package_dir={"": "src"},
   +     license='BSD 3-Clause'
   -     license='MIT'
     )
-    

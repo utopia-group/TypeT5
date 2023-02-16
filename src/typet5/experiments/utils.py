@@ -1,6 +1,5 @@
 from typet5.function_decoding import EvalResult
 from typet5.static_analysis import (
-    _VisitKind,
     ElemSignature,
     FunctionSignature,
     ModuleName,
@@ -9,11 +8,12 @@ from typet5.static_analysis import (
     PythonProject,
     SignatureMap,
     VariableSignature,
+    _VisitKind,
     is_type_rhs,
 )
 from typet5.type_check import MypyChecker, MypyFeedback, MypyResult
+from typet5.type_env import normalize_type, parse_type_expr
 from typet5.utils import *
-from typet5.type_env import parse_type_expr, normalize_type
 
 _DefaultImport = cst.parse_statement(
     "from typing import Any, List, Tuple, Dict, Set, Union, Type, Callable # SPOT"

@@ -3,10 +3,10 @@ import shutil
 from pathlib import Path
 
 import pytest
+
 from typet5.static_analysis import FunctionSignature, mask_types
 from typet5.tokenized_src import PreprocessArgs
 from typet5.type_check import MypyResult, PythonType, remove_top_optional
-
 from typet5.type_env import (
     AnnotCat,
     AnnotPath,
@@ -23,11 +23,11 @@ from typet5.type_env import (
     type_inf_env,
 )
 from typet5.utils import (
+    SpecialNames,
     as_any,
     assert_eq,
-    proj_root,
-    SpecialNames,
     cst,
+    proj_root,
     read_file,
     write_file,
 )
@@ -65,7 +65,7 @@ def test_annotation_collection():
 def test_self_parameter_annotation():
     code = """
 def foo(self: float, x: int) -> str:
-    return "1"    
+    return "1"
 """
     parsed = cst.parse_module(code)
     _, types = collect_user_annotations(parsed)

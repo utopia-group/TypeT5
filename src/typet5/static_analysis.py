@@ -2,23 +2,23 @@
 # project-level static analysis
 
 import copy
-from functools import cache, lru_cache, cached_property
 import enum
+from functools import cache, cached_property, lru_cache
 
 from libcst import MetadataWrapper
-
-from typet5 import PythonType
-from .type_check import parse_type_expr
-from .type_env import AccuracyMetric, AnnotCat, AnnotPath, type_accuracies
-
-from .utils import *
 from libcst.metadata import (
     CodeRange,
-    QualifiedNameProvider,
-    QualifiedName,
-    QualifiedNameSource,
     PositionProvider,
+    QualifiedName,
+    QualifiedNameProvider,
+    QualifiedNameSource,
 )
+
+from typet5 import PythonType
+
+from .type_check import parse_type_expr
+from .type_env import AccuracyMetric, AnnotCat, AnnotPath, type_accuracies
+from .utils import *
 
 ModuleName = str
 ModulePath = str

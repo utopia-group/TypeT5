@@ -3,6 +3,7 @@ import difflib
 import io
 import logging
 import math
+import multiprocessing
 import os
 import pickle
 import shutil
@@ -16,15 +17,15 @@ from pathlib import Path
 from typing import (
     Any,
     Callable,
+    Collection,
     Generator,
     Generic,
     Iterable,
+    Mapping,
     NamedTuple,
     Optional,
     Sequence,
     TypeVar,
-    Mapping,
-    Collection,
     cast,
 )
 
@@ -34,7 +35,6 @@ import numpy as np
 import pandas as pd
 from IPython.display import display
 from libcst.metadata import CodePosition, CodeRange
-import multiprocessing
 
 # from tqdm.auto import tqdm
 from tqdm import tqdm
@@ -259,7 +259,6 @@ def accuracy_by_labels(
         if p == l and l in label_set:
             correct_counts[l] += 1
     return {l: correct_counts[l] / total for l, total in label_counts}
-
 
 
 def groupby(iterable: Iterable[T1], keyfunc: Callable[[T1], T2]) -> dict[T2, list[T1]]:

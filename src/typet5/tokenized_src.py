@@ -1,14 +1,18 @@
 import copy
 
 import numpy
-
-from .static_analysis import remove_comments, remove_imports, stub_from_module
-from .utils import *
-from .type_env import AnnotInfo, AnnotPath, CodePathManager, collect_user_annotations
-from .type_check import MypyFeedback, PythonType, parse_type_str
-from .type_env import apply_annotations, collect_user_annotations
 from libcst.metadata import CodeRange, PositionProvider
 
+from .static_analysis import remove_comments, remove_imports, stub_from_module
+from .type_check import MypyFeedback, PythonType, parse_type_str
+from .type_env import (
+    AnnotInfo,
+    AnnotPath,
+    CodePathManager,
+    apply_annotations,
+    collect_user_annotations,
+)
+from .utils import *
 
 TokenSeq = list[int]  # might need to make this more space-efficient
 

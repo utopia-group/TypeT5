@@ -1,11 +1,12 @@
 import json
+import subprocess
+
 from typet5.experiments.utils import SupportedSyntax
+from typet5.function_dataset import collect_public_api_labels
 from typet5.static_analysis import LabelInfo, ModuleName, PythonProject
 from typet5.type_check import PythonType, parse_type_expr, parse_type_str
 from typet5.type_env import AccuracyMetric, type_accuracies
 from typet5.utils import *
-from typet5.function_dataset import collect_public_api_labels
-import subprocess
 
 JSON = dict
 

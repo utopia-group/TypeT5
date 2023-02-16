@@ -1,10 +1,10 @@
 import torch
 from transformers import AutoConfig
 from transformers.models.t5.configuration_t5 import T5Config
-from typet5.train import TrainingConfig
+
 from typet5.data import CtxArgs
-from typet5.model import ModelSPOT
-from typet5.model import DecodingArgs, ModelWrapper
+from typet5.model import DecodingArgs, ModelSPOT, ModelWrapper
+from typet5.train import TrainingConfig
 from typet5.utils import DefaultTokenizer
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -1,26 +1,19 @@
 import html
 import re
+from io import StringIO
 from typing import Sequence, overload
 
 import colored
 import ipywidgets as widgets
 import plotly.express as px
+from IPython.display import HTML
+from ipywidgets.embed import embed_minimal_html
 
-from .data import (
-    ChunkedDataset,
-    CountedAcc,
-    CtxArgs,
-    PythonType,
-    TokenizedSrcSet,
-)
+from .data import ChunkedDataset, CountedAcc, CtxArgs, PythonType, TokenizedSrcSet
 from .model import DatasetPredResult, DecodingArgs
 from .type_check import normalize_type
 from .type_env import AccuracyMetric
 from .utils import *
-
-from io import StringIO
-from IPython.display import HTML
-from ipywidgets.embed import embed_minimal_html
 
 
 def display_persist(widget) -> None:
@@ -381,6 +374,7 @@ def confusion_matrix_top_k(y_preds, y_true, k):
     cm = confusion_matrix(y_true, y_preds, labels=labels, normalize=None)
     cm = cm / np.array([counts]).T
     return {"labels": labels, "matrix": cm}
+
 
 def display_conf_matrix(conf_matrix: dict):
     cm = conf_matrix["matrix"]
