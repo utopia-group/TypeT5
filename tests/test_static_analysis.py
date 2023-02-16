@@ -45,14 +45,14 @@ def to_abs(module_name: ModuleName, import_name: str):
 
 
 def test_import_normalization():
-    assert to_abs("spot.static_analysis", ".") == ["spot"]
-    assert to_abs("spot.static_analysis", "..") == [""]
-    assert to_abs("spot.static_analysis", ".utils") == ["spot.utils"]
-    assert to_abs("spot.static_analysis", ".utils.a") == ["spot.utils.a"]
-    assert to_abs("spot.static_analysis", "foo.bar") == ["foo.bar", "spot.foo.bar"]
+    assert to_abs("typet5.static_analysis", ".") == ["typet5"]
+    assert to_abs("typet5.static_analysis", "..") == [""]
+    assert to_abs("typet5.static_analysis", ".utils") == ["typet5.utils"]
+    assert to_abs("typet5.static_analysis", ".utils.a") == ["typet5.utils.a"]
+    assert to_abs("typet5.static_analysis", "foo.bar") == ["foo.bar", "typet5.foo.bar"]
 
     with pytest.raises(AssertionError):
-        to_abs("spot.static_analysis", "...")
+        to_abs("typet5.static_analysis", "...")
 
 
 def test_namespace_resolution():

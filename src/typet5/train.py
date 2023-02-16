@@ -18,9 +18,9 @@ from .data import ChunkedDataset, TokenizedSrcSet
 from .model import (
     CtxArgs,
     DecodingArgs,
-    ModelSPOT,
+    ModelType,
     ModelWrapper,
-    TokenizerSPOT,
+    TokenizerType,
     dynamic_dataloader,
 )
 from .tokenized_src import PreprocessArgs
@@ -112,7 +112,7 @@ def train_spot_model(
 
     model_path = ModelWrapper.get_codet5_path(use_small_model)
     lit_model = TrainModelWrapper(model_path, model_saving_path=running_dir / "ckpts")
-    tokenizer: TokenizerSPOT = lit_model.tokenizer
+    tokenizer: TokenizerType = lit_model.tokenizer
 
     common_type_names = tk_dataset["train"].common_type_names()
     wrapper = ModelWrapper(
@@ -221,8 +221,8 @@ class TrainModelWrapper(pl.LightningModule):
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.model: ModelSPOT = load_model_spot(model_checkpoint)
-        self.tokenizer: TokenizerSPOT = TokenizerSPOT.from_pretrained(model_checkpoint)
+        self.model: ModelType = load_model_spot(model_checkpoint)
+        self.tokenizer: TokenizerType = TokenizerType.from_pretrained(model_checkpoint)
         self.model_saving_path = model_saving_path
         self.model_saving_interval: Optional[int] = None
         self.avg_loss = MovingAvg(alpha=0.01)

@@ -85,8 +85,8 @@ class DatasetPredResult(Generic[T1]):
 
 @dataclass
 class ModelWrapper:
-    model: ModelSPOT
-    tokenizer: TokenizerSPOT
+    model: ModelType
+    tokenizer: TokenizerType
     args: DecodingArgs
     common_type_names: set[str]
     monitor: TaskMonitor = EmptyLoggingMonitor()
@@ -210,8 +210,8 @@ class ModelWrapper:
     @staticmethod
     def from_pretrained(path: Path) -> "ModelWrapper":
         """Load a pretrained model from the given path."""
-        model = cast(ModelSPOT, ModelSPOT.from_pretrained(str(path)))
-        tokenizer = TokenizerSPOT.from_pretrained(str(path))
+        model = cast(ModelType, ModelType.from_pretrained(str(path)))
+        tokenizer = TokenizerType.from_pretrained(str(path))
         args = pickle_load(path / "args.pkl")
         common_type_names = ModelWrapper.load_common_type_names(path)
         return ModelWrapper(

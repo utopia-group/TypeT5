@@ -42,8 +42,8 @@ from tqdm.contrib.concurrent import process_map
 from transformers.models.roberta.tokenization_roberta import RobertaTokenizer
 from transformers.models.t5.modeling_t5 import T5ForConditionalGeneration
 
-TokenizerSPOT = RobertaTokenizer
-ModelSPOT = T5ForConditionalGeneration
+TokenizerType = RobertaTokenizer
+ModelType = T5ForConditionalGeneration
 
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")
@@ -54,7 +54,7 @@ def proj_root() -> Path:
 
 
 def get_config_dict() -> dict:
-    if (path := proj_root() / "config" / "SPOT.json").exists():
+    if (path := proj_root() / "config" / "typet5.json").exists():
         return json.loads(read_file(path))
     else:
         return {}
@@ -114,15 +114,15 @@ def raise_error(msg: str) -> T1:  # type: ignore
     raise RuntimeError(msg)
 
 
-def load_model_spot(path) -> ModelSPOT:
-    return cast(ModelSPOT, ModelSPOT.from_pretrained(path))
+def load_model_spot(path) -> ModelType:
+    return cast(ModelType, ModelType.from_pretrained(path))
 
 
-def load_tokenizer_spot() -> TokenizerSPOT:
-    return TokenizerSPOT.from_pretrained("Salesforce/codet5-base")
+def load_tokenizer_spot() -> TokenizerType:
+    return TokenizerType.from_pretrained("Salesforce/codet5-base")
 
 
-def _turn_off_tokenizer_warning(tokenizer: TokenizerSPOT):
+def _turn_off_tokenizer_warning(tokenizer: TokenizerType):
     tokenizer.deprecation_warnings[
         "sequence-length-is-longer-than-the-specified-maximum"
     ] = True

@@ -16,7 +16,7 @@ datadir = get_data_dir()
 from termcolor import colored
 
 from typet5.data import TypeCheckSettings, get_tk_dataset_name, load_tokenized_srcsets
-from typet5.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper
+from typet5.model import CtxArgs, DecodingArgs, ModelType, ModelWrapper
 from typet5.train import TrainingConfig, TypeCheckArgs
 
 use_type_checker = False
@@ -53,7 +53,7 @@ tk_dataset = load_tokenized_srcsets(
 
 
 import torch
-from spot.dagger import DAggerModel
+from typet5.dagger import DAggerModel
 
 # %%
 # initialize the model
@@ -75,7 +75,7 @@ dmodel = DAggerModel(wrapper, use_type_checker=use_type_checker)
 
 # %%
 # pre-train evaluation
-# from spot.utils import pretty_print_dict
+# from typet5.utils import pretty_print_dict
 
 # eval_r = asyncio.run(dmodel.eval_on_data(tk_dataset["test"][0:50]))
 # pretty_print_dict(eval_r.accuracies)
@@ -87,7 +87,7 @@ import wandb
 
 # %%
 # train the model
-from spot.dagger import DAggerArgs
+from typet5.dagger import DAggerArgs
 
 from typet5.utils import run_long_task
 

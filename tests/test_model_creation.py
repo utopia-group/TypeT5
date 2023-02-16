@@ -3,7 +3,7 @@ from transformers import AutoConfig
 from transformers.models.t5.configuration_t5 import T5Config
 
 from typet5.data import CtxArgs
-from typet5.model import DecodingArgs, ModelSPOT, ModelWrapper
+from typet5.model import DecodingArgs, ModelType, ModelWrapper
 from typet5.train import TrainingConfig
 from typet5.utils import DefaultTokenizer
 
@@ -17,7 +17,7 @@ def test_basic_torch_operations():
 
 def test_model_creation():
     config = AutoConfig.from_pretrained(ModelWrapper.get_codet5_path())
-    model = ModelSPOT(config).to(device)
+    model = ModelType(config).to(device)
 
     ctx_args = TrainingConfig().dec_ctx_args()
     dec_args = DecodingArgs(ctx_args, 32)
