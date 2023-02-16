@@ -7,7 +7,7 @@ import enum
 
 from libcst import MetadataWrapper
 
-from spot import PythonType
+from typet5 import PythonType
 from .type_check import parse_type_expr
 from .type_env import AccuracyMetric, AnnotCat, AnnotPath, type_accuracies
 

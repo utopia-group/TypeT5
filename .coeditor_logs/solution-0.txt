@@ -1,0 +1,82 @@
+problem.edit_line_ids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+len(input_tks)=163
+len(references)=3
+Solution score: 0.167
+Marginalized samples: 4
+--------------------------------------------------------------------------------
+path: typet5.type_check/mypy_checker
+n_references: 3
+total_reference_tks: 397
+project: /home/jiayi/Projects/TypeT5
+commit: None
+========Ground Truth========
+
+========Prediction========
+<10>:<add>         if checker is not None:
+     <del>         if checker is not None:
+
+========Main Code========
+      # module: typet5.type_check
+      @contextmanager
+      def mypy_checker(code_dir: Path, dmypy_path: Path | None = None, wait_before_check=1.0):
+ <0>      checker = None
+ <1>      try:
+ <2>          if dmypy_path is None:
+ <3>              dmypy_path = proj_root() / ".venv/bin/dmypy"
+ <4>          yield (
+ <5>              checker := IncrementalChekcer(
+ <6>                  dmypy_path, code_dir, wait_before_check=wait_before_check
+ <7>              )
+ <8>          )
+ <9>      finally:
+<10>          if checker is not None:
+<11>              checker.close()
+      
+      
+===========reference-0===========
+    at: contextlib
+        contextmanager(func: Callable[..., Iterator[_T]]) -> Callable[..., _GeneratorContextManager[_T]]
+    
+    at: pathlib
+        Path()
+    
+    at: typet5.type_check
+        IncrementalChekcer(dmypy_path, code_dir, wait_before_check=1.0)
+    
+        mypy_checker(code_dir: Path, dmypy_path: Path | None=None, wait_before_check=1.0)
+    
+    at: typet5.type_check.IncrementalChekcer
+        close()
+    
+    at: typet5.type_check.mypy_checker
+        yield (
+                    checker := IncrementalChekcer(
+                        dmypy_path, code_dir, wait_before_check=wait_before_check
+                    )
+                )
+        checker = None
+    
+        dmypy_path = proj_root() / ".venv/bin/dmypy"
+    
+    at: typet5.utils
+        proj_root() -> Path
+    
+    
+===========reference-1===========
+    # module: tests.test_model_creation
+  + device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+  - device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    
+===========reference-2===========
+    # module: setup
+    setup(
+  +     name="TypeT5",    
+  -     name="SPOT",    
+        version="0.1",    
+  +     packages=["typet5"],    
+  -     packages=["spot"],    
+        package_dir={"": "src"},    
+  +     license='BSD 3-Clause'
+  -     license='MIT'
+    )
+    

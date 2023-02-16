@@ -9,7 +9,9 @@ This project uses [pipenv](https://pipenv.pypa.io/en/latest/) to manage the pack
 pipenv sync
 ```
 
-To add new dependences into the virtual environment, you can manually install them via `pipenv install ..` (using `pipenv`) or `pipenv run pip install ..` (using `pip` from within the virtual environment). Note that pipenv records pacakage requirements in the `Pipfile` and also manages additional environment variables in the `.env` file.
+To add new dependences into the virtual environment, you can manually install them via `pipenv install ..` (using `pipenv`) or `pipenv run pip install ..` (using `pip` from within the virtual environment). If your pytorch installation is not working properly, you might need to install it via `pip` rather than `pipenv`. If you are not using pipenv, make sure to add the environment variables in `.env` to your environment when you run the programs.
+
+You can run all unit tests by running `pipenv run pytest` at the project root.
 
 ## Running Trained Model
 - TODO to download the pre-trained model weights.

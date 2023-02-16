@@ -4,7 +4,7 @@ import os
 import asyncio
 from typing import *
 
-from spot.utils import not_none, proj_root, get_data_dir
+from typet5.utils import not_none, proj_root, get_data_dir
 
 os.chdir(proj_root())
 
@@ -13,13 +13,13 @@ datadir = get_data_dir()
 # %%
 # experiment configurations
 
-from spot.data import (
+from typet5.data import (
     get_tk_dataset_name,
     load_tokenized_srcsets,
     TypeCheckSettings,
 )
-from spot.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper
-from spot.train import TrainingConfig, TypeCheckArgs
+from typet5.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper
+from typet5.train import TrainingConfig, TypeCheckArgs
 from termcolor import colored
 
 use_type_checker = False
@@ -57,8 +57,8 @@ tk_dataset = load_tokenized_srcsets(
 
 # %%
 # initialize the model
-from spot.model import load_model_spot, DefaultTokenizer
-from spot.model import ModelWrapper
+from typet5.model import load_model_spot, DefaultTokenizer
+from typet5.model import ModelWrapper
 from spot.dagger import DAggerModel
 import torch
 
@@ -87,7 +87,7 @@ dmodel = DAggerModel(wrapper, use_type_checker=use_type_checker)
 # %%
 # train the model
 from spot.dagger import DAggerArgs
-from spot.utils import run_long_task
+from typet5.utils import run_long_task
 import wandb
 import shutil
 
@@ -126,8 +126,8 @@ with run_long_task("DAgger training"):
 
 # %%
 # post-train full evaluation
-from spot.utils import pretty_print_dict, pretty_show_dict, PickleCache
-from spot.visualization import string_to_html
+from typet5.utils import pretty_print_dict, pretty_show_dict, PickleCache
+from typet5.visualization import string_to_html
 
 test_dec_args = DecodingArgs(
     sampling_max_tokens=8 * config.ctx_size,
@@ -158,7 +158,7 @@ wandb.log({"test/accuracies": wandb_string(pretty_show_dict(eval_r.accuracies))}
 # %%
 # compute valid set performance
 import re
-from spot.utils import not_none
+from typet5.utils import not_none
 
 validset = tk_dataset["valid"][0:-1:3]
 # dmodel.wrapper.args = train_dec_args

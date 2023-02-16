@@ -1,16 +1,16 @@
 from pathlib import Path
-from spot.utils import *
+from typet5.utils import *
 
-from spot.static_analysis import (
+from typet5.static_analysis import (
     cst,
     to_abs_import_path as to_abs,
 )
-from spot.function_dataset import FunctionSignature
+from typet5.function_dataset import FunctionSignature
 
 import pytest
 import copy
 
-from spot.utils import assert_eq, groupby, not_none, show_string_diff
+from typet5.utils import assert_eq, groupby, not_none, show_string_diff
 
 
 def test_function_signature():

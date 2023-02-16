@@ -1,12 +1,12 @@
 import subprocess
 import requests
-from spot.experiments.type4py import Type4PyEvalResult, Type4PySupportedSyntax
-from spot.experiments.utils import SupportedSyntax, remove_newer_syntax
-from spot.function_dataset import SignatureMap
-from spot.type_check import normalize_type, parse_type_expr, parse_type_str
-from spot.type_env import AccuracyMetric
-from spot.utils import *
-from spot.static_analysis import (
+from typet5.experiments.type4py import Type4PyEvalResult, Type4PySupportedSyntax
+from typet5.experiments.utils import SupportedSyntax, remove_newer_syntax
+from typet5.function_dataset import SignatureMap
+from typet5.type_check import normalize_type, parse_type_expr, parse_type_str
+from typet5.type_env import AccuracyMetric
+from typet5.utils import *
+from typet5.static_analysis import (
     ProjectPath,
     ModuleName,
     ElemSignature,

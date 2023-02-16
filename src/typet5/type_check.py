@@ -481,6 +481,7 @@ class IncrementalChekcer:
 
 @contextmanager
 def mypy_checker(code_dir: Path, dmypy_path: Path | None = None, wait_before_check=1.0):
+    checker = None
     try:
         if dmypy_path is None:
             dmypy_path = proj_root() / ".venv/bin/dmypy"
@@ -490,7 +491,8 @@ def mypy_checker(code_dir: Path, dmypy_path: Path | None = None, wait_before_che
             )
         )
     finally:
-        checker.close()
+        if checker is not None:
+            checker.close()
 
 
 def count_type_frequency(

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from numpy import False_
-from spot.static_analysis import (
+from typet5.static_analysis import (
     ModuleHierarchy,
     ModuleName,
     ProjectPath,
@@ -15,7 +15,7 @@ from spot.static_analysis import (
 )
 import pytest
 
-from spot.utils import assert_eq, groupby, not_none, show_string_diff
+from typet5.utils import assert_eq, groupby, not_none, show_string_diff
 
 
 def project_from_code(name2code: dict[ModuleName, str]):

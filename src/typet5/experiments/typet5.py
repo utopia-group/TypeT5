@@ -1,4 +1,4 @@
-from spot.train import *
+from typet5.train import *
 
 
 def accs_as_table_row(accs_dict: dict):

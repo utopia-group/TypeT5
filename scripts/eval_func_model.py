@@ -9,11 +9,11 @@ from typing import *
 
 import torch
 import wandb
-from spot.function_dataset import data_project_from_dir
-from spot.model import ModelWrapper
-from spot.train import TrainingConfig, PreprocessArgs
-from spot.type_env import AccuracyMetric
-from spot.utils import (
+from typet5.function_dataset import data_project_from_dir
+from typet5.model import ModelWrapper
+from typet5.train import TrainingConfig, PreprocessArgs
+from typet5.type_env import AccuracyMetric
+from typet5.utils import (
     assert_eq,
     get_dataset_dir,
     get_eval_dir,
@@ -28,9 +28,9 @@ from spot.utils import (
     run_long_task,
     write_file,
 )
-from spot.visualization import string_to_html
+from typet5.visualization import string_to_html
 from termcolor import colored
-from spot.experiments.typet5 import TypeT5Configs
+from typet5.experiments.typet5 import TypeT5Configs
 
 os.chdir(proj_root())
 
@@ -86,12 +86,12 @@ if not load_results:
 
 # %%
 
-from spot.function_decoding import (
+from typet5.function_decoding import (
     DecodingOrders,
     EvalResult,
     RolloutCtx,
 )
-from spot.experiments.typet5 import accs_as_table_row
+from typet5.experiments.typet5 import accs_as_table_row
 
 ctx_args = model.args.ctx_args
 ctx_args.max_labels = 16

@@ -34,7 +34,6 @@ import numpy as np
 import pandas as pd
 from IPython.display import display
 from libcst.metadata import CodePosition, CodeRange
-from sklearn.metrics import confusion_matrix
 import multiprocessing
 
 # from tqdm.auto import tqdm
@@ -261,29 +260,6 @@ def accuracy_by_labels(
             correct_counts[l] += 1
     return {l: correct_counts[l] / total for l, total in label_counts}
 
-
-def confusion_matrix_top_k(y_preds, y_true, k):
-    labels_counts = Counter(y_true).most_common(k)
-    labels = [l[0] for l in labels_counts]
-    counts = [l[1] for l in labels_counts]
-    cm = confusion_matrix(y_true, y_preds, labels=labels, normalize=None)
-    cm = cm / np.array([counts]).T
-    return {"labels": labels, "matrix": cm}
-
-
-import matplotlib.pyplot as plt
-from sklearn.metrics import ConfusionMatrixDisplay
-
-
-def display_conf_matrix(conf_matrix: dict):
-    cm = conf_matrix["matrix"]
-    labels = conf_matrix["labels"]
-    n_labels = len(labels)
-    fig, ax = plt.subplots(figsize=(n_labels, n_labels))
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
-    disp.plot(cmap="Reds", values_format=".2f", ax=ax, colorbar=False)
-    plt.title("Normalized confusion matrix")
-    plt.show()
 
 
 def groupby(iterable: Iterable[T1], keyfunc: Callable[[T1], T2]) -> dict[T2, list[T1]]:

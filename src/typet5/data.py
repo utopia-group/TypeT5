@@ -752,7 +752,7 @@ def create_tokenized_srcsets(
     pre_args: PreprocessArgs,
     data_reduction: int = 1,
 ) -> None:
-    import spot.function_dataset as fd
+    import typet5.function_dataset as fd
 
     repos_dir = get_dataset_dir(dataset) / "repos"
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -1,5 +1,5 @@
-from spot.function_decoding import EvalResult
-from spot.static_analysis import (
+from typet5.function_decoding import EvalResult
+from typet5.static_analysis import (
     _VisitKind,
     ElemSignature,
     FunctionSignature,
@@ -11,9 +11,9 @@ from spot.static_analysis import (
     VariableSignature,
     is_type_rhs,
 )
-from spot.type_check import MypyChecker, MypyFeedback, MypyResult
-from spot.utils import *
-from spot.type_env import parse_type_expr, normalize_type
+from typet5.type_check import MypyChecker, MypyFeedback, MypyResult
+from typet5.utils import *
+from typet5.type_env import parse_type_expr, normalize_type
 
 _DefaultImport = cst.parse_statement(
     "from typing import Any, List, Tuple, Dict, Set, Union, Type, Callable # SPOT"

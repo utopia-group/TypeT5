@@ -5,7 +5,7 @@ name = "pypi"
 
 [packages]
 mypy = "~=0.971"
-spot = {editable = true, path = "."}
+typet5 = {editable = true, path = "."}
 tqdm = "*"
 types-all = "*"
 dateparser = "~=1.1.1"
@@ -17,8 +17,6 @@ datasets = "~=2.4.0"
 transformers = "~=4.21.3"
 wandb = "~=0.13.2"
 libcst = "<=0.4.2"
-sklearn = "*"
-matplotlib = "~=3.5"
 pytorch-lightning = "~=1.7.5"
 colored = "~=1.4"
 ipykernel = "*"
@@ -28,6 +26,7 @@ prettytable = "~=3.4.1"
 [dev-packages]
 pytest = "*"
 black = "*"
+exceptiongroup = "*"
 
 [requires]
 python_version = "3.10"

@@ -2,16 +2,16 @@
 import os
 from termcolor import colored
 from typing import *
-from spot.utils import *
-from spot.data import (
+from typet5.utils import *
+from typet5.data import (
     create_tokenized_srcsets,
     get_tk_dataset_name,
     load_tokenized_srcsets,
     TypeCheckSettings,
 )
-from spot.model import DecodingArgs, ModelWrapper
-from spot.train import TypeCheckArgs
-from spot.experiments.typet5 import TypeT5Configs
+from typet5.model import DecodingArgs, ModelWrapper
+from typet5.train import TypeCheckArgs
+from typet5.experiments.typet5 import TypeT5Configs
 
 os.chdir(proj_root())
 
@@ -79,8 +79,8 @@ print(colored(f"Training model: {model_name}", "green"))
 # %%
 # -----------------------------------------------------------
 # train the model
-from spot.train import ModelTrainingArgs, train_spot_model, TypeCheckArgs
-from spot.utils import run_long_task
+from typet5.train import ModelTrainingArgs, train_spot_model, TypeCheckArgs
+from typet5.utils import run_long_task
 import wandb
 import torch
 
@@ -122,9 +122,9 @@ wrapper.to(device)
 # -----------------------------------------------------------
 # model evaluation
 
-from spot.utils import PickleCache
-from spot.visualization import pretty_print_dict
-from spot.type_env import AccuracyMetric
+from typet5.utils import PickleCache
+from typet5.visualization import pretty_print_dict
+from typet5.type_env import AccuracyMetric
 
 bs_args = DecodingArgs(
     sampling_max_tokens=max_tokens_per_file,
@@ -150,8 +150,8 @@ pretty_print_dict(r0_accs)
 # %%
 # -----------------------------------------------------------
 # close wandb
-from spot.utils import pretty_show_dict
-from spot.visualization import string_to_html
+from typet5.utils import pretty_show_dict
+from typet5.visualization import string_to_html
 import wandb
 
 
@@ -165,8 +165,8 @@ if not eval_only:
 # %%
 # -----------------------------------------------------------
 # compute accuracies on the top-level elements
-from spot.static_analysis import SignatureErrorAnalysis
-from spot.function_dataset import data_project_from_dir, sigmap_from_file_predictions
+from typet5.static_analysis import SignatureErrorAnalysis
+from typet5.function_dataset import data_project_from_dir, sigmap_from_file_predictions
 
 repos_dir = get_dataset_dir(dataset) / "repos" / "test"
 test_repo_paths = [f for f in repos_dir.iterdir() if f.is_dir()]
@@ -192,7 +192,7 @@ if not eval_only:
 # -----------------------------------------------------------
 # export the code with inlined predictions as HTML
 
-from spot.visualization import export_preds_on_code, proj_root
+from typet5.visualization import export_preds_on_code, proj_root
 
 export_preds = True
 

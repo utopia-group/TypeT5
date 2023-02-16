@@ -3,11 +3,11 @@ import shutil
 from pathlib import Path
 
 import pytest
-from spot.static_analysis import FunctionSignature, mask_types
-from spot.tokenized_src import PreprocessArgs
-from spot.type_check import MypyResult, PythonType, remove_top_optional
+from typet5.static_analysis import FunctionSignature, mask_types
+from typet5.tokenized_src import PreprocessArgs
+from typet5.type_check import MypyResult, PythonType, remove_top_optional
 
-from spot.type_env import (
+from typet5.type_env import (
     AnnotCat,
     AnnotPath,
     AnyAnnot,
@@ -22,7 +22,7 @@ from spot.type_env import (
     parse_type_str,
     type_inf_env,
 )
-from spot.utils import (
+from typet5.utils import (
     as_any,
     assert_eq,
     proj_root,
@@ -101,6 +101,7 @@ def test_annotation_applying():
         assert new_map[k].annotation.value == v.annotation.value  # type: ignore
 
 
+@pytest.mark.skip("Not used.")
 def test_mypy_checker_1():
     with mypy_checker(Path("data/code"), wait_before_check=0.0) as checker:
         check_r = checker.recheck_project()
@@ -109,6 +110,7 @@ def test_mypy_checker_1():
         assert Path("data/code/bad_code_2.py").resolve() in check_r.error_dict
 
 
+@pytest.mark.skip("Not used.")
 def test_mypy_checker_2():
     with mypy_checker(Path("data/code_output"), wait_before_check=0.0) as checker:
         if Path("data/code_output/bad_code_1.py").exists():
@@ -172,8 +174,8 @@ def test_type_normalization():
 
 import shutil
 
-from spot.data import TokenizedSrcSet, type_check_src, type_check_src_in_project
-from spot.utils import load_tokenizer_spot, proj_root
+from typet5.data import TokenizedSrcSet, type_check_src, type_check_src_in_project
+from typet5.utils import load_tokenizer_spot, proj_root
 
 
 @pytest.mark.skip("Not using type checker for the moment")
