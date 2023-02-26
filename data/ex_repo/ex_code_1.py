@@ -26,6 +26,7 @@ class Wrapper:
 
 
 def int_add(a, b):
+    # this is a strange function
     return a + b + "c"
 
 

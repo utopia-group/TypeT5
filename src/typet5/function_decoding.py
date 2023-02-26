@@ -149,7 +149,7 @@ class RolloutCtx:
         """
         if pre_args.drop_env_types and decode_order.types_in_ctx():
             warnings.warn(
-                "The decoding order contains types in context, but the model is not trained with them."
+                "The decoding order contains types in context, but drop_env_types=True in the pre-processing args."
             )
 
         n_total_elems = sum(1 for p in projects for e in p.all_elems())

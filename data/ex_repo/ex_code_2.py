@@ -1,6 +1,7 @@
 # Env example 2: some existing annotations
 
 from typing import *
+from ex_code_1 import int_add
 
 
 def fib(n: int):
@@ -29,7 +30,7 @@ class Bar:
         self.w = w0
 
     def foo(self, z: str) -> int:
-        return self.x + len(z)
+        return int_add(self.x, len(z))
 
 
 bar: Bar = Bar(3)
