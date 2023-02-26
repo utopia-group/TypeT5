@@ -27,6 +27,7 @@ mypy_temp
 .cache
 dmypy.json
 .dmypy.json
+.coeditor_logs
 
 # Packages
 *.egg
