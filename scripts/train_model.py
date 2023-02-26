@@ -115,7 +115,7 @@ if not eval_only:
             use_early_stop=False,
         )
 else:
-    wrapper = ModelWrapper.from_pretrained(get_model_dir() / model_name)
+    wrapper = ModelWrapper.load(get_model_dir() / model_name)
 
 device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
 wrapper.to(device)

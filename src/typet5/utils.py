@@ -142,7 +142,8 @@ def rec_iter_files(
 ) -> Generator[Path, None, None]:
     """Recursively iterate over all files in a directory whose parent dirs satisfies the given
     `dir_filter`. Note that unlike `glob`, if a directory is filtered out, all
-    its children won't be traversed, leading to potentially better performance in certain use cases."""
+    its children won't be traversed, leading to potentially better performance in certain use cases.
+    """
     assert dir.is_dir()
 
     def rec(path: Path) -> Generator[Path, None, None]:
@@ -341,8 +342,8 @@ def restore_later(file_path: Path):
 
 
 class ModuleRemapUnpickler(pickle.Unpickler):
-    def __init__(self, file, module_map, **kw_args) -> None:
-        self.module_map: Callable[[str], str] = module_map
+    def __init__(self, file, module_map: Callable[[str], str], **kw_args) -> None:
+        self.module_map = module_map
         super().__init__(file, **kw_args)
 
     def find_class(self, module: str, name: str) -> Any:
@@ -555,9 +556,16 @@ def pickle_dump(file: Path, obj):
         pickle.dump(obj, f)
 
 
+def _module_map(name: str):
+    segs = name.split(".")
+    if segs and segs[0] == "spot":
+        return "typet5." + ".".join(segs[1:])
+    return name
+
+
 def pickle_load(file: Path):
     with file.open("rb") as f:
-        return pickle.load(f)
+        return ModuleRemapUnpickler(f, _module_map).load()
 
 
 def get_subset(data, key: slice | Iterable):

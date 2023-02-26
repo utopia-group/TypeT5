@@ -14,6 +14,7 @@ def fib(n):
 
 class Wrapper:
     x_elem: int
+    y: str
 
     @staticmethod
     def foo(bar):
@@ -21,6 +22,7 @@ class Wrapper:
 
     def inc(self):
         self.x_elem += 1
+        return self.y
 
 
 def int_add(a, b):

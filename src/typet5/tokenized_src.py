@@ -227,7 +227,7 @@ def tokenized_src_from_segs(
     all_tks = r.tokenized_code
     if left_extra_tks:
         all_tks.extend(left_extra_tks)
-    for i in range(len(types)):
+    for i in range(len(code_segs) - 1):
         all_tks.extend(tkn.encode(code_segs[i], add_special_tokens=False))
         if is_label is None or is_label[i]:
             r.types_pos.append(len(all_tks))

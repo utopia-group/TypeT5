@@ -22,6 +22,7 @@ colored = "~=1.4"
 ipykernel = "*"
 termcolor = "~=1.0"
 prettytable = "~=3.4.1"
+huggingface-hub = "*"
 
 [dev-packages]
 pytest = "*"

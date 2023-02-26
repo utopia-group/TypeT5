@@ -203,7 +203,7 @@ def train_spot_model(
             shutil.rmtree(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        wrapper.save_pretrained(save_dir)
+        wrapper.save(save_dir)
         shutil.rmtree(running_dir)
     except Exception as e:
         logging.error(

@@ -99,7 +99,7 @@ def data_project_from_dir(
             mod = remove_comments(mod)
         return mod
 
-    return PythonProject.from_root(
+    return PythonProject.parse_from_root(
         root,
         True,
         src2module=src2module,

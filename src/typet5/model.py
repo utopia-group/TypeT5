@@ -5,6 +5,7 @@ from typing import NamedTuple, overload
 
 import numpy as np
 from datasets.arrow_dataset import Dataset
+from huggingface_hub import snapshot_download
 from mypy_extensions import mypyc_attr
 from torch import Tensor
 from torch.utils.data import DataLoader, RandomSampler
@@ -196,7 +197,7 @@ class ModelWrapper:
                 tqdm_bar.update(n_chunks)
         return [pred_types[int(c_id)] for c_id in dataset["chunk_id"]]
 
-    def save_pretrained(self, path: Path):
+    def save(self, path: Path):
         """Save the model to the given path along with its tokenizer and args."""
         self.model.save_pretrained(str(path))
         self.tokenizer.save_pretrained(str(path))
@@ -207,8 +208,13 @@ class ModelWrapper:
         self.model = self.model.to(device)
         return self
 
-    @staticmethod
-    def from_pretrained(path: Path) -> "ModelWrapper":
+    @classmethod
+    def load_from_hub(cls, repo_name: str):
+        path = snapshot_download(repo_name)
+        return cls.load(Path(path))
+
+    @classmethod
+    def load(cls, path: Path) -> "ModelWrapper":
         """Load a pretrained model from the given path."""
         model = cast(ModelType, ModelType.from_pretrained(str(path)))
         tokenizer = TokenizerType.from_pretrained(str(path))
@@ -222,8 +228,8 @@ class ModelWrapper:
             monitor=TaskLoggingMonitor(path.name),
         )
 
-    @staticmethod
-    def load_common_type_names(model_path: Path) -> set[str]:
+    @classmethod
+    def load_common_type_names(cls, model_path: Path) -> set[str]:
         if (model_path / "common_names.pkl").exists():
             return pickle_load(model_path / "common_names.pkl")
         else:

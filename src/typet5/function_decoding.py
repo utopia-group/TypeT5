@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import random
+import warnings
 
 import torch
 
@@ -147,8 +148,8 @@ class RolloutCtx:
         an interactive setting where the user corrects the model's incorrect predictions.
         """
         if pre_args.drop_env_types and decode_order.types_in_ctx():
-            logging.warning(
-                "The decoding order contains types in context, but the model is not trained to predict them."
+            warnings.warn(
+                "The decoding order contains types in context, but the model is not trained with them."
             )
 
         n_total_elems = sum(1 for p in projects for e in p.all_elems())
@@ -176,7 +177,7 @@ class RolloutCtx:
                     cpu_executor=cpu_executor,
                     model_executor=model_executor,
                     oracle=oracle,
-                    progress_cbk=lambda e, p: pbar.update(),
+                    progress_cbk=lambda e, p, s: pbar.update(),
                 )
                 rollouts[id] = r
 
@@ -185,6 +186,39 @@ class RolloutCtx:
             )
 
         return EvalResult(project_roots, rollouts, label_maps)
+
+    async def run_on_project(
+        self,
+        project: PythonProject,
+        pre_args: PreprocessArgs,
+        decode_order: "DecodingOrder",
+        concurrency: int = DefaultWorkers,
+    ):
+        sigmap = dict[ProjectPath, ElemSignature]()
+
+        def callback(e: PythonElem, types, sig: ElemSignature) -> None:
+            if e.path not in sigmap:
+                sigmap[e.path] = sig
+                print(f"{e.path}: {str(sig)}")
+            else:
+                old_sig = sigmap[e.path]
+                corrected = str(old_sig) != str(sig)
+                sigmap[e.path] = sig
+                if corrected:
+                    print(f"(updated) {e.path}: {str(sig)}")
+
+        with ThreadPoolExecutor(1) as model_executor, ProcessPoolExecutor(
+            concurrency
+        ) as cpu_executor:
+            return await self.project_rollout(
+                project,
+                pre_args,
+                decode_order,
+                cpu_executor=cpu_executor,
+                model_executor=model_executor,
+                oracle=None,
+                progress_cbk=callback,
+            )
 
     async def project_rollout(
         self,
@@ -195,8 +229,8 @@ class RolloutCtx:
         model_executor: ThreadPoolExecutor,
         oracle: SignatureMap | None = None,
         progress_cbk: Callable[
-            [PythonElem, Sequence[PythonType]], Any
-        ] = lambda x, y: None,
+            [PythonElem, Sequence[PythonType], ElemSignature], Any
+        ] = lambda x, y, z: None,
     ) -> RolloutPrediction:
         """Note: when evaluating on dataset with ground truth labels, we need to
         first replace all labels with `SpecialNames.TypeMask` before feeding to
@@ -258,6 +292,7 @@ class RolloutCtx:
                 elem_map = {elem.path: elem_sig}
             else:
                 raise NotImplemented(f"Unsupported element type {type(elem)}")
+            # inline the type signatures using `reformat_elems`
             main_lines = reformat_elems(
                 [elem],
                 analysis.path2class,
@@ -284,6 +319,7 @@ class RolloutCtx:
             )
 
             pred_types = list[PythonType]()
+            new_sig = copy.deepcopy(sig)
             if model_inputs:
                 for chunk in model_inputs:
                     chunk = {
@@ -298,33 +334,37 @@ class RolloutCtx:
                 elem2inputs[elem.path] = model_inputs[0]
 
                 # update the signature with the predicted types
-                sig = copy.deepcopy(sig)
-                if isinstance(sig, VariableSignature):
-                    assert sig.annot is None or is_mask_annot(
-                        sig.annot
-                    ), f"For {elem}, sig={sig}"
+                if isinstance(new_sig, VariableSignature):
+                    assert new_sig.annot is None or is_mask_annot(
+                        new_sig.annot
+                    ), f"For {elem}, sig={new_sig}"
                     assert_eq(len(pred_types), 1)
-                    sig.annot = cst.Annotation(cst.parse_expression(str(pred_types[0])))
+                    new_sig.annot = cst.Annotation(
+                        cst.parse_expression(str(pred_types[0]))
+                    )
                 elif isinstance(elem, PythonFunction):
-                    assert len(pred_types) >= len(sig.params) + 1
-                    for i, (n, a) in enumerate(sig.params.items()):
+                    # assert len(pred_types) >= len(sig.params) + 1
+                    n_pred = 0
+                    for (n, a) in new_sig.params.items():
                         if a is None or is_mask_annot(a):
-                            new_type = cst.parse_expression(str(pred_types[i]))
-                            sig.params[n] = cst.Annotation(new_type)
-                    if sig.returns is None or is_mask_annot(sig.returns):
-                        sig.returns = cst.Annotation(
-                            cst.parse_expression(str(pred_types[len(sig.params)]))
+                            new_type = cst.parse_expression(str(pred_types[n_pred]))
+                            new_sig.params[n] = cst.Annotation(new_type)
+                            n_pred += 1
+                    if new_sig.returns is None or is_mask_annot(new_sig.returns):
+                        new_sig.returns = cst.Annotation(
+                            cst.parse_expression(str(pred_types[n_pred]))
                         )
-            pred_sigmap[elem.path] = sig
+                pred_sigmap[elem.path] = new_sig
             if (
                 oracle is not None
                 and (label := oracle.get(elem.path)) is not None
-                and type(label) == type(sig)
+                and type(label) == type(new_sig)
             ):
-                sig = sig.updated(as_any(label))
-            final_sigmap[elem.path] = sig
+                new_sig = new_sig.updated(as_any(label))
+            final_sigmap[elem.path] = new_sig
             elem2preds[elem.path] = pred_types
-            progress_cbk(elem, pred_types)
+            if model_inputs:
+                progress_cbk(elem, pred_types, new_sig)
 
         return RolloutPrediction(final_sigmap, elem2preds, elem2inputs, pred_sigmap)
 
@@ -450,9 +490,9 @@ def construct_model_inputs(
     "Return a list of model inputs."
     main_code_string = wrap_main_code(main_mod.code)
     code_segs = main_code_string.split(SpecialNames.TypeMask)
-    n_labels = len(code_segs) - 1
+    n_masks = len(code_segs) - 1
 
-    if n_labels == 0:
+    if n_masks == 0:
         return []
 
     left_tks = None
@@ -463,22 +503,25 @@ def construct_model_inputs(
         right_tks = DefaultTokenizer.encode(right_m.code, add_special_tokens=False)
 
     annots, types = collect_user_annotations(main_mod)
-    assert_eq(
-        len(annots), n_labels, extra_message=lambda: f"main code:\n{main_code_string}"
-    )
 
-    src = tokenized_src_from_segs(
-        file=Path("[construct_model_inputs]"),
-        repo=Path("[construct_model_inputs]"),
-        preamble=preamble,
-        tokenized_preamble=preamble_tkns,
-        code_segs=code_segs,
-        types=types,
-        types_str=[SpecialNames.TypeMask] * n_labels,
-        annots_info=annots,
-        cst_code=main_code_string,
-        left_extra_tks=left_tks,
-        right_extra_tks=right_tks,
-    )
-    chunks, _ = src_to_chunks(src, (0, n_labels), ctx_args)
+    try:
+        src = tokenized_src_from_segs(
+            file=Path("[construct_model_inputs]"),
+            repo=Path("[construct_model_inputs]"),
+            preamble=preamble,
+            tokenized_preamble=preamble_tkns,
+            code_segs=code_segs,
+            types=types,
+            types_str=[SpecialNames.TypeMask] * len(annots),
+            annots_info=annots,
+            cst_code=main_code_string,
+            left_extra_tks=left_tks,
+            right_extra_tks=right_tks,
+        )
+    except:
+        print(f"{n_masks}, {types=}, {annots=}")
+        print("============ Main code string =========")
+        print(main_code_string)
+        raise
+    chunks, _ = src_to_chunks(src, (0, n_masks), ctx_args)
     return chunks

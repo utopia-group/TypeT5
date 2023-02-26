@@ -252,6 +252,13 @@ class VariableSignature:
         else:
             return f"VarSig({content})"
 
+    def __str__(self) -> str:
+        return (
+            "MISSING"
+            if self.annot is None
+            else show_expr(self.annot.annotation, quoted=False)
+        )
+
     def n_annotated(self) -> int:
         return int(self.annot is not None)
 
@@ -519,7 +526,7 @@ class PythonProject:
         return p
 
     @staticmethod
-    def from_root(
+    def parse_from_root(
         root: Path,
         discard_bad_files: bool = False,
         file_filter: Callable[[Path], bool] = lambda p: True,

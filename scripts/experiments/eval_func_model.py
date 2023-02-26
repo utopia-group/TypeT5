@@ -69,7 +69,7 @@ print(colored(f"Use GPU: {gpu_id}", "green"))
 # %%
 
 # load model
-model = ModelWrapper.from_pretrained(get_model_dir() / model_name)
+model = ModelWrapper.load(get_model_dir() / model_name)
 device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
 model.to(device)
 print(f"Model loaded:", model_name)

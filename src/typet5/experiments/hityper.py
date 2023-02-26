@@ -38,7 +38,9 @@ def eval_hityper_on_repos(
         max_workers=max_workers,
     )
 
-    projects = [PythonProject.from_root(r, discard_bad_files=True) for r in repo_roots]
+    projects = [
+        PythonProject.parse_from_root(r, discard_bad_files=True) for r in repo_roots
+    ]
 
     label_signatures: dict[str, SignatureMap] = {
         project.name: {e.path: e.get_signature() for e in project.all_elems()}

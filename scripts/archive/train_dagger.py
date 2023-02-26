@@ -53,6 +53,7 @@ tk_dataset = load_tokenized_srcsets(
 
 
 import torch
+
 from typet5.dagger import DAggerModel
 
 # %%
@@ -88,7 +89,6 @@ import wandb
 # %%
 # train the model
 from typet5.dagger import DAggerArgs
-
 from typet5.utils import run_long_task
 
 ckpt_dir = datadir / f"checkpoints/running/{model_name}"
@@ -122,7 +122,7 @@ with run_long_task("DAgger training"):
         save_path = datadir / f"checkpoints/{save_tpye}/{model_name}"
         print(colored(f"Saving trained model to: {save_path}", "blue"))
         shutil.rmtree(save_path, ignore_errors=True)
-        wrapper.save_pretrained(save_path)
+        wrapper.save(save_path)
 
 # %%
 # post-train full evaluation
@@ -169,7 +169,7 @@ with run_long_task("DAgger evaluating (valid set)"):
         print(colored(f"Evaluating model checkpoint: {model_path}", "blue"))
         m = not_none(re.match("step=(.+)", model_path.name)).groups()[0]
         step = int(m)
-        wrapper = ModelWrapper.from_pretrained(model_path)
+        wrapper = ModelWrapper.load(model_path)
         device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
         wrapper.to(device)
         dmodel = DAggerModel(wrapper)
