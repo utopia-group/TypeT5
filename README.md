@@ -1,5 +1,7 @@
 # TypeT5: Seq2seq Type Inference using Static Analysis
 
+<img src="data/TypeT5-Workflow.png" width="600" alt="TypeT5 Workflow">
+
 This repo contains the source code for the paper [TypeT5: Seq2seq Type Inference using Static Analysis](https://openreview.net/forum?id=4TyNEhI2GdN&noteId=EX_-kP9xah).
 
 ## Installation
