@@ -9,7 +9,7 @@ This repo contains the source code for the paper [TypeT5: Seq2seq Type Inference
 This project uses [pipenv](https://pipenv.pypa.io/en/latest/) to manage the package dependencies. Pipenv tracks the exact package versions and manages the (project-specific) virtual environment for you. To install all dependencies, make sure you have pipenv and Python 3.10 installed, then, at the project root, run the following two commands:
 ```bash
 pipenv --python <path-to-your-python-3.10>  # create a new environment for this project
-pipenv sync  # install all specificed dependencies
+pipenv sync --dev # install all specificed dependencies
 ```
 
 To add new dependences into the virtual environment, you can either add them via `pipenv install ..` (using `pipenv`) or `pipenv run pip install ..` (using `pip` from within the virtual environment). If your pytorch installation is not working properly, you might need to install it via the `pip` approach rather than `pipenv`. If you are not using pipenv, make sure to add the environment variables in `.env` to your environment when you run the scripts for the parser to work properly.
