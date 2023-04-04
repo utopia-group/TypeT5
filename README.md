@@ -12,15 +12,20 @@ pipenv --python <path-to-your-python-3.10>  # create a new environment for this 
 pipenv sync --dev # install all specificed dependencies
 ```
 
-To add new dependences into the virtual environment, you can either add them via `pipenv install ..` (using `pipenv`) or `pipenv run pip install ..` (using `pip` from within the virtual environment). If your pytorch installation is not working properly, you might need to install it via the `pip` approach rather than `pipenv`. If you are not using pipenv, make sure to add the environment variables in `.env` to your environment when you run the scripts for the parser to work properly.
+More about pipenv:
+- To add new dependences into the virtual environment, you can either add them via `pipenv install ..` (using `pipenv`) or `pipenv run pip install ..` (using `pip` from within the virtual environment). 
+- If your pytorch installation is not working properly, you might need to reinstall it via the `pipenv run pip install` approach rather than `pipenv install`. 
+- All `.py` scripts below can be run via `pipenv run python <script-name.py>`. For `.ipynb` notebooks, make sure you select the pipenv environment as the kernel. You can run all unit tests by running `pipenv run pytest` at the project root.
 
-All `.py` scripts below can be run via `pipenv run python <script-name.py>`. For `.ipynb` notebooks, make sure you select the pipenv environment as the kernel. You can run all unit tests by running `pipenv run pytest` at the project root.
+If you are not using pipenv:    
+- Make sure to add the environment variables in `.env` to your shell environment when you run the scripts (needed by the parsing library).
+- We also provided a [requirements.txt](requirements.txt) file for you to install the dependencies via `pip install -r requirements.txt`.
+
 
 ## Using the trained model
 The notebook [scripts/run_typet5.ipynb](scripts/run_typet5.ipynb) shows you how to download the TypeT5 model from Huggingface and then use it to make type predictions for a specified codebase.
 
 ## Training a New Model
-
 
 
 Dataset
