@@ -13,11 +13,11 @@ pipenv sync --dev # install all specificed dependencies
 ```
 
 More about pipenv:
-- To add new dependences into the virtual environment, you can either add them via `pipenv install ..` (using `pipenv`) or `pipenv run pip install ..` (using `pip` from within the virtual environment). 
-- If your pytorch installation is not working properly, you might need to reinstall it via the `pipenv run pip install` approach rather than `pipenv install`. 
+- To add new dependences into the virtual environment, you can either add them via `pipenv install ..` (using `pipenv`) or `pipenv run pip install ..` (using `pip` from within the virtual environment).
+- If your pytorch installation is not working properly, you might need to reinstall it via the `pipenv run pip install` approach rather than `pipenv install`.
 - All `.py` scripts below can be run via `pipenv run python <script-name.py>`. For `.ipynb` notebooks, make sure you select the pipenv environment as the kernel. You can run all unit tests by running `pipenv run pytest` at the project root.
 
-If you are not using pipenv:    
+If you are not using pipenv:
 - Make sure to add the environment variables in the [.env](.env) file to your shell environment when you run the scripts (needed by the parsing library).
 - We also provided a [requirements.txt](requirements.txt) file for you to install the dependencies via `pip install -r requirements.txt`.
 
@@ -27,16 +27,9 @@ The notebook [scripts/run_typet5.ipynb](scripts/run_typet5.ipynb) shows you how 
 
 ## Training a New Model
 
-
-Dataset
-- [scripts/collect_dataset.ipynb](scripts/collect_dataset.ipynb) downloads and preprocesses the BetterTypes4Py dataset used in our paper.
-
-- [scripts/analyze_dataset.ipynb](scripts/analyze_dataset.ipynb) computes basic dataset statistics.
-
-- The exact list of repos we used for the experiments in paper can be loaded from `data/repos_split.pkl` using `pickle.load`.
-
-Training script
-- Run [scripts/train_model.py](scripts/train_model.py) to train a new TypeT5 model. Training takes about 11 hours on a single Quadro RTX 8000 GPU with 48GB memory.
+- First, run the notebook [scripts/collect_dataset.ipynb](scripts/collect_dataset.ipynb) to download and split the BetterTypes4Py dataset used in our paper.
+    - The exact list of repos we used for the experiments in paper can be loaded from `data/repos_split.pkl` using `pickle.load`.
+- Then, run [scripts/train_model.py](scripts/train_model.py) to train a new TypeT5 model. Training takes about 11 hours on a single Quadro RTX 8000 GPU with 48GB memory.
 
 
 ## Development

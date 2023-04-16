@@ -27,6 +27,9 @@ recreate_dataset = False  # whether to recreate the tokenized dataset if found
 
 config = TypeT5Configs.Default  # which model configuration to use
 
+# %%
+# -----------------------------------------------------------
+
 
 TypeCheckSettings.temp_path = f"GPU-{gpu_id}"
 print(colored(f"Use GPU: {gpu_id}", "green"))
