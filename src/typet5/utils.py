@@ -28,6 +28,7 @@ from typing import (
     TypeVar,
     cast,
 )
+import warnings
 
 import ipywidgets as widgets
 import libcst as cst
@@ -57,7 +58,13 @@ def get_config_dict() -> dict:
     if (path := proj_root() / "config" / "typet5.json").exists():
         return json.loads(read_file(path))
     else:
-        return {}
+        fefault = {
+            "data_root": str(proj_root()),
+            "datasets_root": str(proj_root()),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(fefault))
+        return fefault
 
 
 def get_config(key: str) -> Optional[str]:
@@ -439,7 +446,7 @@ def pushover_alert(
     conn = http.client.HTTPSConnection("api.pushover.net:443")
     config_file = proj_root() / "config/pushover.json"
     if not config_file.exists():
-        logging.warning(
+        warnings.warn(
             f"No pushover config file found at {config_file}. Not able to push message."
         )
     if print_to_console or not config_file.exists():
