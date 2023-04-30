@@ -4,6 +4,16 @@
 
 This repo contains the source code for the paper [TypeT5: Seq2seq Type Inference using Static Analysis](https://openreview.net/forum?id=4TyNEhI2GdN&noteId=EX_-kP9xah).
 
+```
+@inproceedings{Wei2023TypeT5,
+    title={TypeT5: Seq2seq Type Inference using Static Analysis},
+    author={Jiayi Wei and Greg Durrett and Isil Dillig},
+    booktitle={International Conference on Learning Representations},
+    year={2023},
+    url={https://openreview.net/forum?id=4TyNEhI2GdN}
+}
+```
+
 ## Installation
 
 This project uses [pipenv](https://pipenv.pypa.io/en/latest/) to manage the package dependencies. Pipenv tracks the exact package versions and manages the (project-specific) virtual environment for you. To install all dependencies, make sure you have pipenv and Python 3.10 installed, then, at the project root, run the following two commands:
