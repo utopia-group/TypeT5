@@ -38,7 +38,7 @@ The notebook [scripts/run_typet5.ipynb](scripts/run_typet5.ipynb) shows you how 
 ## Training a New Model
 
 - First, run the notebook [scripts/collect_dataset.ipynb](scripts/collect_dataset.ipynb) to download and split the BetterTypes4Py dataset used in our paper.
-    - The exact list of repos we used for the experiments in paper can be loaded from `data/repos_split.pkl` using `pickle.load`.
+    - The exact list of repos we used for the experiments in paper can be loaded from `data/repos_split.pkl` using `pickle.load`. They can also be downloaded via this [Google Drive link](https://drive.google.com/drive/folders/1lXKtwi7AOI-w4ESgMi7J5YAHRGP-JhG5?usp=sharing).
 - Then, run [scripts/train_model.py](scripts/train_model.py) to train a new TypeT5 model. Training takes about 11 hours on a single Quadro RTX 8000 GPU with 48GB memory.
 
 
